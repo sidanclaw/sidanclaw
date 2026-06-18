@@ -1,0 +1,87 @@
+# Build the UNSIGNED Windows desktop installer on a real Windows runner, so we can
+# ship a Windows beta WITHOUT owning a Windows machine (Wine cross-builds on macOS
+# are flaky). Produces apps/app-desktop/release/sidanclaw.exe and uploads it as a
+# build artifact. Download it, then publish from anywhere with:
+#
+#   ./scripts/publish-windows.sh --allow-unsigned --exe <downloaded>/sidanclaw.exe
+#
+# UNSIGNED, so it needs NO secrets — SmartScreen will warn users, which is fine for
+# a click-through beta. Signing (Azure Trusted Signing) is wired later for public
+# GA; see docs/plans/windows-desktop-rollout.md and
+# docs/architecture/features/app-desktop.md -> "Build, sign, ship (Windows)".
+#
+# Triggers: a push to main that touches apps/app-desktop (a CI signal that the
+# Windows build still works + a fresh artifact ready to grab), plus manual
+# workflow_dispatch. It only BUILDS and uploads an artifact — publishing to the
+# public download CTA stays the deliberate `publish-windows.sh --from-ci` step,
+# NEVER automatic (we don't ship unsigned, untested installers on every merge).
+name: Desktop Windows beta
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # Only when the desktop app (or this workflow) changes — a push that touches
+    # only api/web/core shouldn't spend a Windows runner. The negations skip
+    # changes that can't affect the binary: docs and tests (this job packages, it
+    # doesn't run tests). A source/config change still triggers.
+    paths:
+      - "apps/app-desktop/**"
+      - "!apps/app-desktop/**/*.md"
+      - "!apps/app-desktop/**/__tests__/**"
+      - ".github/workflows/desktop-windows-beta.yml"
+
+# Don't stack Windows builds: a newer qualifying push cancels an in-flight one.
+concurrency:
+  group: desktop-windows-beta-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm before setup-node so the npm cache can resolve the pnpm store. Version
+      # comes from the root package.json `packageManager` field (pnpm@10.33.0).
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `package:win` = build (tsc + cross-platform asset copy) + electron-builder
+      # --win --x64 --publish never. electron-builder auto-generates the .ico from
+      # build/icon.png and (with no signing config) emits an UNSIGNED NSIS installer.
+      # `--publish never` is required: electron-builder auto-publishes when it detects
+      # CI, and the `publish:` block in electron-builder.yml then makes it demand
+      # GH_TOKEN (build fails with "GitHub Personal Access Token is not set"). `never`
+      # still writes latest.yml + the blockmap next to the exe (so the artifact below
+      # carries the update feed) but skips the upload - publishing stays the deliberate
+      # publish-windows.sh step.
+      - name: Build Windows installer (unsigned, x64)
+        run: pnpm --filter @sidanclaw/app-desktop package:win
+
+      # The artifact carries the installer PLUS the electron-updater feed files
+      # (latest.yml + the blockmap, emitted next to the exe because the publish
+      # config is present). publish-windows.sh --from-ci uploads all three so
+      # existing Windows installs can see + differentially download the release.
+      # upload-artifact flattens to the common ancestor (release/), so the
+      # script finds them next to the exe.
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidanclaw-windows-unsigned
+          path: |
+            apps/app-desktop/release/sidanclaw.exe
+            apps/app-desktop/release/latest.yml
+            apps/app-desktop/release/sidanclaw.exe.blockmap
+          if-no-files-found: error
+          retention-days: 14

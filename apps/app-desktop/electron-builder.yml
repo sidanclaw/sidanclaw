@@ -86,17 +86,16 @@ nsis:
   allowToChangeInstallationDirectory: true
 # Where `electron-builder --publish always` uploads artifacts. The marketing CTA
 # links the "latest" GitHub Release asset, which must be public-readable for an
-# unauthenticated download. Because GitHub release assets inherit the repo's
-# visibility, this points at a DEDICATED PUBLIC releases repo (`sidanclaw-desktop`)
-# so the private monorepo source stays private. electron-builder uploads to a
-# *draft* release (assets land hidden); `scripts/package-desktop.sh --publish`
-# then un-drafts it + marks it latest so `releases/latest/download` resolves.
-# Needs GH_TOKEN with contents:write on the releases repo. See "Distribution &
-# download" in the spec.
+# unauthenticated download. The desktop source is open (this app lives in the
+# public open-core repo `sidanclaw/sidanclaw`), so releases + the auto-update feed
+# publish to that same public repo. electron-builder uploads to a *draft* release
+# (assets land hidden); `scripts/package-desktop.sh --publish` then un-drafts it +
+# marks it latest so `releases/latest/download` resolves. Needs GH_TOKEN with
+# contents:write on the repo. See "Distribution & download" in the spec.
 publish:
   provider: github
   owner: sidanclaw
-  repo: sidanclaw-desktop
+  repo: sidanclaw
 protocols:
   - name: sidanclaw
     schemes:

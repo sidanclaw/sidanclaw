@@ -31,7 +31,7 @@ Project-wide rules in the root `CLAUDE.md`; the feature spec is
   sign-in lasts while the app runs at least once per 30 days. Spec:
   `docs/architecture/features/app-desktop.md` → "Session lifetime".
 - **Updates itself** (packaged builds): electron-updater against the
-  `sidanclaw-desktop` GitHub release feed — background download, one update
+  `sidanclaw/sidanclaw` GitHub release feed — background download, one update
   item in the app menu + tray ("Check for Updates…" → "Restart to Update"),
   install on quit. Product UI updates need no binary change (thin shell); this
   is for the shell itself. Decisions live in the pure `auto-update.ts`. Spec:

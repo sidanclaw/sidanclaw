@@ -1,0 +1,52 @@
+# Build + test the open core on every PR and on pushes to main/develop, so
+# contributor changes are validated before they land. Mirrors the local gate:
+# install -> typecheck -> build -> unit tests -> smoke. Integration tests
+# (test:integration) are intentionally skipped here -- they require provider API
+# keys and self-skip when the key env var is absent, so they add nothing on a
+# secret-less CI runner.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+# A newer push to the same ref cancels an in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm before setup-node so the npm cache can resolve the pnpm store. The
+      # version comes from package.json `packageManager` (pnpm@10.33.0).
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Unit tests
+        run: pnpm test
+
+      # One end-to-end queryLoop turn against an in-memory mock provider -- no DB,
+      # no network, no secrets required.
+      - name: Smoke
+        run: pnpm smoke
