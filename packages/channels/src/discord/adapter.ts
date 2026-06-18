@@ -1,6 +1,6 @@
-import type { ChannelAdapter, IncomingFile, IncomingMessage, OutgoingMessage } from '../types.js'
+import type { ChannelAdapter, IncomingFile, IncomingMessage, OutgoingAction, OutgoingMessage } from '../types.js'
 import { chunkText } from '../chunking.js'
-import { createDiscordApi, type DiscordAllowedMentions } from './api.js'
+import { createDiscordApi, type DiscordActionRow, type DiscordAllowedMentions, type DiscordButton } from './api.js'
 import { markdownToDiscord } from './markdown.js'
 
 // Discord's content limit is 2000 characters for bot messages (Nitro's 4000 is
@@ -82,6 +82,39 @@ function snowflakeToTimestamp(id: string): number {
   } catch {
     return Date.now()
   }
+}
+
+// ── Outgoing actions → Discord button components ───────────────
+
+// Visual style per callback action id (semantics live in the custom_id, not the
+// colour). allow → success (green), deny → danger (red), always_allow → primary,
+// else secondary (grey). Unknown ids fall back to secondary.
+const BUTTON_STYLE_BY_ID: Record<string, 1 | 2 | 3 | 4> = {
+  allow: 3, deny: 4, always: 1, always_allow: 1, never: 2, always_deny: 2,
+}
+
+// Discord limits: ≤5 buttons per action row, ≤5 action rows per message.
+const MAX_BUTTONS_PER_ROW = 5
+const MAX_ACTION_ROWS = 5
+
+/**
+ * Translate the channel-agnostic `OutgoingAction[]` into Discord action rows.
+ * A `callback` action becomes a button echoing `custom_id` (the connector
+ * relays the click back); a `web_app` action becomes a link button. Returns
+ * `undefined` when there are no actions so the message body omits `components`.
+ */
+function buildComponents(actions: OutgoingAction[]): DiscordActionRow[] | undefined {
+  if (actions.length === 0) return undefined
+  const buttons: DiscordButton[] = actions.map((a) =>
+    a.kind === 'web_app'
+      ? { type: 2, style: 5, label: a.label, url: a.url }
+      : { type: 2, style: BUTTON_STYLE_BY_ID[a.id] ?? 2, label: a.label, custom_id: a.data },
+  )
+  const rows: DiscordActionRow[] = []
+  for (let i = 0; i < buttons.length; i += MAX_BUTTONS_PER_ROW) {
+    rows.push({ type: 1, components: buttons.slice(i, i + MAX_BUTTONS_PER_ROW) })
+  }
+  return rows.slice(0, MAX_ACTION_ROWS)
 }
 
 // ── Attachment → IncomingMessage media mapping ─────────────────
@@ -292,6 +325,13 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
       if (!response.text.trim()) return ''
       const text = response.format === 'markdown' ? markdownToDiscord(response.text) : response.text
       const chunks = chunkText(text, DISCORD_MAX_MESSAGE_LENGTH)
+      // Buttons attach to the last non-empty chunk so they sit beneath the full
+      // message rather than mid-way through a multi-part reply.
+      const components = response.actions ? buildComponents(response.actions) : undefined
+      let lastNonEmptyIndex = -1
+      for (let i = chunks.length - 1; i >= 0; i--) {
+        if (chunks[i].trim()) { lastNonEmptyIndex = i; break }
+      }
       let lastId = ''
 
       for (let i = 0; i < chunks.length; i++) {
@@ -306,6 +346,7 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
           content: chunk,
           message_reference: reference,
           allowed_mentions: allowedMentions,
+          ...(components && i === lastNonEmptyIndex ? { components } : {}),
         })
         lastId = result.id
       }
@@ -316,8 +357,11 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
     async editMessage(channelId: string, messageId: string, response: OutgoingMessage): Promise<void> {
       const raw = response.format === 'markdown' ? markdownToDiscord(response.text) : response.text
       const content = raw.slice(0, DISCORD_MAX_MESSAGE_LENGTH)
+      // When `actions` is supplied, replace the message's buttons (an empty array
+      // clears them); when omitted, leave existing components untouched.
+      const components = response.actions ? (buildComponents(response.actions) ?? []) : undefined
       try {
-        await api.editMessage(channelId, messageId, { content })
+        await api.editMessage(channelId, messageId, { content, ...(components ? { components } : {}) })
       } catch {
         // Edit failed (message too old, deleted, …) — fall back to a fresh send.
         await api.createMessage(channelId, { content, allowed_mentions: allowedMentions }).catch(() => {})
