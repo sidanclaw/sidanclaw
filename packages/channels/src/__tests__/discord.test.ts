@@ -1,6 +1,7 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { generateKeyPairSync, sign as cryptoSign, type KeyObject } from 'node:crypto'
 import { createDiscordAdapter } from '../discord/adapter.js'
+import { respondToInteraction } from '../discord/api.js'
 import { verifyDiscordSignature, isPingInteraction } from '../discord/verify.js'
 import { markdownToDiscord } from '../discord/markdown.js'
 
@@ -300,5 +301,106 @@ describe('[COMP:channels/discord] markdownToDiscord', () => {
   it('passes native markdown (bold, italic, links, lists) through unchanged', () => {
     const md = '**bold** *italic* [link](https://x.com)\n- one\n- two'
     expect(markdownToDiscord(md)).toBe(md)
+  })
+})
+
+// ── Confirmation buttons: outbound components ──────────────────
+
+type CapturedCall = { url: string; init: RequestInit }
+
+function mockFetch(captured: CapturedCall[], status = 200, json: unknown = { id: 'msg-1', channel_id: 'C1' }) {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+    captured.push({ url: String(url), init: init ?? {} })
+    return status === 204
+      ? new Response(null, { status: 204 })
+      : new Response(JSON.stringify(json), { status, headers: { 'content-type': 'application/json' } })
+  })
+}
+
+describe('[COMP:channels/discord] sendMessage confirmation buttons', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('renders OutgoingAction[] as one action row of custom_id buttons', async () => {
+    const calls: CapturedCall[] = []
+    mockFetch(calls)
+    const adapter = createDiscordAdapter({ token: 't' })
+    await adapter.sendMessage('C1', {
+      text: 'Allow this action?',
+      actions: [
+        { id: 'allow', label: 'Allow', data: 'mcp_confirm:tc1:allow' },
+        { id: 'deny', label: 'Deny', data: 'mcp_confirm:tc1:deny' },
+        { id: 'always', label: 'Always Allow', data: 'mcp_confirm:tc1:always_allow' },
+        { id: 'never', label: 'Always Deny', data: 'mcp_confirm:tc1:always_deny' },
+      ],
+    })
+    expect(calls).toHaveLength(1)
+    const body = JSON.parse(String(calls[0].init.body))
+    expect(body.components).toEqual([
+      {
+        type: 1,
+        components: [
+          { type: 2, style: 3, label: 'Allow', custom_id: 'mcp_confirm:tc1:allow' },
+          { type: 2, style: 4, label: 'Deny', custom_id: 'mcp_confirm:tc1:deny' },
+          { type: 2, style: 1, label: 'Always Allow', custom_id: 'mcp_confirm:tc1:always_allow' },
+          { type: 2, style: 2, label: 'Always Deny', custom_id: 'mcp_confirm:tc1:always_deny' },
+        ],
+      },
+    ])
+  })
+
+  it('omits components when no actions are present', async () => {
+    const calls: CapturedCall[] = []
+    mockFetch(calls)
+    const adapter = createDiscordAdapter({ token: 't' })
+    await adapter.sendMessage('C1', { text: 'plain reply' })
+    const body = JSON.parse(String(calls[0].init.body))
+    expect(body.components).toBeUndefined()
+  })
+
+  it('maps a web_app action to a Discord link button', async () => {
+    const calls: CapturedCall[] = []
+    mockFetch(calls)
+    const adapter = createDiscordAdapter({ token: 't' })
+    await adapter.sendMessage('C1', {
+      text: 'open',
+      actions: [{ kind: 'web_app', label: 'Open', url: 'https://x.test' }],
+    })
+    const body = JSON.parse(String(calls[0].init.body))
+    expect(body.components[0].components[0]).toEqual({ type: 2, style: 5, label: 'Open', url: 'https://x.test' })
+  })
+
+  it('clears buttons on editMessage when actions is an empty array', async () => {
+    const calls: CapturedCall[] = []
+    mockFetch(calls)
+    const adapter = createDiscordAdapter({ token: 't' })
+    await adapter.editMessage('C1', 'M1', { text: 'Tool action: Allowed', actions: [] })
+    const body = JSON.parse(String(calls[0].init.body))
+    expect(body.components).toEqual([])
+  })
+})
+
+// ── Confirmation buttons: interaction ack ──────────────────────
+
+describe('[COMP:channels/discord] respondToInteraction', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('POSTs a type-7 callback to the interaction endpoint with no bot auth', async () => {
+    const calls: CapturedCall[] = []
+    mockFetch(calls, 204)
+    await respondToInteraction('IID', 'ITOKEN', {
+      type: 7,
+      data: { content: 'Tool action: Allowed', components: [] },
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('https://discord.com/api/v10/interactions/IID/ITOKEN/callback')
+    expect((calls[0].init.headers as Record<string, string>).Authorization).toBeUndefined()
+    const body = JSON.parse(String(calls[0].init.body))
+    expect(body.type).toBe(7)
+    expect(body.data.components).toEqual([])
+  })
+
+  it('throws on a non-2xx callback (e.g. already acknowledged)', async () => {
+    mockFetch([], 400, { message: 'already acked', code: 40060 })
+    await expect(respondToInteraction('IID', 'ITOKEN', { type: 6 })).rejects.toThrow()
   })
 })
