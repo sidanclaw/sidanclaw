@@ -43,7 +43,16 @@ export function loadConnectorRegistry(): ConnectorEntry[] {
     console.log(`[registry] Loaded ${community.length} community connector(s)`)
     return [...official, ...community]
   } catch (err) {
-    console.warn('[registry] Failed to load community connectors:', (err as Error).message)
+    const e = err as NodeJS.ErrnoException
+    // A clean open-source clone has no sidanclaw-tools submodule, so the
+    // connectors dir is simply absent (ENOENT). That is the expected default,
+    // not a fault — populate it with `git submodule update --init sidanclaw-tools`
+    // to load community connectors. Any other error is a real problem worth a warn.
+    if (e.code === 'ENOENT') {
+      console.log('[registry] No community connectors (sidanclaw-tools not present)')
+    } else {
+      console.warn('[registry] Failed to load community connectors:', e.message)
+    }
     return official
   }
 }

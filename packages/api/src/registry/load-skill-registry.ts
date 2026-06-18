@@ -32,7 +32,16 @@ export function loadSkillRegistry(): SkillContent[] {
     console.log(`[registry] Loaded ${skills.length} community skill(s)`)
     return skills
   } catch (err) {
-    console.warn('[registry] Failed to load community skills:', (err as Error).message)
+    const e = err as NodeJS.ErrnoException
+    // Expected in a clean open-source clone: community skills live in the
+    // optional sidanclaw-tools submodule, so its skills dir is absent (ENOENT).
+    // Populate it with `git submodule update --init sidanclaw-tools`. Any other
+    // error is a real problem worth a warn.
+    if (e.code === 'ENOENT') {
+      console.log('[registry] No community skills (sidanclaw-tools not present)')
+    } else {
+      console.warn('[registry] Failed to load community skills:', e.message)
+    }
     return []
   }
 }

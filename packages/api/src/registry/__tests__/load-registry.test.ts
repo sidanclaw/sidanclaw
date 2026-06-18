@@ -73,11 +73,26 @@ describe('[COMP:api/connector-registry] loadConnectorRegistry', () => {
     expect(registry.length).toBe(OFFICIAL_CONNECTORS.length)
   })
 
-  it('falls back to the official list when the connectors dir cannot be read', () => {
+  it('falls back to official-only and stays quiet when sidanclaw-tools is absent (ENOENT)', () => {
+    const warn = vi.spyOn(console, 'warn')
     mockReaddir.mockImplementationOnce(() => {
-      throw new Error('ENOENT')
+      const err = new Error('no such file') as NodeJS.ErrnoException
+      err.code = 'ENOENT'
+      throw err
     })
     expect(loadConnectorRegistry().length).toBe(OFFICIAL_CONNECTORS.length)
+    // A missing community registry is the expected open-source default, not a
+    // fault — it must not warn (only an info log).
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the official list and warns on a non-ENOENT read failure', () => {
+    const warn = vi.spyOn(console, 'warn')
+    mockReaddir.mockImplementationOnce(() => {
+      throw new Error('EACCES: permission denied')
+    })
+    expect(loadConnectorRegistry().length).toBe(OFFICIAL_CONNECTORS.length)
+    expect(warn).toHaveBeenCalled()
   })
 })
 
