@@ -427,6 +427,14 @@ export type CreateDraftInput = {
   originPrompt?: string | null
   /** Defaults to 30 days. */
   autoPruneDays?: number
+  /**
+   * Stable cross-run identity (migration 279). Set by the workflow executor's
+   * `page.reuse === 'per-workflow'` path to `<workflowId>:<stepId>` so a
+   * recurring workflow's anchor page is found-and-reused instead of minting an
+   * empty duplicate each fire. Unique per `(workspace_id, anchor_key)`.
+   * Omitted / null on every non-workflow path.
+   */
+  anchorKey?: string | null
 }
 
 // ── Store interface ───────────────────────────────────────────────────
@@ -491,6 +499,19 @@ export type SavedViewStore = {
    * the chat tool, or `emptyPage` from the route layer).
    */
   createDraft(params: CreateDraftInput): Promise<SavedView>
+
+  /**
+   * Resolve a page id by its stable cross-run `anchor_key` (migration 279),
+   * scoped to a workspace. Backs the workflow executor's
+   * `page.reuse === 'per-workflow'` find-or-create: a hit means the recurring
+   * anchor page already exists and should be reused. RLS-scoped by `userId`
+   * (a workspace member). Returns `null` when no page carries the key.
+   */
+  findIdByAnchorKey(
+    userId: string,
+    workspaceId: string,
+    anchorKey: string,
+  ): Promise<string | null>
 
   /**
    * Auto-title commit (doc pages, migration 218). Set `name = title` +

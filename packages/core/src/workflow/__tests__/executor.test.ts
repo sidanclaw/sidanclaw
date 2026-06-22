@@ -112,6 +112,7 @@ function makeFakeStores() {
         vars: {},
         currentStepId: null,
         error: null,
+        outcome: null,
         startedAt: now,
         finishedAt: null,
         lastActiveAt: now,
@@ -170,6 +171,20 @@ function makeFakeStores() {
       return filtered
         .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())
         .slice(0, opts?.limit ?? 50)
+    },
+    async getLatestOutcomeForWorkflowSystem(workflowId, excludeRunId) {
+      const terminal = Array.from(runs.values())
+        .filter(
+          (r) =>
+            r.workflowId === workflowId &&
+            r.id !== excludeRunId &&
+            (r.status === 'completed' || r.status === 'failed' || r.status === 'timeout'),
+        )
+        .sort(
+          (a, b) =>
+            (b.finishedAt ?? b.startedAt).getTime() - (a.finishedAt ?? a.startedAt).getTime(),
+        )
+      return terminal[0]?.outcome ?? null
     },
   }
 
@@ -1560,5 +1575,272 @@ describe('[COMP:workflow/executor] dead-anchor auto-disable', () => {
 
     await runTimes(deps, workflow.id, 4)
     expect(stores.workflows.get(workflow.id)?.enabled).toBe(true)
+  })
+})
+
+describe('[COMP:workflow/executor] cross-run state ({{lastRun}}) + anchor reuse', () => {
+  const emitTool = (name = 'emit'): Tool =>
+    buildTool({
+      name,
+      description: 'returns its `value` argument as output',
+      inputSchema: z.object({ value: z.unknown() }).passthrough(),
+      async execute(input) {
+        return { data: (input as { value: unknown }).value }
+      },
+    })
+
+  it('writes a terminal outcome: engine logs + summary, author state/todo/blockers', async () => {
+    const stores = makeFakeStores()
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ responseText: 'all done' }),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map([['emit', emitTool()]]),
+    }
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 'st',
+      steps: [
+        { id: 'st', type: 'tool_call', toolName: 'emit', arguments: { value: { cursor: 7 } }, storeOutputAs: 'state', nextStepId: 'td' },
+        { id: 'td', type: 'tool_call', toolName: 'emit', arguments: { value: ['ship docs'] }, storeOutputAs: 'todo', nextStepId: 'bl' },
+        { id: 'bl', type: 'tool_call', toolName: 'emit', arguments: { value: ['waiting on legal'] }, storeOutputAs: 'blockers', nextStepId: 'sum' },
+        { id: 'sum', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'summarize', storeOutputAs: 'summary' },
+      ],
+    })
+    const outcome = await advanceWorkflowRun(deps, run.id)
+    expect(outcome.kind).toBe('completed')
+
+    const persisted = stores.runs.get(run.id)?.outcome
+    expect(persisted).toBeTruthy()
+    expect(persisted?.status).toBe('completed')
+    expect(persisted?.summary).toBe('all done')
+    expect(persisted?.state).toEqual({ cursor: 7 })
+    expect(persisted?.todo).toEqual(['ship docs'])
+    expect(persisted?.blockers).toEqual(['waiting on legal'])
+    expect(persisted?.logs.map((l) => `${l.stepId}:${l.status}`)).toEqual([
+      'st:completed', 'td:completed', 'bl:completed', 'sum:completed',
+    ])
+  })
+
+  it('records a failed run: terminal error appended to outcome.blockers + a failed log entry', async () => {
+    const stores = makeFakeStores()
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ fail: 'model refused' }),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+    }
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'go' }],
+    })
+    const outcome = await advanceWorkflowRun(deps, run.id)
+    expect(outcome.kind).toBe('failed')
+    const persisted = stores.runs.get(run.id)?.outcome
+    expect(persisted?.status).toBe('failed')
+    expect(persisted?.blockers.length).toBeGreaterThan(0)
+    expect(persisted?.logs).toHaveLength(1)
+    expect(persisted?.logs[0]).toMatchObject({ stepId: 's1', status: 'failed' })
+  })
+
+  it('surfaces the prior terminal run as {{lastRun.X}} on the next run', async () => {
+    const stores = makeFakeStores()
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ responseText: 'second-output' }),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+    }
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'prior summary was: {{lastRun.summary}}', storeOutputAs: 'summary' }],
+    }
+    // First run — no prior terminal run, so {{lastRun.summary}} → ''.
+    const { workflow, run: run1 } = await seedWorkflowAndRun(deps, def)
+    await advanceWorkflowRun(deps, run1.id)
+    expect(stores.stepRuns.find((s) => s.runId === run1.id)?.input.prompt).toBe('prior summary was: ')
+    expect(stores.runs.get(run1.id)?.outcome?.summary).toBe('second-output')
+
+    // Second run of the SAME workflow reads run1's outcome.
+    const run2 = await deps.runStore.createRun({
+      workflowId: workflow.id, workspaceId: WORKSPACE_ID, triggeredBy: USER_ID, triggerKind: 'manual', input: {},
+    })
+    await advanceWorkflowRun(deps, run2.id)
+    expect(stores.stepRuns.find((s) => s.runId === run2.id)?.input.prompt).toBe('prior summary was: second-output')
+  })
+
+  it('page.reuse "per-workflow" find-or-creates ONE page across runs via a stable anchorKey', async () => {
+    const stores = makeFakeStores()
+    const createCalls: Array<{ anchorKey?: string }> = []
+    const byKey = new Map<string, string>()
+    let n = 0
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport(),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      createAnchorPage: async (params) => {
+        createCalls.push(params)
+        if (params.anchorKey && byKey.has(params.anchorKey)) return { id: byKey.get(params.anchorKey)! }
+        const id = `00000000-0000-0000-0000-${String(n++).padStart(12, '0')}`
+        if (params.anchorKey) byKey.set(params.anchorKey, id)
+        return { id }
+      },
+    }
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'append to the log', page: { create: true, title: 'Maintenance Log', reuse: 'per-workflow' } }],
+    }
+    const { workflow, run: run1 } = await seedWorkflowAndRun(deps, def)
+    await advanceWorkflowRun(deps, run1.id)
+    const run2 = await deps.runStore.createRun({
+      workflowId: workflow.id, workspaceId: WORKSPACE_ID, triggeredBy: USER_ID, triggerKind: 'manual', input: {},
+    })
+    await advanceWorkflowRun(deps, run2.id)
+
+    expect(createCalls.map((c) => c.anchorKey)).toEqual([`${workflow.id}:s1`, `${workflow.id}:s1`])
+    expect(byKey.size).toBe(1) // one page reused, not a duplicate per run
+  })
+
+  it('page create default (per-run) mints a fresh page each run with no anchorKey', async () => {
+    const stores = makeFakeStores()
+    const createCalls: Array<{ anchorKey?: string }> = []
+    let n = 0
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport(),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      createAnchorPage: async (params) => {
+        createCalls.push(params)
+        return { id: `00000000-0000-0000-0000-${String(n++).padStart(12, '0')}` }
+      },
+    }
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'report', page: { create: true, title: 'Daily Report' } }],
+    }
+    const { workflow, run: run1 } = await seedWorkflowAndRun(deps, def)
+    await advanceWorkflowRun(deps, run1.id)
+    const run2 = await deps.runStore.createRun({
+      workflowId: workflow.id, workspaceId: WORKSPACE_ID, triggeredBy: USER_ID, triggerKind: 'manual', input: {},
+    })
+    await advanceWorkflowRun(deps, run2.id)
+    expect(createCalls).toHaveLength(2)
+    expect(createCalls.every((c) => c.anchorKey === undefined)).toBe(true)
+  })
+
+  it('a branch routes on {{lastRun}} — false on the first run, true once a prior run exists', async () => {
+    const stores = makeFakeStores()
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport(),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map([['echo', emitTool('echo')]]),
+    }
+    const def: WorkflowDefinition = {
+      startStepId: 'decide',
+      steps: [
+        { id: 'decide', type: 'branch', condition: { '==': [{ var: 'lastRun.status' }, 'completed'] }, nextStepIdIfTrue: 'hadPrior', nextStepIdIfFalse: 'firstRun' },
+        { id: 'hadPrior', type: 'tool_call', toolName: 'echo', arguments: {}, nextStepId: null },
+        { id: 'firstRun', type: 'tool_call', toolName: 'echo', arguments: {}, nextStepId: null },
+      ],
+    }
+    const { workflow, run: run1 } = await seedWorkflowAndRun(deps, def)
+    await advanceWorkflowRun(deps, run1.id)
+    expect(stores.stepRuns.filter((s) => s.runId === run1.id).map((s) => s.stepId)).toEqual(['decide', 'firstRun'])
+
+    const run2 = await deps.runStore.createRun({
+      workflowId: workflow.id, workspaceId: WORKSPACE_ID, triggeredBy: USER_ID, triggerKind: 'manual', input: {},
+    })
+    await advanceWorkflowRun(deps, run2.id)
+    expect(stores.stepRuns.filter((s) => s.runId === run2.id).map((s) => s.stepId)).toEqual(['decide', 'hadPrior'])
+  })
+
+  it('outcome blockers/todo accept a plain string var; whitespace-only → []', async () => {
+    const stores = makeFakeStores()
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport(),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map([['emit', emitTool()]]),
+    }
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 'b',
+      steps: [
+        { id: 'b', type: 'tool_call', toolName: 'emit', arguments: { value: 'one blocker' }, storeOutputAs: 'blockers', nextStepId: 't' },
+        { id: 't', type: 'tool_call', toolName: 'emit', arguments: { value: '   ' }, storeOutputAs: 'todo' },
+      ],
+    })
+    await advanceWorkflowRun(deps, run.id)
+    const outcome = stores.runs.get(run.id)?.outcome
+    expect(outcome?.blockers).toEqual(['one blocker'])
+    expect(outcome?.todo).toEqual([])
+  })
+
+  it('outcome state coerces a non-object var to {}', async () => {
+    const stores = makeFakeStores()
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport(),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map([['emit', emitTool()]]),
+    }
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 's',
+      steps: [{ id: 's', type: 'tool_call', toolName: 'emit', arguments: { value: ['not', 'an', 'object'] }, storeOutputAs: 'state' }],
+    })
+    await advanceWorkflowRun(deps, run.id)
+    expect(stores.runs.get(run.id)?.outcome?.state).toEqual({})
+  })
+
+  it('failed-run blockers UNION the author var with the terminal error', async () => {
+    const stores = makeFakeStores()
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ fail: 'model refused' }),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map([['emit', emitTool()]]),
+    }
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 'b',
+      steps: [
+        { id: 'b', type: 'tool_call', toolName: 'emit', arguments: { value: ['author blocker'] }, storeOutputAs: 'blockers', nextStepId: 'go' },
+        { id: 'go', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'go' },
+      ],
+    })
+    const outcome = await advanceWorkflowRun(deps, run.id)
+    expect(outcome.kind).toBe('failed')
+    const blockers = stores.runs.get(run.id)?.outcome?.blockers ?? []
+    expect(blockers).toContain('author blocker')
+    expect(blockers.length).toBeGreaterThanOrEqual(2) // author entry + terminal error
+  })
+
+  it('outcome summary falls back to the last step output and caps at 2000 chars', async () => {
+    const stores = makeFakeStores()
+    const long = 'x'.repeat(2500)
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ responseText: long }),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+    }
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'go' }], // no summary var
+    })
+    await advanceWorkflowRun(deps, run.id)
+    const summary = stores.runs.get(run.id)?.outcome?.summary
+    expect(summary).toBe('x'.repeat(2000))
+    expect(summary?.length).toBe(2000)
   })
 })

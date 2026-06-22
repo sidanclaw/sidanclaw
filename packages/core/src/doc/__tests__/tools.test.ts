@@ -88,6 +88,7 @@ function fakeWorkflowRunStore(): WorkflowRunStore {
     updateStepRun: vi.fn(),
     listStepRuns: vi.fn(),
     listRunsForWorkflow: vi.fn().mockResolvedValue([]),
+    getLatestOutcomeForWorkflowSystem: vi.fn().mockResolvedValue(null),
   }
 }
 
@@ -104,6 +105,7 @@ function fakeSavedViewStore(): SavedViewStore {
     setAutoPruneAt: vi.fn(),
     setAutoTitle: vi.fn(),
     createDraft: vi.fn(),
+    findIdByAnchorKey: vi.fn().mockResolvedValue(null),
     reparent: vi.fn().mockResolvedValue(true),
     reorderSiblings: vi.fn().mockResolvedValue(undefined),
     pruneExpiredDraftsSystem: vi.fn().mockResolvedValue([]),

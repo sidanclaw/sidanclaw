@@ -32,6 +32,7 @@ function fakeSavedViewStore(): Mocked<SavedViewStore> {
     setAutoPruneAt: vi.fn(),
     setAutoTitle: vi.fn(),
     createDraft: vi.fn(),
+    findIdByAnchorKey: vi.fn(),
     reparent: vi.fn(),
     reorderSiblings: vi.fn(),
     pruneExpiredDraftsSystem: vi.fn(),
@@ -76,6 +77,7 @@ function fakeWorkflowRunStore(): Mocked<WorkflowRunStore> {
     updateStepRun: vi.fn(),
     listStepRuns: vi.fn(),
     listRunsForWorkflow: vi.fn().mockResolvedValue([]),
+    getLatestOutcomeForWorkflowSystem: vi.fn().mockResolvedValue(null),
   }
 }
 

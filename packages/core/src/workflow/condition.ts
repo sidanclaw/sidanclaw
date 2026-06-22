@@ -28,11 +28,17 @@ export type ConditionData = {
   prev?: unknown
   vars?: Record<string, unknown>
   input?: Record<string, unknown>
+  /**
+   * The prior terminal run's `WorkflowRunOutcome` (mig 279) — lets a branch
+   * route on `{ var: 'lastRun.status' }` / `lastRun.blockers` etc. Undefined
+   * on the first run (then `var` paths fall back like any missing key).
+   */
+  lastRun?: Record<string, unknown>
 }
 
 /**
  * Evaluate a JSONLogic rule against `data`. The branch step uses
- * `{ prev, vars, input }`; tests can pass any object shape they need.
+ * `{ vars, input, lastRun }`; tests can pass any object shape they need.
  */
 export function evaluate(rule: unknown, data: ConditionData): unknown {
   // Primitives are returned as-is.

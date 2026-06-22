@@ -118,8 +118,10 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
     const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
     expect(sql).toContain("'draft'")
     expect(params[0]).toBe(WORKSPACE_ID)
-    // Last param is the auto_prune_at — should be 30 days from `now`.
-    const when = params[params.length - 1] as Date
+    // auto_prune_at is now the second-to-last param ($12); anchor_key ($13,
+    // null on this non-workflow path) is the trailing one (mig 279).
+    expect(params[params.length - 1]).toBeNull()
+    const when = params[params.length - 2] as Date
     expect(when.getTime() - now.getTime()).toBe(30 * 24 * 60 * 60 * 1000)
     vi.useRealTimers()
   })
@@ -156,9 +158,48 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
       autoPruneDays: 1,
     })
     const [, , params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    const when = params[params.length - 1] as Date
+    // anchor_key ($13) is the trailing param now; auto_prune_at is $12.
+    const when = params[params.length - 2] as Date
     expect(when.getTime() - now.getTime()).toBe(24 * 60 * 60 * 1000)
     vi.useRealTimers()
+  })
+
+  it('threads anchorKey to the trailing param + anchor_key column for per-workflow reuse (mig 279)', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({
+      rows: [{
+        id: VIEW_ID, workspaceId: WORKSPACE_ID, createdBy: USER_ID, name: 'Log',
+        description: null, entity: 'tasks', viewType: 'table',
+        binding: { entity: 'tasks', viewType: 'table' }, page: { blocks: [] },
+        state: 'draft', autoPruneAt: new Date('2026-06-25T00:00:00Z'),
+        createdAt: new Date(), updatedAt: new Date(),
+      }],
+      rowCount: 1,
+    } as never)
+    await store.createDraft({
+      userId: USER_ID, workspaceId: WORKSPACE_ID, name: 'Log',
+      entity: 'tasks', viewType: 'table',
+      binding: { entity: 'tasks', viewType: 'table' },
+      page: { blocks: [] },
+      anchorKey: 'wf-1:s1',
+    })
+    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    expect(sql).toContain('anchor_key')
+    expect(params[params.length - 1]).toBe('wf-1:s1')
+  })
+
+  it('findIdByAnchorKey resolves a page id by (workspace, anchor_key), RLS-scoped (mig 279)', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ id: VIEW_ID }], rowCount: 1 } as never)
+    const id = await store.findIdByAnchorKey(USER_ID, WORKSPACE_ID, 'wf-1:s1')
+    const [userId, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    expect(userId).toBe(USER_ID)
+    expect(sql).toContain('WHERE workspace_id = $1 AND anchor_key = $2')
+    expect(params).toEqual([WORKSPACE_ID, 'wf-1:s1'])
+    expect(id).toBe(VIEW_ID)
+  })
+
+  it('findIdByAnchorKey returns null when no page carries the key (mig 279)', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    expect(await store.findIdByAnchorKey(USER_ID, WORKSPACE_ID, 'wf-1:nope')).toBeNull()
   })
 
   it('inserts an explicit page icon (migration 211)', async () => {

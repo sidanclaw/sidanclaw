@@ -7,7 +7,9 @@ import {
   extractXaiUsage,
   postXaiResponses,
   XAI_X_SEARCH_MODEL,
+  XAI_X_URL_QUOTE_MODEL,
 } from '../../providers/xai.js'
+import { isXHost, parseStatusUrl } from './fetch-xai.js'
 
 /**
  * Grok-powered X (Twitter) post search.
@@ -68,16 +70,11 @@ function writeCache(key: string, payload: Record<string, unknown>): void {
   cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, payload })
 }
 
-function cacheKey(model: string, input: XSearchInput): string {
-  return JSON.stringify([
-    'x_search',
-    model,
-    input.query,
-    input.allowedHandles ?? null,
-    input.excludedHandles ?? null,
-    input.fromDate ?? null,
-    input.toDate ?? null,
-  ])
+function cacheKey(model: string, inputText: string, toolOptions: Record<string, unknown>): string {
+  // Key on the *effective* request (resolved model + prompt + tool options) so
+  // the status-URL verbatim branch and the generic-search branch never collide
+  // and never re-bill on a repeat call.
+  return JSON.stringify(['x_search', model, inputText, toolOptions])
 }
 
 function buildXSearchTool(input: XSearchInput): Record<string, unknown> {
@@ -98,7 +95,7 @@ export function __resetXSearchCache(): void {
 export const xSearchTool = buildTool({
   name: 'xSearch',
   description:
-    "Search posts on X (formerly Twitter) via Grok. Use when the user asks about tweets, X accounts, or news that broke on X. Returns Grok's synthesized answer with URL citations back to source posts. Optional filters: allowedHandles / excludedHandles (no @ prefix), fromDate / toDate (YYYY-MM-DD). Always cite the returned URLs.",
+    "Read or search X (formerly Twitter) posts via Grok. Use when the user shares an X post link, or asks about tweets, X accounts, or news that broke on X. Pass a single `/status/` permalink as `query` to read that post's text verbatim; pass a natural-language query to search across X. The returned `content` IS the post (or Grok's synthesized answer) the user asked about: present it, and never reply that you are unable to fetch the post when this tool returned content. Optional filters: allowedHandles / excludedHandles (no @ prefix), fromDate / toDate (YYYY-MM-DD). Always cite the returned URLs.",
   inputSchema,
   isConcurrencySafe: true,
   isReadOnly: true,
@@ -117,8 +114,25 @@ export const xSearchTool = buildTool({
       return { data: 'fromDate must be on or before toDate.', isError: true }
     }
 
-    const model = XAI_X_SEARCH_MODEL
-    const key = cacheKey(model, input)
+    // A query that is itself a bare X status permalink means "read this post",
+    // not "search X for it". Generic `x_search` on a URL returns a synthesized
+    // answer *about* the post, which the model tends to distrust as "not the
+    // live tweet" and disclaim ("unable to fetch the live tweet contents") even
+    // though the content is usable. Route it through the same verbatim-quote
+    // path `urlReader`'s xaiFetchProvider uses so the returned `content` is the
+    // post itself. See docs/architecture/integrations/xai.md → "Status-URL queries".
+    const trimmedQuery = input.query.trim()
+    const status = isXHost(trimmedQuery) ? parseStatusUrl(trimmedQuery) : undefined
+
+    const model = status ? XAI_X_URL_QUOTE_MODEL : XAI_X_SEARCH_MODEL
+    const inputText = status
+      ? `Quote verbatim the full text of the X post at https://x.com/${status.handle}/status/${status.postId}. Include any replies in the thread if they are part of the post. Do not summarize — give the raw post text.`
+      : input.query
+    const toolOptions: Record<string, unknown> = status
+      ? { type: 'x_search', allowed_x_handles: [status.handle] }
+      : buildXSearchTool(input)
+
+    const key = cacheKey(model, inputText, toolOptions)
     const cached = readCache(key)
     if (cached) {
       // Cache hits don't incur a new API call — emit `searchProvider` for
@@ -134,8 +148,8 @@ export const xSearchTool = buildTool({
       const data = await postXaiResponses({
         apiKey,
         model,
-        inputText: input.query,
-        tools: [buildXSearchTool(input)],
+        inputText,
+        tools: [toolOptions],
         timeoutMs: REQUEST_TIMEOUT_MS,
         signal: context.abortSignal,
       })

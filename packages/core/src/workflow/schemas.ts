@@ -91,6 +91,14 @@ const pageAnchorSchema = z.union([
       create: z.literal(true),
       title: z.string().min(1).max(256).optional(),
       nestUnder: z.string().uuid().optional(),
+      /**
+       * Cross-run page identity. `'per-run'` (default) creates a fresh page
+       * every run; `'per-workflow'` find-or-creates against a stable
+       * `<workflowId>:<stepId>` anchor key so a recurring workflow reuses ONE
+       * page instead of minting an empty duplicate each fire. See
+       * docs/architecture/features/workflow.md → "assistant_call page anchor".
+       */
+      reuse: z.enum(['per-run', 'per-workflow']).optional(),
     })
     .strict(),
   z.object({ fromStep: stepIdSchema }).strict(),

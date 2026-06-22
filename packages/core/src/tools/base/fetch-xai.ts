@@ -44,7 +44,13 @@ export function isXHost(url: string): boolean {
 
 type ParsedStatus = { handle: string; postId: string }
 
-function parseStatusUrl(url: string): ParsedStatus | undefined {
+/**
+ * Parse an X status permalink (`/{handle}/status/{id}`) into its handle and
+ * numeric post id. Returns undefined for profile / search / list URLs.
+ * Exported so the official X-API provider (`fetch-x-api.ts`) shares one
+ * permalink parser with the xAI fallback.
+ */
+export function parseStatusUrl(url: string): ParsedStatus | undefined {
   let parsed: URL
   try {
     parsed = new URL(url)

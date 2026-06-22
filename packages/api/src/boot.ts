@@ -1078,17 +1078,39 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       waConnectorUrl: env.WA_CONNECTOR_URL,
       waConnectorSecret: env.WA_CONNECTOR_SECRET,
     }),
-    createAnchorPage: async ({ workspaceId, userId, title, nestUnder, originPrompt }) => {
-      const draft = await savedViewStore.createDraft({
-        userId, workspaceId, name: title, nameOrigin: 'user',
-        entity: 'tasks', viewType: 'table',
-        binding: { entity: 'tasks', viewType: 'table' },
-        page: { blocks: [] },
-        nestParentId: nestUnder ?? null,
-        originPrompt: originPrompt ?? null,
-      })
-      await savedViewStore.setState(userId, draft.id, 'saved')
-      return { id: draft.id }
+    createAnchorPage: async ({ workspaceId, userId, title, nestUnder, originPrompt, anchorKey }) => {
+      // Per-workflow reuse (mig 279): a recurring anchor page is found-and-
+      // reused, not re-minted, so the workflow appends to ONE page instead of
+      // leaving a trail of empty duplicates each fire.
+      if (anchorKey) {
+        const existing = await savedViewStore.findIdByAnchorKey(userId, workspaceId, anchorKey)
+        if (existing) return { id: existing }
+      }
+      try {
+        const draft = await savedViewStore.createDraft({
+          userId, workspaceId, name: title, nameOrigin: 'user',
+          entity: 'tasks', viewType: 'table',
+          binding: { entity: 'tasks', viewType: 'table' },
+          page: { blocks: [] },
+          nestParentId: nestUnder ?? null,
+          originPrompt: originPrompt ?? null,
+          anchorKey: anchorKey ?? null,
+        })
+        await savedViewStore.setState(userId, draft.id, 'saved')
+        return { id: draft.id }
+      } catch (err) {
+        // Race convergence: another run of this workflow won the find-or-create
+        // and inserted the anchor row first, so our INSERT hit the
+        // (workspace_id, anchor_key) unique index (Postgres 23505). Re-resolve
+        // to the winner's page rather than failing this run — `reuse:
+        // 'per-workflow'` promises ONE shared page, so a lost race must reuse,
+        // not error. Only swallow the unique-violation; anything else rethrows.
+        if (anchorKey && (err as { code?: unknown } | null)?.code === '23505') {
+          const winner = await savedViewStore.findIdByAnchorKey(userId, workspaceId, anchorKey)
+          if (winner) return { id: winner }
+        }
+        throw err
+      }
     },
   }
 

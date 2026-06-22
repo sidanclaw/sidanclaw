@@ -89,7 +89,7 @@ function makeStores() {
       const r: WorkflowRunRecord = {
         id: id(), workflowId, workspaceId, triggeredBy, triggerKind,
         status: 'pending', input: input ?? {}, vars: {}, currentStepId: null,
-        error: null, startedAt: now, finishedAt: null, lastActiveAt: now,
+        error: null, outcome: null, startedAt: now, finishedAt: null, lastActiveAt: now,
       }
       runs.set(r.id, r); return r
     },
@@ -118,6 +118,20 @@ function makeStores() {
     async listStepRuns(_u, runId) { return stepRuns.filter((s) => s.runId === runId) },
     async listRunsForWorkflow(_u, workflowId) {
       return [...runs.values()].filter((r) => r.workflowId === workflowId)
+    },
+    async getLatestOutcomeForWorkflowSystem(workflowId, excludeRunId) {
+      const terminal = [...runs.values()]
+        .filter(
+          (r) =>
+            r.workflowId === workflowId &&
+            r.id !== excludeRunId &&
+            (r.status === 'completed' || r.status === 'failed' || r.status === 'timeout'),
+        )
+        .sort(
+          (a, b) =>
+            (b.finishedAt ?? b.startedAt).getTime() - (a.finishedAt ?? a.startedAt).getTime(),
+        )
+      return terminal[0]?.outcome ?? null
     },
   }
   return { workflowStore, runStore, workflows, runs, stepRuns }

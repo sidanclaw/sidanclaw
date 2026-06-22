@@ -30,6 +30,7 @@ import {
   WorkflowTriggerSchema,
   STEP_TYPE_VALUES,
 } from './schemas.js'
+import { RESERVED_OUTCOME_VAR_NAMES } from './types.js'
 import type {
   AssistantCallStep,
   WorkflowDefinition,
@@ -434,6 +435,46 @@ function triggerWarnings(def: WorkflowDefinition, trigger?: WorkflowTrigger): st
   return warnings
 }
 
+/**
+ * Does this trigger fire the workflow more than once? Only a recurring trigger
+ * has a "next run" for cross-run `{{lastRun.*}}` state to reach: a recurring
+ * `schedule` (anything but `once`), an `event` subscription, or a `webhook`.
+ * `manual` and `schedule: { type: 'once' }` are one-shots. Absent trigger →
+ * treated as the `manual` default.
+ */
+function isRecurringTrigger(trigger?: WorkflowTrigger): boolean {
+  if (!trigger) return false
+  if (trigger.kind === 'event' || trigger.kind === 'webhook') return true
+  if (trigger.kind === 'schedule') return trigger.schedule.type !== 'once'
+  return false
+}
+
+/**
+ * Reserved-name footgun guard (mig 279). The cross-run hand-off captures vars
+ * named `summary` / `state` / `todo` / `blockers` (`RESERVED_OUTCOME_VAR_NAMES`)
+ * into the run outcome and surfaces them to the NEXT run as `{{lastRun.<name>}}`.
+ * That is only meaningful for a workflow that runs more than once — so on a
+ * one-shot (manual / schedule-once, the default), `storeOutputAs` into one of
+ * these names is almost always an unintended collision with a private scratch
+ * var. Warn so the author renames it (or adds a recurring trigger if they did
+ * mean cross-run state). Stays quiet on recurring workflows, where the capture
+ * is the intended use. Only `assistant_call` / `tool_call` apply `storeOutputAs`.
+ */
+function reservedOutcomeVarWarnings(def: WorkflowDefinition, trigger?: WorkflowTrigger): string[] {
+  if (isRecurringTrigger(trigger)) return []
+  const reserved = RESERVED_OUTCOME_VAR_NAMES as readonly string[]
+  const warnings: string[] = []
+  for (const step of def.steps) {
+    if (step.type !== 'assistant_call' && step.type !== 'tool_call') continue
+    if (step.storeOutputAs && reserved.includes(step.storeOutputAs)) {
+      warnings.push(
+        `Step "${step.id}" stores its output as \`${step.storeOutputAs}\`, a reserved cross-run hand-off name: its value is captured into the run outcome and surfaced to the NEXT run as \`{{lastRun.${step.storeOutputAs}}}\`. This workflow isn't recurring, so there is no next run to read it — if \`${step.storeOutputAs}\` is just an intra-run scratch var, rename it (e.g. \`${step.storeOutputAs}_tmp\`); if you meant cross-run state, give the workflow a recurring schedule trigger.`,
+      )
+    }
+  }
+  return warnings
+}
+
 type ScheduleApplyResult = {
   nextRun: string
   relativeTime?: string
@@ -677,6 +718,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
             ...warningsFor(definition, { phaseBActive, isKnownTool: deps.isKnownTool }),
             ...anchorIssues.warnings,
             ...triggerWarnings(definition, trigger),
+            ...reservedOutcomeVarWarnings(definition, trigger),
           ],
           definition,
           confirmationHint:

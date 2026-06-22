@@ -67,6 +67,7 @@ function fakeWorkflowRunStore(): WorkflowRunStore {
     updateStepRun: vi.fn(),
     listStepRuns: vi.fn(),
     listRunsForWorkflow: vi.fn().mockResolvedValue([]),
+    getLatestOutcomeForWorkflowSystem: vi.fn().mockResolvedValue(null),
   }
 }
 
@@ -118,6 +119,7 @@ function fakeSavedViewStore(opts: { parentExists?: boolean } = {}): SavedViewSto
     createDraft: vi.fn().mockImplementation(async ({ name, entity, viewType, binding, page, nestParentId }) =>
       makeSavedView({ id: 'sv-child', name, entity, viewType, binding, page, nestParentId: nestParentId ?? null }),
     ),
+    findIdByAnchorKey: vi.fn().mockResolvedValue(null),
     reparent: vi.fn().mockResolvedValue(true),
     reorderSiblings: vi.fn().mockResolvedValue(undefined),
     pruneExpiredDraftsSystem: vi.fn().mockResolvedValue([]),

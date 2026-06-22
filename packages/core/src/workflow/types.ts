@@ -63,7 +63,12 @@ export type WorkflowStepCommon = {
  *                     callee to it. `title` IS interpolatable; default is
  *                     `"<workflow.name> <YYYY-MM-DD>"`. The created id is
  *                     stored in run vars under the reserved key
- *                     `__pageAnchor_<stepId>`.
+ *                     `__pageAnchor_<stepId>`. `reuse` controls cross-run
+ *                     identity: `'per-run'` (default) mints a fresh page every
+ *                     run; `'per-workflow'` does find-or-create against a
+ *                     stable `<workflowId>:<stepId>` anchor key so a recurring
+ *                     workflow appends to ONE page instead of leaving a trail
+ *                     of empty duplicates (the recurring-anchor footgun fix).
  *  - `{ fromStep }` — anchor to the page a prior `{ create }` step made in
  *                     THIS run (read from `vars.__pageAnchor_<fromStep>`).
  *
@@ -72,7 +77,7 @@ export type WorkflowStepCommon = {
  */
 export type PageAnchor =
   | { id: string }
-  | { create: true; title?: string; nestUnder?: string }
+  | { create: true; title?: string; nestUnder?: string; reuse?: 'per-run' | 'per-workflow' }
   | { fromStep: string }
 
 export type AssistantCallStep = WorkflowStepCommon & {
@@ -384,6 +389,56 @@ export type WorkflowRecord = {
   updatedAt: Date
 }
 
+/**
+ * Distilled, durable summary of a TERMINAL run, written once when the run
+ * reaches `completed` / `failed` / `timeout`. The next run of the same
+ * workflow reads it as `{{lastRun.*}}` (the cross-run loop substrate) and a
+ * branch step can route on it. Null until the run terminates.
+ *
+ * Population (executor `composeRunOutcome`):
+ *  - `status` / `finishedAt` / `logs` / `summary` — always engine-derived.
+ *  - `blockers` — failure messages, UNIONed with an author-stored `blockers`
+ *    var (string | string[]).
+ *  - `todo` — from an author-stored `todo` var (string | string[]).
+ *  - `state` — from an author-stored `state` var (object); the carry-forward
+ *    bag. Authors hand data to the next run with `storeOutputAs: 'state' |
+ *    'todo' | 'blockers' | 'summary'` (plain identifiers — the `__`-prefixed
+ *    reserved keys are engine-only). See docs/architecture/features/workflow.md
+ *    → "Cross-run state".
+ */
+export type WorkflowRunOutcome = {
+  status: Extract<WorkflowRunStatus, 'completed' | 'failed' | 'timeout'>
+  /** One-line gist — author `summary` var, else the last step's text output. */
+  summary: string | null
+  /** Per-step trace: what ran and how it ended. */
+  logs: Array<{
+    stepId: string
+    type: WorkflowStepType
+    status: 'completed' | 'failed'
+    summary: string
+  }>
+  /** Open questions / failures the next run should check are resolved. */
+  blockers: string[]
+  /** Hand-off items the next run should work through. */
+  todo: string[]
+  /** Free-form carry-forward bag (`{{lastRun.state.X}}`). */
+  state: Record<string, unknown>
+  /** ISO timestamp the run terminated. */
+  finishedAt: string
+}
+
+/**
+ * The var names that double as the cross-run hand-off: a step storing into one
+ * of these via `storeOutputAs` has its value distilled into the run's
+ * `WorkflowRunOutcome` (→ `{{lastRun.<name>}}` on the next run). The single
+ * canonical list both `composeRunOutcome` (executor) and the `proposeWorkflow`
+ * authoring warning (tools) read, so the contract can never drift between the
+ * capture site and the guard. See docs/architecture/features/workflow.md →
+ * "Cross-run state".
+ */
+export const RESERVED_OUTCOME_VAR_NAMES = ['summary', 'state', 'todo', 'blockers'] as const
+export type ReservedOutcomeVarName = (typeof RESERVED_OUTCOME_VAR_NAMES)[number]
+
 export type WorkflowRunRecord = {
   id: string
   workflowId: string
@@ -395,6 +450,8 @@ export type WorkflowRunRecord = {
   vars: Record<string, unknown>
   currentStepId: string | null
   error: Record<string, unknown> | null
+  /** Mig 279. Cross-run outcome; null until the run terminates. */
+  outcome: WorkflowRunOutcome | null
   startedAt: Date
   finishedAt: Date | null
   lastActiveAt: Date
@@ -508,7 +565,7 @@ export type WorkflowRunStore = {
   /** System-level read for the executor (no RLS). */
   getRunSystem(id: string): Promise<WorkflowRunRecord | null>
 
-  /** Patch run status / current step / vars / error. */
+  /** Patch run status / current step / vars / error / outcome. */
   updateRun(
     id: string,
     fields: Partial<{
@@ -517,6 +574,8 @@ export type WorkflowRunStore = {
       vars: Record<string, unknown>
       error: Record<string, unknown> | null
       finishedAt: Date | null
+      /** Mig 279. Written once at terminal state for cross-run `{{lastRun}}`. */
+      outcome: WorkflowRunOutcome | null
     }>,
   ): Promise<WorkflowRunRecord | null>
 
@@ -555,4 +614,17 @@ export type WorkflowRunStore = {
       limit?: number
     },
   ): Promise<WorkflowRunRecord[]>
+
+  /**
+   * The `outcome` of the workflow's most recent TERMINAL run
+   * (`completed` / `failed` / `timeout`), excluding `excludeRunId` (the run
+   * currently executing). System read (no RLS) — the executor calls it on
+   * every advance to build the `{{lastRun.*}}` interpolation scope. Returns
+   * null when there is no prior terminal run, or its outcome was never
+   * written (pre-mig-279 runs). Mig 279.
+   */
+  getLatestOutcomeForWorkflowSystem(
+    workflowId: string,
+    excludeRunId: string,
+  ): Promise<WorkflowRunOutcome | null>
 }

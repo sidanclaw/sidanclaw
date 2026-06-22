@@ -235,6 +235,35 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
     expect(sql).toContain('status = ANY($2::text[])')
     expect(values).toEqual(['wf-1', ['running', 'failed'], 200])
   })
+
+  it('updateRun writes the JSON-encoded outcome when supplied (mig 279)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [runRow({ status: 'completed' })], rowCount: 1 } as never)
+    await runs.updateRun('run-1', {
+      status: 'completed',
+      outcome: { status: 'completed', summary: 'done', logs: [], blockers: [], todo: [], state: {}, finishedAt: '2026-06-22T00:00:00Z' },
+    } as Parameters<typeof runs.updateRun>[1])
+    const [sql, values] = mockQuery.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain('outcome = $')
+    // outcome is JSON-stringified, not passed as a raw object.
+    expect(values.some((v) => typeof v === 'string' && v.includes('"summary":"done"'))).toBe(true)
+  })
+
+  it('getLatestOutcomeForWorkflowSystem reads the latest TERMINAL run, excluding the current one, no RLS (mig 279)', async () => {
+    const outcome = { status: 'completed', summary: 's', logs: [], blockers: [], todo: [], state: {}, finishedAt: '2026-06-22T00:00:00Z' }
+    mockQuery.mockResolvedValueOnce({ rows: [{ outcome }], rowCount: 1 } as never)
+    const got = await runs.getLatestOutcomeForWorkflowSystem('wf-1', 'run-current')
+    const [sql, values] = mockQuery.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain("status IN ('completed', 'failed', 'timeout')")
+    expect(sql).toContain('id <> $2')
+    expect(sql).toContain('ORDER BY finished_at DESC NULLS LAST, started_at DESC')
+    expect(values).toEqual(['wf-1', 'run-current'])
+    expect(got).toEqual(outcome)
+  })
+
+  it('getLatestOutcomeForWorkflowSystem returns null when there is no prior terminal run', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    expect(await runs.getLatestOutcomeForWorkflowSystem('wf-1', 'run-current')).toBeNull()
+  })
 })
 
 describe('[COMP:api/workflow-store] event-trigger helpers', () => {

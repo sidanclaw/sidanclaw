@@ -269,6 +269,24 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
     expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
   })
 
+  it('accepts page: {create} with reuse: per-workflow / per-run', () => {
+    for (const reuse of ['per-run', 'per-workflow']) {
+      const def = {
+        startStepId: 'call',
+        steps: [anchorStep({ create: true, title: 'Maintenance Log', reuse })],
+      }
+      expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+    }
+  })
+
+  it('rejects page: {create} with an unknown reuse value', () => {
+    const def = {
+      startStepId: 'call',
+      steps: [anchorStep({ create: true, reuse: 'forever' })],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(false)
+  })
+
   it('rejects unknown keys on any page variant (strict forward-compat guard)', () => {
     const def = {
       startStepId: 'call',

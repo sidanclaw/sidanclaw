@@ -21,6 +21,7 @@ import type {
   WorkflowDefinition,
   WorkflowModelAlias,
   WorkflowRecord,
+  WorkflowRunOutcome,
   WorkflowRunRecord,
   WorkflowRunStatus,
   WorkflowRunStore,
@@ -286,6 +287,7 @@ const RUN_SELECT = `
   vars,
   current_step_id AS "currentStepId",
   error,
+  outcome,
   started_at      AS "startedAt",
   finished_at     AS "finishedAt",
   last_active_at  AS "lastActiveAt"
@@ -302,6 +304,7 @@ type RunRow = {
   vars: Record<string, unknown>
   currentStepId: string | null
   error: Record<string, unknown> | null
+  outcome: WorkflowRunOutcome | null
   startedAt: Date
   finishedAt: Date | null
   lastActiveAt: Date
@@ -319,6 +322,7 @@ function rowToRun(row: RunRow): WorkflowRunRecord {
     vars: row.vars ?? {},
     currentStepId: row.currentStepId,
     error: row.error,
+    outcome: row.outcome ?? null,
     startedAt: row.startedAt,
     finishedAt: row.finishedAt,
     lastActiveAt: row.lastActiveAt,
@@ -405,6 +409,7 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       if (fields.vars !== undefined) { sets.push(`vars = $${idx}`); values.push(JSON.stringify(fields.vars)); idx++ }
       if (fields.error !== undefined) { sets.push(`error = $${idx}`); values.push(fields.error === null ? null : JSON.stringify(fields.error)); idx++ }
       if (fields.finishedAt !== undefined) { sets.push(`finished_at = $${idx}`); values.push(fields.finishedAt); idx++ }
+      if (fields.outcome !== undefined) { sets.push(`outcome = $${idx}`); values.push(fields.outcome === null ? null : JSON.stringify(fields.outcome)); idx++ }
 
       if (sets.length === 1) {
         // Only last_active_at would be updated — skip the round-trip and
@@ -484,6 +489,23 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
         values,
       )
       return result.rows.map(rowToRun)
+    },
+    async getLatestOutcomeForWorkflowSystem(workflowId, excludeRunId) {
+      // System read (no RLS) — the executor calls this on every advance to
+      // build the `{{lastRun.*}}` scope. Most recent TERMINAL run's distilled
+      // outcome, excluding the run currently executing. `finished_at DESC
+      // NULLS LAST` orders by terminal time; `started_at` breaks ties and
+      // covers any terminal row whose finished_at was never stamped.
+      const result = await query<{ outcome: WorkflowRunOutcome | null }>(
+        `SELECT outcome FROM workflow_runs
+          WHERE workflow_id = $1
+            AND id <> $2
+            AND status IN ('completed', 'failed', 'timeout')
+          ORDER BY finished_at DESC NULLS LAST, started_at DESC
+          LIMIT 1`,
+        [workflowId, excludeRunId],
+      )
+      return result.rows[0]?.outcome ?? null
     },
   }
 }

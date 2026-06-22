@@ -162,11 +162,15 @@ function fakeWorkflowRunStore(): WorkflowRunStore {
           vars: {},
           currentStepId: null,
           error: null,
+          outcome: null,
           startedAt: new Date('2026-05-09T10:00:00Z'),
           finishedAt: new Date('2026-05-09T10:00:30Z'),
           lastActiveAt: new Date('2026-05-09T10:00:30Z'),
         },
       ]
+    },
+    async getLatestOutcomeForWorkflowSystem() {
+      return null
     },
   }
 }

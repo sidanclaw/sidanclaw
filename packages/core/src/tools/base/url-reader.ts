@@ -4,6 +4,7 @@ import { createFetchStack } from './fetch-stack.js'
 import { readabilityProvider } from './fetch-readability.js'
 import { jinaProvider } from './fetch-jina.js'
 import { rawFetchProvider } from './fetch-raw.js'
+import { xApiFetchProvider } from './fetch-x-api.js'
 import { xaiFetchProvider } from './fetch-xai.js'
 import { encodeExternalCostMeta } from '../../billing/external-cost.js'
 
@@ -12,7 +13,9 @@ import { encodeExternalCostMeta } from '../../billing/external-cost.js'
  * content.
  *
  * Backed by a fetch provider stack:
- *   Readability (local, @mozilla/readability + linkedom)
+ *   X API v2 tweet lookup (x.com/twitter.com permalinks, TWITTER_BEARER_TOKEN)
+ *     → xAI / Grok x_search (x.com fallback + non-permalink X URLs)
+ *     → Readability (local, @mozilla/readability + linkedom)
  *     → Jina Reader (r.jina.ai, privacy-filtered)
  *     → raw fetch (browser-UA + regex HTML-to-text)
  *
@@ -28,7 +31,7 @@ import { encodeExternalCostMeta } from '../../billing/external-cost.js'
 const DEFAULT_MAX_CHARS = 5000
 
 const fetchStack = createFetchStack({
-  providers: [xaiFetchProvider, readabilityProvider, jinaProvider, rawFetchProvider],
+  providers: [xApiFetchProvider, xaiFetchProvider, readabilityProvider, jinaProvider, rawFetchProvider],
   maxChars: DEFAULT_MAX_CHARS,
 })
 
@@ -52,7 +55,7 @@ export const urlReaderTool = buildTool({
     const needsCustomStack = (input.maxChars && input.maxChars !== DEFAULT_MAX_CHARS) || context.cacheStore
     const stack = needsCustomStack
       ? createFetchStack({
-          providers: [xaiFetchProvider, readabilityProvider, jinaProvider, rawFetchProvider],
+          providers: [xApiFetchProvider, xaiFetchProvider, readabilityProvider, jinaProvider, rawFetchProvider],
           maxChars: input.maxChars ?? DEFAULT_MAX_CHARS,
           cacheStore: context.cacheStore,
           sessionId: context.sessionId,

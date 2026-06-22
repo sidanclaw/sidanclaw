@@ -26,13 +26,14 @@ import type {
   WaitStep,
   WorkflowDefinition,
   WorkflowRecord,
+  WorkflowRunOutcome,
   WorkflowRunRecord,
   WorkflowRunStore,
   WorkflowStep,
   WorkflowStore,
 } from './types.js'
 import { evaluateBoolean, JsonLogicEvalError } from './condition.js'
-import { interpolateString, interpolateValue } from './interpolation.js'
+import { interpolateString, interpolateValue, type InterpolationScope } from './interpolation.js'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
 import { sanitizeDeliveryText } from '@sidanclaw/shared'
 
@@ -275,6 +276,13 @@ export type ExecutorDeps = {
      * chat message that created it").
      */
     originPrompt?: string
+    /**
+     * Stable cross-run identity for `page.reuse === 'per-workflow'`
+     * (`<workflowId>:<stepId>`). When set, the port does find-or-create
+     * against this key so a recurring workflow reuses ONE page instead of
+     * minting an empty duplicate each fire. Absent = create fresh (per-run).
+     */
+    anchorKey?: string
   }) => Promise<{ id: string }>
 }
 
@@ -365,6 +373,22 @@ export async function advanceWorkflowRun(
   let vars: Record<string, unknown> = { ...run.vars }
   const input = run.input
 
+  // Cross-run loop: the distilled outcome of the workflow's most recent
+  // TERMINAL run, surfaced to every step as `{{lastRun.*}}`. Auxiliary
+  // context — a lookup failure degrades to "no prior run" rather than killing
+  // this run. Undefined on the first run (or pre-mig-279 prior runs).
+  const priorOutcome = await deps.runStore
+    .getLatestOutcomeForWorkflowSystem(run.workflowId, runId)
+    .catch((err) => {
+      console.warn('[workflow] lastRun outcome lookup failed:', err)
+      return null
+    })
+  const lastRun: Record<string, unknown> | undefined = priorOutcome ?? undefined
+
+  // Per-step trace accumulated across the run; distilled into the terminal
+  // `outcome.logs` so the NEXT run can read what this one did.
+  const runLog: WorkflowRunOutcome['logs'] = []
+
   let currentStepId: string | null = run.currentStepId ?? workflow.definition.startStepId
   let lastOutput: unknown = null
   let stepCount = 0
@@ -376,11 +400,11 @@ export async function advanceWorkflowRun(
         message: `Definition references unknown step "${currentStepId}".`,
         reason: 'unknown_step',
       }
-      await markRunFailed(deps, run, currentStepId, err)
+      await markRunFailed(deps, run, currentStepId, err, 'failed', composeRunOutcome(vars, runLog, 'failed', new Date(now()), lastOutput, err))
       return failOutcome(runId, currentStepId, err, stepCount)
     }
 
-    const interp = { vars, input }
+    const interp: InterpolationScope = { vars, input, lastRun }
 
     // Pre-flight: wait step in Phase A errors here before we insert a step run
     // so we don't leave a stranded 'running' row. In Phase B, fall through to
@@ -403,7 +427,8 @@ export async function advanceWorkflowRun(
         error: err as unknown as Record<string, unknown>,
         finishedAt: new Date(now()),
       })
-      await markRunFailed(deps, run, step.id, err)
+      runLog.push({ stepId: step.id, type: step.type, status: 'failed', summary: err.message })
+      await markRunFailed(deps, run, step.id, err, 'failed', composeRunOutcome(vars, runLog, 'failed', new Date(now()), lastOutput, err))
       return failOutcome(runId, step.id, err, stepCount)
     }
 
@@ -452,7 +477,9 @@ export async function advanceWorkflowRun(
           : {}),
         finishedAt: new Date(now()),
       })
-      await markRunFailed(deps, run, step.id, error, isTimeout ? 'timeout' : 'failed')
+      const catchStatus = isTimeout ? 'timeout' : 'failed'
+      runLog.push({ stepId: step.id, type: step.type, status: 'failed', summary: error.message })
+      await markRunFailed(deps, run, step.id, error, catchStatus, composeRunOutcome(vars, runLog, catchStatus, new Date(now()), lastOutput, error))
       await maybeDisableForDeadAnchor(deps, run, workflow, primaryAssistantId, error)
       return failOutcome(runId, step.id, error, stepCount)
     }
@@ -503,7 +530,8 @@ export async function advanceWorkflowRun(
         error: dispatchResult.error as unknown as Record<string, unknown>,
         finishedAt: new Date(now()),
       })
-      await markRunFailed(deps, run, step.id, dispatchResult.error)
+      runLog.push({ stepId: step.id, type: step.type, status: 'failed', summary: dispatchResult.error.message })
+      await markRunFailed(deps, run, step.id, dispatchResult.error, 'failed', composeRunOutcome(vars, runLog, 'failed', new Date(now()), lastOutput, dispatchResult.error))
       await maybeDisableForDeadAnchor(deps, run, workflow, primaryAssistantId, dispatchResult.error)
       return failOutcome(runId, step.id, dispatchResult.error, stepCount + 1)
     }
@@ -511,6 +539,12 @@ export async function advanceWorkflowRun(
     // Success — capture output, advance vars + lastOutput, persist.
     stepCount++
     lastOutput = dispatchResult.output
+    runLog.push({
+      stepId: step.id,
+      type: step.type,
+      status: 'completed',
+      summary: summarizeOutput(dispatchResult.output),
+    })
     // Dispatch-produced vars first (page-anchor `__pageAnchor_<stepId>`
     // entries), then storeOutputAs — a user key can never be shadowed by a
     // reserved one because storeOutputAs forbids the `__` prefix shape.
@@ -547,6 +581,7 @@ export async function advanceWorkflowRun(
     status: 'completed',
     finishedAt,
     currentStepId: null,
+    outcome: composeRunOutcome(vars, runLog, 'completed', finishedAt, lastOutput),
   })
   fireAndForgetAudit(deps, {
     type: 'workflow.run_completed',
@@ -599,7 +634,7 @@ type DispatchContext = {
   primaryAssistantId: string
   toolRegistry: Map<string, Tool>
   consultTransport: ConsultTransport
-  scope: { vars: Record<string, unknown>; input: Record<string, unknown> }
+  scope: InterpolationScope
   /** Phase C — when present, ask-policy tool_calls pause instead of failing. */
   deps: ExecutorDeps
 }
@@ -698,6 +733,12 @@ async function dispatchAssistantCall(
           nestUnder: step.page.nestUnder,
           // Genesis provenance for the History panel.
           originPrompt: prompt.slice(0, 2000),
+          // Per-workflow reuse → stable key so a recurring run appends to one
+          // page instead of minting an empty duplicate every fire.
+          anchorKey:
+            step.page.reuse === 'per-workflow'
+              ? `${ctx.workflow.id}:${step.id}`
+              : undefined,
         })
         pageAnchorId = created.id
         varsPatch = { [`__pageAnchor_${step.id}`]: created.id }
@@ -1050,8 +1091,9 @@ function askPolicyOutcome(
 
 function dispatchBranch(step: BranchStep, ctx: DispatchContext): StepDispatchResult {
   // `prev` for branch = the most recent non-branch output. We pass vars
-  // explicitly so conditions can reference variables set by storeOutputAs.
-  const data = { vars: ctx.scope.vars, input: ctx.scope.input }
+  // explicitly so conditions can reference variables set by storeOutputAs,
+  // and `lastRun` so a branch can route on the prior run's outcome.
+  const data = { vars: ctx.scope.vars, input: ctx.scope.input, lastRun: ctx.scope.lastRun }
   let result: boolean
   try {
     result = evaluateBoolean(step.condition, data)
@@ -1126,7 +1168,7 @@ function nextStepIdFor(
 
 function buildStepRunInput(
   step: WorkflowStep,
-  scope: { vars: Record<string, unknown>; input: Record<string, unknown> },
+  scope: InterpolationScope,
 ): Record<string, unknown> {
   switch (step.type) {
     case 'assistant_call':
@@ -1153,6 +1195,70 @@ function wrapOutput(output: unknown): Record<string, unknown> {
   if (output === null || output === undefined) return { value: null }
   if (typeof output === 'object' && !Array.isArray(output)) return output as Record<string, unknown>
   return { value: output }
+}
+
+/** Compact one step output / value to a one-line, length-capped summary. */
+function summarizeOutput(output: unknown): string {
+  if (output === null || output === undefined) return ''
+  let s: string
+  if (typeof output === 'string') s = output
+  else {
+    try {
+      s = JSON.stringify(output)
+    } catch {
+      s = String(output)
+    }
+  }
+  return s.length > 280 ? `${s.slice(0, 277)}...` : s
+}
+
+/**
+ * Distill the terminal `WorkflowRunOutcome` from the run's final state.
+ * `status` / `finishedAt` / `logs` / `summary` are engine-derived; `blockers`
+ * / `todo` / `state` come from the author-stored `blockers` / `todo` / `state`
+ * vars (the cross-run hand-off contract — see types.ts `WorkflowRunOutcome`).
+ * A terminal error is appended to `blockers` so the next run sees what broke.
+ *
+ * The captured var names are the canonical `RESERVED_OUTCOME_VAR_NAMES`
+ * (types.ts); the `proposeWorkflow` authoring warning reads the same list so a
+ * step that stores into one of them unintentionally is flagged at authoring.
+ */
+function composeRunOutcome(
+  vars: Record<string, unknown>,
+  logs: WorkflowRunOutcome['logs'],
+  status: WorkflowRunOutcome['status'],
+  finishedAt: Date,
+  lastOutput: unknown,
+  error?: ExecutorError | null,
+): WorkflowRunOutcome {
+  const toList = (v: unknown): string[] =>
+    Array.isArray(v)
+      ? v.map((x) => (typeof x === 'string' ? x : summarizeOutput(x))).filter((s) => s.length > 0)
+      : typeof v === 'string' && v.trim().length > 0
+        ? [v]
+        : []
+  const blockers = toList(vars.blockers)
+  if (error?.message) blockers.push(error.message)
+  const todo = toList(vars.todo)
+  const state =
+    vars.state && typeof vars.state === 'object' && !Array.isArray(vars.state)
+      ? (vars.state as Record<string, unknown>)
+      : {}
+  const summaryRaw =
+    typeof vars.summary === 'string' && vars.summary.trim().length > 0
+      ? vars.summary
+      : typeof lastOutput === 'string'
+        ? lastOutput
+        : summarizeOutput(lastOutput)
+  return {
+    status,
+    summary: summaryRaw ? summaryRaw.slice(0, 2000) : null,
+    logs,
+    blockers,
+    todo,
+    state,
+    finishedAt: finishedAt.toISOString(),
+  }
 }
 
 async function loadWorkflowForRun(
@@ -1267,6 +1373,10 @@ async function markRunFailed(
   // are terminal and both fire the same `run_failed` audit (a timeout still
   // counts toward the failure streak).
   status: 'failed' | 'timeout' = 'failed',
+  // Cross-run outcome (mig 279). Passed from in-loop failure sites that have
+  // the accumulated vars + step log in scope; omitted by pre-loop infra
+  // failures (no workflow logic ran, so there is nothing to hand forward).
+  outcome?: WorkflowRunOutcome | null,
 ): Promise<void> {
   const now = new Date()
   await deps.runStore.updateRun(run.id, {
@@ -1274,6 +1384,7 @@ async function markRunFailed(
     finishedAt: now,
     currentStepId: stepId,
     error: error as unknown as Record<string, unknown>,
+    ...(outcome !== undefined ? { outcome } : {}),
   })
   fireAndForgetAudit(deps, {
     type: 'workflow.run_failed',

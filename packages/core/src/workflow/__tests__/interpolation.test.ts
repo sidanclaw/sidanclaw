@@ -53,3 +53,34 @@ describe('[COMP:workflow/interpolation] {{vars.X}} substitution', () => {
     expect(interpolateString('{{  vars.name  }}', SCOPE)).toBe('Alex')
   })
 })
+
+describe('[COMP:workflow/interpolation] {{lastRun.X}} cross-run substitution', () => {
+  const WITH_LAST_RUN = {
+    vars: {},
+    input: {},
+    lastRun: {
+      status: 'completed',
+      summary: 'shipped 2 posts',
+      todo: ['follow up with Acme', 'draft Q3 plan'],
+      blockers: ['waiting on legal sign-off'],
+      state: { cursor: 42, lastTopic: 'pricing' },
+    },
+  }
+
+  it('substitutes a scalar lastRun field', () => {
+    expect(interpolateString('prior: {{lastRun.summary}}', WITH_LAST_RUN)).toBe('prior: shipped 2 posts')
+  })
+
+  it('inlines JSON for lastRun array / object fields', () => {
+    expect(interpolateString('{{lastRun.todo}}', WITH_LAST_RUN)).toBe('["follow up with Acme","draft Q3 plan"]')
+    expect(interpolateString('{{lastRun.state}}', WITH_LAST_RUN)).toBe('{"cursor":42,"lastTopic":"pricing"}')
+  })
+
+  it('resolves nested lastRun.state paths', () => {
+    expect(interpolateString('{{lastRun.state.lastTopic}}', WITH_LAST_RUN)).toBe('pricing')
+  })
+
+  it('resolves every {{lastRun.X}} to empty string when there is no prior run', () => {
+    expect(interpolateString('todo: {{lastRun.todo}}!', SCOPE)).toBe('todo: !')
+  })
+})

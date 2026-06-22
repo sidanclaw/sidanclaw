@@ -1,6 +1,13 @@
 /**
- * `{{vars.X}}` and `{{input.X}}` substitution for assistant_call.prompt and
- * tool_call.arguments.
+ * `{{vars.X}}`, `{{input.X}}` and `{{lastRun.X}}` substitution for
+ * assistant_call.prompt and tool_call.arguments.
+ *
+ * `vars` / `input` are this run's accumulated state + trigger payload;
+ * `lastRun` is the distilled outcome of the workflow's most recent terminal
+ * run (`{{lastRun.summary}}` / `.todo` / `.blockers` / `.state.X` / `.logs` /
+ * `.status`) — the cross-run loop substrate. Absent on the first run, so any
+ * `{{lastRun.X}}` resolves to empty string. See
+ * docs/architecture/features/workflow.md → "Cross-run state".
  *
  * Substitution only — no expressions, no operators. Anything richer goes
  * through a `branch` step.
@@ -20,6 +27,12 @@ const TOKEN = /\{\{\s*([a-zA-Z][a-zA-Z0-9_.]*)\s*\}\}/g
 export type InterpolationScope = {
   vars: Record<string, unknown>
   input: Record<string, unknown>
+  /**
+   * Distilled outcome of the prior terminal run (the `WorkflowRunOutcome`
+   * shape from `types.ts`). Undefined on the first run / when no prior
+   * terminal run exists — every `{{lastRun.X}}` then resolves to empty string.
+   */
+  lastRun?: Record<string, unknown>
 }
 
 /** Substitute `{{...}}` tokens in a single string. */
@@ -56,7 +69,7 @@ export function interpolateValue<T>(value: T, scope: InterpolationScope): T {
 function resolvePath(scope: InterpolationScope, path: string): unknown {
   const segments = path.split('.')
   const head = segments[0]
-  if (head !== 'vars' && head !== 'input') return undefined
+  if (head !== 'vars' && head !== 'input' && head !== 'lastRun') return undefined
   let cursor: unknown = scope[head]
   for (let i = 1; i < segments.length; i++) {
     if (cursor === null || cursor === undefined) return undefined

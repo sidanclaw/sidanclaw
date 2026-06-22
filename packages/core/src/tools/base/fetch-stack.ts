@@ -30,7 +30,7 @@ export type FetchResult = {
   title?: string
   content: string
   length: number
-  source: 'readability' | 'jina' | 'raw' | 'cache' | 'xai'
+  source: 'readability' | 'jina' | 'raw' | 'cache' | 'xai' | 'x-api'
   /**
    * Present when this fetch incurred an external-API cost that must be
    * billed back to the user (e.g. xAI tokens for an x.com URL read).

@@ -114,6 +114,61 @@ describe('[COMP:tools/x-search] xSearch tool', () => {
     })
   })
 
+  it('routes a bare status-URL query through the verbatim-quote path', async () => {
+    await withXaiKey(async () => {
+      const result = await xSearchTool.execute(
+        { query: '  https://x.com/AnatoliKopadze/status/2068328135611822149  ' },
+        ctx,
+      )
+      expect(result.isError).toBeFalsy()
+
+      const init = fetchSpy.mock.calls[0][1] as RequestInit & { body: string }
+      const body = JSON.parse(init.body)
+      // Verbatim reads use the cheaper non-reasoning quote model, scope to the
+      // post's handle, and instruct Grok to quote rather than synthesize.
+      expect(body.model).toBe('grok-4-1-fast-non-reasoning')
+      expect(body.tools).toEqual([
+        { type: 'x_search', allowed_x_handles: ['AnatoliKopadze'] },
+      ])
+      expect(body.input[0].content).toContain('Quote verbatim')
+      expect(body.input[0].content).toContain(
+        'https://x.com/AnatoliKopadze/status/2068328135611822149',
+      )
+      expect(body.input[0].content).not.toContain('  ')
+
+      const data = result.data as { model: string; content: string }
+      expect(data.model).toBe('grok-4-1-fast-non-reasoning')
+      expect(data.content).toContain('Grok 4')
+    })
+  })
+
+  it('keeps generic search for natural-language queries that merely contain a URL', async () => {
+    await withXaiKey(async () => {
+      await xSearchTool.execute(
+        { query: 'summarize https://x.com/AnatoliKopadze/status/2068328135611822149' },
+        ctx,
+      )
+      const init = fetchSpy.mock.calls[0][1] as RequestInit & { body: string }
+      const body = JSON.parse(init.body)
+      // Not a bare permalink → stays on the reasoning search model, no handle scope.
+      expect(body.model).toBe('grok-4-1-fast')
+      expect(body.tools).toEqual([{ type: 'x_search' }])
+      expect(body.input[0].content).toBe(
+        'summarize https://x.com/AnatoliKopadze/status/2068328135611822149',
+      )
+    })
+  })
+
+  it('treats an X profile/search URL (no /status/) as a generic query', async () => {
+    await withXaiKey(async () => {
+      await xSearchTool.execute({ query: 'https://x.com/AnatoliKopadze' }, ctx)
+      const init = fetchSpy.mock.calls[0][1] as RequestInit & { body: string }
+      const body = JSON.parse(init.body)
+      expect(body.model).toBe('grok-4-1-fast')
+      expect(body.tools).toEqual([{ type: 'x_search' }])
+    })
+  })
+
   it('cache hits do NOT re-emit externalCost meta (no re-billing)', async () => {
     await withXaiKey(async () => {
       const first = await xSearchTool.execute({ query: 'cache-test' }, ctx)

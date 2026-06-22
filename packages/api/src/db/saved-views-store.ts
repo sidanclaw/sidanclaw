@@ -401,7 +401,7 @@ export function createDbSavedViewStore(): SavedViewStore {
       return result.rows.length > 0
     },
 
-    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt }) {
+    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey }) {
       const days = autoPruneDays ?? DEFAULT_DRAFT_TTL_DAYS
       const autoPruneAt = addDays(new Date(), days)
       // Snapshot the genesis prompt (migration 231). Trim + cap so a pasted
@@ -422,14 +422,20 @@ export function createDbSavedViewStore(): SavedViewStore {
         // `icon` ($10) seeds the page emoji (migration 211) — null when the
         // caller passed none, leaving auto-title's COALESCE suggestion free.
         // `origin_prompt` ($11) snapshots the creating prompt (migration 231 —
-        // see `originPromptValue` above); `auto_prune_at` stays the trailing
-        // param ($12).
+        // see `originPromptValue` above); `auto_prune_at` ($12) precedes the
+        // trailing `anchor_key` ($13).
+        // `anchor_key` ($13) is the stable cross-run identity for workflow
+        // `page.reuse === 'per-workflow'` (migration 279); null on every other
+        // path. The partial unique index (workspace_id, anchor_key) enforces
+        // row-uniqueness only — it does NOT make this find-or-create atomic;
+        // the boot `createAnchorPage` adapter converges on a 23505 race by
+        // re-reading the winner. See findIdByAnchorKey below.
         `INSERT INTO saved_views
-           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at)
+           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key)
          VALUES ($1, $2, $3, $4, NULL, $10, $5, $6, $7, $8, 'draft', $9,
            (SELECT COALESCE(MAX(position) + 1, 0) FROM saved_views
               WHERE nest_parent_id IS NOT DISTINCT FROM $9 AND workspace_id = $1),
-           $11, $12)
+           $11, $12, $13)
          RETURNING ${FULL_SELECT}`,
         [
           workspaceId,
@@ -444,9 +450,25 @@ export function createDbSavedViewStore(): SavedViewStore {
           icon ?? null,
           originPromptValue,
           autoPruneAt,
+          anchorKey ?? null,
         ],
       )
       return rowToFull(result.rows[0])
+    },
+
+    async findIdByAnchorKey(userId, workspaceId, anchorKey) {
+      // Find-or-create lookup for workflow `page.reuse === 'per-workflow'`
+      // (migration 279). RLS-scoped by `userId` (a workspace member); the
+      // `(workspace_id, anchor_key)` partial unique index makes this a single
+      // index probe.
+      const result = await queryWithRLS<{ id: string }>(
+        userId,
+        `SELECT id FROM saved_views
+          WHERE workspace_id = $1 AND anchor_key = $2
+          LIMIT 1`,
+        [workspaceId, anchorKey],
+      )
+      return result.rows[0]?.id ?? null
     },
 
     async setAutoTitle(userId, id, title, icon) {

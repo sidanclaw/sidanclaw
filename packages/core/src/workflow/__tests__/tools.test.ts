@@ -83,7 +83,7 @@ function fakeStores() {
       const r: WorkflowRunRecord = {
         id: id(), workflowId, workspaceId, triggeredBy, triggerKind,
         status: 'pending', input: input ?? {}, vars: {}, currentStepId: null,
-        error: null, startedAt: now, finishedAt: null, lastActiveAt: now,
+        error: null, outcome: null, startedAt: now, finishedAt: null, lastActiveAt: now,
       }
       runs.set(r.id, r); return r
     },
@@ -118,6 +118,20 @@ function fakeStores() {
       return filtered
         .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())
         .slice(0, opts?.limit ?? 50)
+    },
+    async getLatestOutcomeForWorkflowSystem(workflowId, excludeRunId) {
+      const terminal = Array.from(runs.values())
+        .filter(
+          (r) =>
+            r.workflowId === workflowId &&
+            r.id !== excludeRunId &&
+            (r.status === 'completed' || r.status === 'failed' || r.status === 'timeout'),
+        )
+        .sort(
+          (a, b) =>
+            (b.finishedAt ?? b.startedAt).getTime() - (a.finishedAt ?? a.startedAt).getTime(),
+        )
+      return terminal[0]?.outcome ?? null
     },
   }
   return { workflowStore, runStore, workflows, runs, stepRuns }
@@ -516,6 +530,34 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     }, makeContext())
     const warnings = (r.data as Record<string, unknown>).warnings as string[]
     expect(warnings.some((w) => w.includes('`web`') && w.includes('not'))).toBe(true)
+  })
+
+  it('proposeWorkflow warns when a non-recurring workflow stores into a reserved cross-run var name', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.proposeWorkflow.execute({
+      name: 'W',
+      definition: {
+        startStepId: 's',
+        steps: [{ id: 's', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'summarize', storeOutputAs: 'summary' }],
+      },
+      // manual (default) trigger — one-shot, so the capture has no next run to reach.
+    }, makeContext())
+    const warnings = (r.data as { warnings: string[] }).warnings
+    expect(warnings.some((w) => w.includes('reserved cross-run hand-off') && w.includes('summary'))).toBe(true)
+  })
+
+  it('proposeWorkflow stays quiet about a reserved var name on a recurring workflow (intended hand-off)', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.proposeWorkflow.execute({
+      name: 'W',
+      definition: {
+        startStepId: 's',
+        steps: [{ id: 's', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'summarize', storeOutputAs: 'todo' }],
+      },
+      trigger: { kind: 'schedule', schedule: { type: 'daily', time: '08:00' } },
+    }, makeContext())
+    const warnings = (r.data as { warnings: string[] }).warnings
+    expect(warnings.some((w) => w.includes('reserved cross-run hand-off'))).toBe(false)
   })
 
   it('proposeWorkflow warns on doc-editing prose with no page anchor', async () => {
