@@ -154,6 +154,34 @@ describe('[COMP:memory/tools] saveMemory', () => {
     expect(store.rows[0].summary).toBe('Likes ramen')
   })
 
+  it('unions injectedTags onto a created memory (workflow tagging)', async () => {
+    // The workflow callee passes injectedTags: ['workflow:<id>'] so a written
+    // memory is traceable to the workflow — the key behind prior-run visibility.
+    const store = makeFakeStore()
+    const { saveMemory } = createMemoryTools(store, { injectedTags: ['workflow:wf-123'] })
+    await saveMemory.execute({ summary: 'HK SME fact', tags: ['research'] }, ctx)
+    expect(store.rows).toHaveLength(1)
+    expect(store.rows[0].tags).toEqual(expect.arrayContaining(['research', 'workflow:wf-123']))
+  })
+
+  it('does not duplicate an injectedTag the model already supplied', async () => {
+    const store = makeFakeStore()
+    const { saveMemory } = createMemoryTools(store, { injectedTags: ['workflow:wf-123'] })
+    await saveMemory.execute({ summary: 'x', tags: ['workflow:wf-123'] }, ctx)
+    expect(store.rows[0].tags.filter((t) => t === 'workflow:wf-123')).toHaveLength(1)
+  })
+
+  it('does not apply injectedTags on update (create-only)', async () => {
+    const store = makeFakeStore()
+    // Seed a row with a plain tool (no injected tag), then update via the
+    // workflow-tagging tool: the update path must not stamp the workflow tag.
+    await createMemoryTools(store).saveMemory.execute({ summary: 'Original', tags: ['research'] }, ctx)
+    const id = store.rows[0].id
+    const { saveMemory } = createMemoryTools(store, { injectedTags: ['workflow:wf-123'] })
+    await saveMemory.execute({ id, detail: 'more detail' }, ctx)
+    expect(store.rows[0].tags).toEqual(['research'])
+  })
+
   it('stamps a research-mode finding public despite internal brain-first reads', async () => {
     // The reported bug: research mode reads internal brain rows (brain-first)
     // before web research, bumping the per-turn accumulator, so public web

@@ -11,8 +11,9 @@
  *      until it accepts connections - it migrates open-schema-v1 on first boot.
  *   4. start the api (:4000), the doc-sync sidecar (:8080) and app-web (:3003),
  *      all pointed at the socket via DATABASE_URL; single-process event buses.
- *   5. open the browser straight into an authenticated session (dev-login
- *      auto-provisions one Personal workspace — no /login, no /teams).
+ *   5. open the browser straight into an authenticated session as the local
+ *      owner (/auth/local-session auto-provisions one Personal workspace — no
+ *      /login, no /teams, no "dev" identity).
  *
  * The Postgres container is the code-identical escape hatch: set DATABASE_URL to
  * a real postgres:// string and the brain server step is skipped.
@@ -20,7 +21,7 @@
 import { spawn } from 'node:child_process'
 import { connect } from 'node:net'
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { homedir, platform } from 'node:os'
+import { homedir, platform, userInfo } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
@@ -38,14 +39,23 @@ const PORTS = { pglite: 54329, api: 4000, docSync: 8080, appWeb: 3003 }
 mkdirSync(CONFIG_DIR, { recursive: true })
 const config = existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) : {}
 let geminiKey = process.env.GEMINI_API_KEY || config.geminiApiKey
-if (!geminiKey) {
+// The single-player owner identity — shown in the app, no login. Local config
+// is the source of truth; prompt once (default the OS username) and persist.
+let ownerName = process.env.SIDANCLAW_OWNER_NAME || config.ownerName
+if (!geminiKey || !ownerName) {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
-  geminiKey = (await rl.question('Enter your GEMINI_API_KEY (https://aistudio.google.com/apikey): ')).trim()
+  if (!geminiKey) {
+    geminiKey = (await rl.question('Enter your GEMINI_API_KEY (https://aistudio.google.com/apikey): ')).trim()
+    if (!geminiKey) { rl.close(); console.error('A GEMINI_API_KEY is required to boot. Exiting.'); process.exit(1) }
+  }
+  if (!ownerName) {
+    const fallback = (userInfo().username || 'You').trim()
+    ownerName = (await rl.question(`What should I call you? [${fallback}]: `)).trim() || fallback
+  }
   rl.close()
-  if (!geminiKey) { console.error('A GEMINI_API_KEY is required to boot. Exiting.'); process.exit(1) }
 }
 const jwtSecret = config.jwtSecret || randomBytes(32).toString('hex')
-writeFileSync(CONFIG_FILE, JSON.stringify({ ...config, geminiApiKey: geminiKey, jwtSecret }, null, 2))
+writeFileSync(CONFIG_FILE, JSON.stringify({ ...config, geminiApiKey: geminiKey, jwtSecret, ownerName }, null, 2))
 
 // External-store escape hatch: a real Postgres URL skips the embedded brain.
 const useEmbedded = !process.env.DATABASE_URL
@@ -63,6 +73,10 @@ const env = {
   // defaults to the full hosted edition when unset, so only the local launcher
   // opts into 'oss'.
   NEXT_PUBLIC_SIDANCLAW_EDITION: 'oss',
+  // Server-side edition mirror (the api gates the local-owner session on this)
+  // + the owner's display name, both consumed by /auth/local-session.
+  SIDANCLAW_EDITION: 'oss',
+  SIDANCLAW_OWNER_NAME: ownerName,
   API_URL: `http://localhost:${PORTS.api}`,
   APP_URL: `http://localhost:${PORTS.appWeb}`,
   NEXT_PUBLIC_API_URL: `http://localhost:${PORTS.api}`,
@@ -134,6 +148,6 @@ run('doc-sync', 'pnpm', ['--filter', '@sidanclaw/doc-sync', 'exec', 'tsx', 'src/
 run('app-web', 'pnpm', ['--filter', 'app-web', 'dev'])
 
 await waitForPort(PORTS.appWeb, 'app-web', 120_000)
-const entryUrl = `http://localhost:${PORTS.appWeb}/api/auth/dev-login`
+const entryUrl = `http://localhost:${PORTS.appWeb}/api/auth/local-session`
 console.log(`\n[launch] sidanclaw is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb})\n  Ctrl-C to stop everything.\n`)
 openBrowser(entryUrl)

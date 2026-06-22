@@ -1405,6 +1405,26 @@ export function looksLikeInstructionLeak(text: string): boolean {
     'system prompt',
   ]
   if (SUBSTRINGS.some((p) => lower.includes(p))) return true
+  // Self-referential delivery-process narration: the model talks ABOUT
+  // emitting its reply instead of emitting it — "wait for my next reply",
+  // "the final user-facing text". Neither phrasing occurs in a reply
+  // addressed TO a user. UNBOUNDED by length (the ≤200-char plan-tail gate
+  // below would miss this): the 2026-06-20 leak (GM Bro daily-summary cron,
+  // session 26cc0330) shipped ~700 chars of chain-of-thought ("Wait, I
+  // should check…", "Let me try a broader search…") to a Telegram topic
+  // because its opener — "Wait for my next reply before sending the final
+  // user-facing text." — matched no existing anchor (and `sanitizeDeliveryText`
+  // only targets structured scaffolding like "Message body:"). Suppressing
+  // here trips EMPTY_RETRY_PLAN, which re-prompts for a real summary. Both
+  // patterns demand an explicit self-output reference, so a dev/design reply
+  // mentioning "the user-facing copy" or "before sending the announcement" is
+  // left untouched.
+  if (
+    /\b(?:wait for|await) (?:my|the) (?:next|final|following|upcoming) (?:reply|message|response|turn)\b/.test(lower)
+    || /\bfinal user-facing\s+(?:text|message|reply|response|output|content)\b/.test(lower)
+  ) {
+    return true
+  }
   // First-sentence structural check: imperatives + meta-talk openers.
   // Real summaries don't start with "No X." / "Don't Y." / "Just Z."
   const firstSentence = text.trim().slice(0, 120).split(/[.!?\n]/)[0]?.trim() ?? ''

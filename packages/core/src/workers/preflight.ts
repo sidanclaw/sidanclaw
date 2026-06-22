@@ -13,7 +13,7 @@
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import type { Tool, ToolContext } from '../tools/types.js'
 import type { QueryEvent } from '../engine/query-loop.js'
-import { createWorkerManager } from './worker.js'
+import { createWorkerManager, type WorkerRunsStore } from './worker.js'
 import { classifySplit } from './splitter.js'
 
 /**
@@ -46,6 +46,30 @@ export type PreflightOptions = {
   onEvent?: (event: QueryEvent, workerId: string, description?: string) => void
   /** Max turns per worker. Default 3, extended thinking uses 10. */
   maxWorkerTurns?: number
+  /**
+   * Persist each spawned worker as a `worker_runs` row (spawn/turn/completion).
+   * Set by a workflow research step so its fan-out is observable in the
+   * run-detail surface + admin dashboard. Absent (chat standard-tier preflight)
+   * → workers run unpersisted, exactly as before. `sessionId`/`workspaceId`
+   * must match the `context` passed to the workers for `recordSpawn` to fire.
+   */
+  persistence?: { store: WorkerRunsStore; sessionId: string; workspaceId: string }
+  /**
+   * Give workers the research-mode discipline (chain `webSearch` → `urlReader`,
+   * multi-angle queries, triangulate ≥2 sources) and the deeper turn budget.
+   * Set by a workflow research step. Absent → the historical short worker
+   * prompt. The research-tier model is passed via `model`.
+   */
+  researchMode?: boolean
+  /** Cap concurrent workers (memory pressure). Absent → manager default. */
+  maxConcurrent?: number
+  /**
+   * When the splitter declines to split (one focused ask, or a short prompt),
+   * still run a single worker on the whole `message` so a research step always
+   * actually researches. Set by a workflow research step. Absent → a
+   * non-splittable message is a `passthrough` (chat's historical behavior).
+   */
+  forceResearch?: boolean
 }
 
 /**
@@ -62,7 +86,11 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   // returned on the result so the caller can record it as `overhead:splitter`.
   const { tasks, usage, model: classifierModel } = await classifySplit({ provider, message })
   const classifierUsage: PreflightClassifierUsage = { usage, model: classifierModel }
-  if (!tasks) return { type: 'passthrough', ...classifierUsage }
+  // A workflow research step always researches: if the splitter declines to
+  // split, fall back to a single worker on the whole prompt. Chat preflight
+  // (forceResearch absent) keeps the historical passthrough.
+  const tasksToRun = tasks ?? (options.forceResearch ? [message] : null)
+  if (!tasksToRun) return { type: 'passthrough', ...classifierUsage }
 
   // Step 2: Spawn parallel workers
   onStatus?.('Researching in parallel...')
@@ -73,11 +101,17 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
     tools: new Map([...tools].filter(([_, t]) => t.isReadOnly)),
     maxTurns: options.maxWorkerTurns ?? 2, // 1 search + 1 URL read = 2 turns max
   })
+  // Workflow research steps persist each worker (worker_runs rows) and run the
+  // research-mode discipline on the research-tier model. Chat preflight leaves
+  // all of these unset → unpersisted, short-prompt workers, unchanged.
+  if (options.persistence) manager.setPersistence(options.persistence)
+  if (options.researchMode) manager.setResearchMode(true)
+  if (options.maxConcurrent != null) manager.setMaxConcurrent(options.maxConcurrent)
   if (onEvent) {
     manager.setOnEvent((workerId, event) => onEvent(event, workerId, manager.getDescription(workerId) ?? undefined))
   }
 
-  for (const taskPrompt of tasks) {
+  for (const taskPrompt of tasksToRun) {
     manager.spawn(taskPrompt, context, tools)
   }
 

@@ -771,6 +771,11 @@ async function dispatchAssistantCall(
     // Page anchor — resolved above to a concrete saved_views id. The callee
     // executor gates access + injects doc tools + sets ToolContext.docViewId.
     pageAnchorId,
+    // Originating workflow id — drives the callee's memory continuity (tag
+    // written memories `workflow:<id>` + surface prior-run memories so a
+    // recurring workflow saves only new facts). See
+    // docs/architecture/features/workflow.md → "assistant_call memory continuity".
+    workflowId: ctx.workflow.id,
     caller: {
       workspaceId: ctx.run.workspaceId,
       assistantId: ctx.primaryAssistantId,

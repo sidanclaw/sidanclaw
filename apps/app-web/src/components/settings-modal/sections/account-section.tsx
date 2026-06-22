@@ -34,6 +34,7 @@ import {
   formatCountdown,
 } from "@/lib/telegram-link";
 import { format } from "@/lib/i18n/format";
+import { isOssEdition } from "@/lib/edition";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -155,7 +156,11 @@ export function AccountSection() {
         />
         <div className="min-w-0">
           <div className="text-sm font-medium">{displayLabel}</div>
-          <div className="text-xs text-muted-foreground truncate">{userInfo?.email ?? ""}</div>
+          {/* The oss single-player owner has no real email — the local-owner
+              session uses a synthetic `@local` address that must never surface. */}
+          {!isOssEdition() && (
+            <div className="text-xs text-muted-foreground truncate">{userInfo?.email ?? ""}</div>
+          )}
           <div className="mt-2 flex items-center gap-3">
             <input
               ref={fileInputRef}
@@ -209,27 +214,35 @@ export function AccountSection() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && nameDirty && onSaveName()}
-                className="flex-1 text-sm bg-muted/50 border border-border rounded-lg px-3 py-2"
+                // In the oss edition the owner name is local config (set via the
+                // launcher prompt / ~/.sidanclaw/config.json), so it is read-only
+                // here — an in-app edit would be re-clobbered on the next boot.
+                disabled={savingName || isOssEdition()}
+                className="flex-1 text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 disabled:opacity-60"
               />
-              <button
-                type="button"
-                onClick={onSaveName}
-                disabled={!nameDirty || savingName}
-                className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-              >
-                {savingName ? "…" : t.settings.account.saveName}
-              </button>
+              {!isOssEdition() && (
+                <button
+                  type="button"
+                  onClick={onSaveName}
+                  disabled={!nameDirty || savingName}
+                  className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {savingName ? "…" : t.settings.account.saveName}
+                </button>
+              )}
             </div>
           </div>
-          <div>
-            <label className="text-xs text-muted-foreground block mb-1">{t.settings.account.email}</label>
-            <input
-              type="email"
-              defaultValue={userInfo?.email ?? ""}
-              disabled
-              className="w-full text-sm bg-muted border border-border rounded-lg px-3 py-2 text-muted-foreground"
-            />
-          </div>
+          {!isOssEdition() && (
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">{t.settings.account.email}</label>
+              <input
+                type="email"
+                defaultValue={userInfo?.email ?? ""}
+                disabled
+                className="w-full text-sm bg-muted border border-border rounded-lg px-3 py-2 text-muted-foreground"
+              />
+            </div>
+          )}
         </div>
       </div>
 

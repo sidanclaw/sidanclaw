@@ -273,6 +273,16 @@ export type ConsultRequest = {
    * docs/architecture/features/workflow.md → "assistant_call page anchor".
    */
   pageAnchorId?: string
+  /**
+   * Originating workflow id, set for a workflow `assistant_call` step. Two
+   * uses in the callee executor: (1) memory continuity — memories the step
+   * writes are auto-tagged `workflow:<id>` and prior-run memories carrying
+   * that tag are surfaced so a recurring workflow saves only new facts; (2)
+   * a stable session/worker scope key. Absent for ordinary askAssistant
+   * consults. See docs/architecture/features/workflow.md →
+   * "assistant_call memory continuity".
+   */
+  workflowId?: string
   caller: CallerIdentity
   chain: ConsultChain
 }

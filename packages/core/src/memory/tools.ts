@@ -111,6 +111,17 @@ export type MemoryToolOptions = {
    * "Recall-outcome tagging".
    */
   recallBuffer?: MemoryRecallBuffer
+  /**
+   * Tags force-stamped onto every memory this tool *creates*, unioned with
+   * (and never overriding) the model's own tags. Set by the workflow callee
+   * executor to `['workflow:<workflowId>']` so a memory can be traced back to
+   * the workflow that wrote it — the deterministic key behind recurring-run
+   * memory continuity (prior-run visibility). Empty / absent → no injected
+   * tags (chat behavior unchanged). Applies to create only, not update.
+   * See `docs/architecture/features/workflow.md` → "assistant_call memory
+   * continuity".
+   */
+  injectedTags?: string[]
 }
 
 /**
@@ -377,6 +388,13 @@ export function createMemoryTools(
         // Auto-tag 'note' per spec; preserve user-supplied tags + de-dupe.
         const baseTags = input.tags ?? []
         effectiveTags = baseTags.includes('note') ? baseTags : [...baseTags, 'note']
+      }
+
+      // Caller-injected tags (workflow tagging: `workflow:<id>`). Unioned with
+      // the model's tags so a workflow-written memory is traceable to its
+      // workflow without overriding anything the model chose. Create-only.
+      if (opts?.injectedTags?.length) {
+        effectiveTags = Array.from(new Set([...(effectiveTags ?? []), ...opts.injectedTags]))
       }
 
       // Create new. WU-2.2 stamps universal-column authorship from the

@@ -64,6 +64,33 @@ describe('[COMP:tools/fathom] Fathom tools', () => {
     })
   })
 
+  it('surfaces an integer recording_id (and created_at) so per-recording calls work', async () => {
+    // Fathom's GET /meetings returns recording_id as an INTEGER and the
+    // timestamp as `created_at`; the share-URL slug is NOT the recording_id.
+    // If the projector drops the integer id, the model is forced to scrape
+    // the slug out of `url` and every fathomGetSummary(slug) then 404s.
+    const api = fakeApi({
+      listMeetings: vi.fn().mockResolvedValue({
+        items: [
+          {
+            recording_id: 716959348,
+            title: '6 pm PT - Draper Dragon',
+            created_at: '2026-06-19T01:00:00Z',
+            url: 'https://fathom.video/calls/abc123',
+            default_summary: null,
+          },
+        ],
+      }),
+    })
+    const tool = createFathomTools(api).find((t) => t.name === 'fathomListMeetings')!
+
+    const result = await tool.execute({}, NULL_CTX)
+    const item = (result.data as { items: Array<Record<string, unknown>> }).items[0]
+
+    expect(item.recording_id).toBe('716959348')
+    expect(item.recorded_at).toBe('2026-06-19T01:00:00Z')
+  })
+
   it('returns the API payload as data on success', async () => {
     const api = fakeApi({
       getTranscript: vi.fn().mockResolvedValue({ entries: [{ speaker: 'A', text: 'hi' }] }),

@@ -10,7 +10,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
-import { type Json, str, asRows, projectList } from './_connector-result.js'
+import { type Json, str, idStr, asRows, projectList } from './_connector-result.js'
 
 // Fathom meeting objects carry host / share-settings / per-participant user
 // objects the model never needs. Project to the documented fields, but
@@ -21,9 +21,11 @@ const INLINE_INCLUDES = ['default_summary', 'transcript', 'summary', 'action_ite
 
 function meetingRow(m: Json, full = false): Json {
   const out: Json = {
-    recording_id: str(m, 'recording_id') ?? str(m, 'id'),
+    // Fathom returns recording_id as an INTEGER — read it id-safe so the model
+    // gets a usable id, not the share-URL slug (which is not the recording_id).
+    recording_id: idStr(m, 'recording_id') ?? idStr(m, 'id'),
     title: str(m, 'title'),
-    recorded_at: str(m, 'recorded_at'),
+    recorded_at: str(m, 'recorded_at') ?? str(m, 'created_at'),
     url: str(m, 'url') ?? str(m, 'share_url'),
   }
   if (full) {

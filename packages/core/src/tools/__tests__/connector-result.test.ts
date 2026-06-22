@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { asRows, str, num, bool, obj, projectList, mapField } from '../base/_connector-result.js'
+import { asRows, str, idStr, num, bool, obj, projectList, mapField } from '../base/_connector-result.js'
 import { createGitHubTools } from '../base/github.js'
 import { createNotionTools } from '../base/notion.js'
 
@@ -29,6 +29,16 @@ describe('[COMP:tools/connector-result] projection helpers', () => {
     expect(bool(o, 'b')).toBe(true)
     expect(obj(o, 'nested')).toEqual({ k: 1 })
     expect(obj(o, 's')).toBeUndefined()
+  })
+
+  it('idStr coerces string OR numeric ids, unlike str (which drops numbers)', () => {
+    const o = { strId: 'rec_abc', numId: 716959348, bad: NaN, nil: null }
+    expect(idStr(o, 'strId')).toBe('rec_abc')
+    expect(idStr(o, 'numId')).toBe('716959348')
+    expect(str(o, 'numId')).toBeUndefined() // the bug this guards against
+    expect(idStr(o, 'bad')).toBeUndefined()
+    expect(idStr(o, 'nil')).toBeUndefined()
+    expect(idStr(o, 'missing')).toBeUndefined()
   })
 
   it('projectList caps, maps, and reports matched/truncated with an explicit total', () => {

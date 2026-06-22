@@ -86,6 +86,7 @@ import { getTaskByIdSystem } from './db/tasks.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
 import { authRoutes } from './routes/auth.js'
 import { devAuthRoutes, isLocalDevEnv } from './routes/dev-auth.js'
+import { localSessionRoutes, isOssEdition } from './routes/local-session.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
 import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
@@ -759,6 +760,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (isLocalDevEnv()) {
     app.use('/auth', devAuthRoutes({ jwtSecret: env.JWT_SECRET }))
     console.warn('[dev-auth] LOCAL /auth/dev-login enabled — debug-only bypass.')
+    // The oss single-player edition's consumer front door (not a dev bypass):
+    // a neutral local-owner session the launcher opens. Gated to local + oss.
+    if (isOssEdition()) {
+      app.use(
+        '/auth',
+        localSessionRoutes({ jwtSecret: env.JWT_SECRET, ownerName: process.env.SIDANCLAW_OWNER_NAME }),
+      )
+      console.log('[local-session] oss local-owner session enabled at /auth/local-session.')
+    }
   }
 
   const { createConnectorGrantStore } = await import('./db/connector-grant-store.js')
@@ -899,6 +909,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     injectExtraTools: ports.injectExtraTools,
     resolveAppSoul: ports.resolveAppSoul,
     savedViewStore,
+    // Enables real parallel research-worker fan-out (with worker_runs rows) on
+    // research-flagged no-page workflow steps. See workflow.md → "research fan-out".
+    workerRunsStore,
   })
 
   const { createAssistantModesStore } = await import('./db/assistant-modes-store.js')
@@ -951,6 +964,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         deliverTarget: request.deliver,
         pageAnchorId: request.pageAnchorId,
         callerChannelType: request.caller.channelType,
+        workflowId: request.workflowId,
       })
       return { text }
     },

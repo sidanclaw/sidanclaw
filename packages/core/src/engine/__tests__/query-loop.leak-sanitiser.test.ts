@@ -97,8 +97,54 @@ describe('[COMP:engine/leak-sanitiser] looksLikeInstructionLeak — plan-tail pa
     expect(looksLikeInstructionLeak("Address the user's question.")).toBe(true)
   })
 
+  // Self-referential delivery-process narration. The exact ~700-char leak
+  // GM Bro's daily-summary cron shipped to a Telegram topic on 2026-06-20
+  // (session 26cc0330): the model narrated its own dispatch process and dumped
+  // chain-of-thought instead of a summary. Length-unbounded, so the ≤200-char
+  // plan-tail gate misses it; the new opener/user-facing anchors catch it.
+  const JUN20_LEAK = [
+    'Wait for my next reply before sending the final user-facing text.',
+    '',
+    'I searched your Google Calendar and Tasks for Saturday, June 20, but both returned no entries for today. Your schedule appears to be completely clear with no pending tasks on your default list.',
+    '',
+    'Wait, I should check if there are other calendars or task lists before concluding. I\'ll do one quick check for other task lists. (I already did `googleTasksListTaskLists` and it returned empty? No, I didn\'t see the output of `googleTasksListTaskLists` because I misread the tool call results or it was empty).',
+    '',
+    'Wait, the previous `googleTasksListTaskLists` result was `{"matched":0,"returned":0,"truncated":false,"items":[]}`. This is very unusual. Usually, there is at least a `@default` list.',
+    '',
+    'Let me try a broader search for any calendar events in the next 7 days just to confirm connectivity.',
+  ].join('\n')
+
+  it('catches the 2026-06-20 GM Bro cron leak (700 chars, > the 200-char gate)', () => {
+    expect(JUN20_LEAK.length).toBeGreaterThan(200)
+    expect(looksLikeInstructionLeak(JUN20_LEAK)).toBe(true)
+  })
+
+  it('catches "Wait for my next reply..." on its own', () => {
+    expect(looksLikeInstructionLeak('Wait for my next reply before I send the summary.')).toBe(true)
+  })
+
+  it('catches "...the final user-facing message..." mid-text', () => {
+    expect(
+      looksLikeInstructionLeak('Calendar is clear today. The final user-facing message should note that.'),
+    ).toBe(true)
+  })
+
   // Negative cases — these are real user-facing replies that happen to
   // contain "user" or "question" or "then". The detector must not fire.
+  it('does NOT fire on a dev/design reply that mentions user-facing copy or sending', () => {
+    // "user-facing" without the "final … " framing, and a send/await verb
+    // that is NOT about the model's own reply, must both pass through.
+    expect(
+      looksLikeInstructionLeak('I tightened the user-facing copy on the onboarding button.'),
+    ).toBe(false)
+    expect(
+      looksLikeInstructionLeak('I drafted the announcement. Before sending the message to the team, want to review it?'),
+    ).toBe(false)
+    expect(
+      looksLikeInstructionLeak('Wait for the next sprint to ship the migration.'),
+    ).toBe(false)
+  })
+
   it('does NOT fire on a normal multi-paragraph reply', () => {
     const real = [
       'I created three tasks in your GRI workspace:',
@@ -208,6 +254,30 @@ describe('[COMP:engine/leak-sanitiser] query-loop turn boundary', () => {
       .join('')
     expect(finalText).toBe('Three tasks created — see the panel.')
     // 2 send() calls: initial leak turn, EMPTY_RETRY_PLAN re-prompt.
+    expect(calls).toHaveLength(2)
+  })
+
+  it('strips a self-referential delivery-narration turn and re-prompts (2026-06-20 repro)', async () => {
+    // GM Bro cron shape: the whole turn is the model narrating its own
+    // dispatch ("Wait for my next reply before sending the final user-facing
+    // text.") with no tool_use and no real answer. Suppress → EMPTY_RETRY_PLAN
+    // re-prompt → clean summary. Without the fix this shipped to Telegram.
+    const { provider, calls } = scriptedProvider([
+      textChunks(
+        'Wait for my next reply before sending the final user-facing text.\n\n' +
+          'I searched your Google Calendar and Tasks but both returned no entries. ' +
+          'Let me try a broader search to confirm connectivity.',
+      ),
+      textChunks('Your Saturday is clear — no calendar events and no pending tasks.'),
+    ])
+    const events = await runLoop(provider)
+    const turnComplete = events.find((e) => e.type === 'turn_complete')
+    if (turnComplete?.type !== 'turn_complete') throw new Error('expected turn_complete')
+    const finalText = turnComplete.response.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('')
+    expect(finalText).toBe('Your Saturday is clear — no calendar events and no pending tasks.')
     expect(calls).toHaveLength(2)
   })
 

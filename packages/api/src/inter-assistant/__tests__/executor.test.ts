@@ -13,10 +13,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const mockQueryLoop = vi.fn()
+const mockRunPreflight = vi.fn()
 
+// Override queryLoop + runPreflight; everything else (buildPreflightPrompt,
+// prompt/memory-context builders, MODEL_MAP) runs for real so the system-prompt
+// injection + model resolution are exercised end to end.
 vi.mock('@sidanclaw/core', async (io) => ({
   ...(await io<typeof import('@sidanclaw/core')>()),
   queryLoop: (...a: unknown[]) => mockQueryLoop(...a),
+  runPreflight: (...a: unknown[]) => mockRunPreflight(...a),
 }))
 vi.mock('../../db/users.js', () => ({
   findAssistantById: vi.fn(),
@@ -538,5 +543,116 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(mockRunProactiveCompaction).toHaveBeenCalledWith(
       expect.objectContaining({ chatEpisodeIngestor: ingestor, workspaceId: 'ws-1' }),
     )
+  })
+})
+
+describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory continuity', () => {
+  // A workspace-scoped callee — research fan-out + prior-run memory both
+  // require a workspace. No pageAnchorId, so the page gate is skipped.
+  const wsCallee = { id: 'callee-1', ownerUserId: 'owner-1', workspaceId: 'ws-1', clearance: 'internal', name: 'Callee Bot' }
+
+  function wsMemoryStore(overrides: Record<string, unknown> = {}) {
+    return {
+      getSoul: vi.fn().mockResolvedValue(null),
+      getIdentity: vi.fn().mockResolvedValue([]),
+      getIndex: vi.fn().mockResolvedValue([]),
+      getWorkspaceIdentity: vi.fn().mockResolvedValue([]),
+      getWorkspaceIndex: vi.fn().mockResolvedValue([]),
+      getWorkspaceMemoriesByCategory: vi.fn().mockResolvedValue([]),
+      ...overrides,
+    }
+  }
+
+  const workerRunsStore = { recordSpawn: vi.fn(), recordTurn: vi.fn(), recordCompletion: vi.fn(), loadForSession: vi.fn() }
+
+  beforeEach(() => {
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? wsCallee : id === 'caller-1' ? callerAssistant : null) as never,
+    )
+    yields([{ type: 'turn_complete', response: { content: [{ type: 'text', text: 'brief' }] } }])
+  })
+
+  it('runs research fan-out on the research tier and injects findings (deep, no page, workspace, store wired)', async () => {
+    mockRunPreflight.mockResolvedValue({ type: 'researched', context: 'HK SME stat: 62% adoption', usage: null, model: null })
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: wsMemoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      workerRunsStore: workerRunsStore as never,
+    })
+    await callee({ ...baseParams, depth: { tier: 'deep' }, callerChannelType: 'workflow', workflowId: 'wf-1' })
+
+    expect(mockRunPreflight).toHaveBeenCalledTimes(1)
+    expect(mockRunPreflight.mock.calls[0][0]).toMatchObject({ model: 'gemini-3-pro-research', researchMode: true, forceResearch: true })
+    const loopArg = mockQueryLoop.mock.calls[0][0] as { model: string; systemPrompt: string }
+    expect(loopArg.model).toBe('gemini-3-pro-research')
+    expect(loopArg.systemPrompt).toContain('HK SME stat: 62% adoption')
+    expect(loopArg.systemPrompt).toContain('Pre-Researched Context')
+  })
+
+  it('skips research fan-out when no workerRunsStore is wired', async () => {
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: wsMemoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      // no workerRunsStore
+    })
+    await callee({ ...baseParams, depth: { tier: 'deep' }, callerChannelType: 'workflow', workflowId: 'wf-1' })
+    expect(mockRunPreflight).not.toHaveBeenCalled()
+    expect((mockQueryLoop.mock.calls[0][0] as { systemPrompt: string }).systemPrompt).not.toContain('Pre-Researched Context')
+  })
+
+  it('skips research fan-out on a page-anchored step (authoring path preserved)', async () => {
+    // pageAnchorId set → the executor takes the doc-authoring path, never fan-out.
+    // The page gate needs a savedViewStore returning a same-workspace page.
+    const savedViewStore = { getById: vi.fn().mockResolvedValue({ id: 'page-1', workspaceId: 'ws-1', clearance: 'internal', state: 'saved' }), setAutoPruneAt: vi.fn() }
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: wsMemoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      workerRunsStore: workerRunsStore as never,
+      savedViewStore: savedViewStore as never,
+    })
+    await callee({ ...baseParams, depth: { tier: 'deep' }, pageAnchorId: 'page-1', callerChannelType: 'workflow', workflowId: 'wf-1' })
+    expect(mockRunPreflight).not.toHaveBeenCalled()
+  })
+
+  it('injects prior-run workflow memories with a save-only-new instruction', async () => {
+    const store = wsMemoryStore({
+      getWorkspaceMemoriesByCategory: vi.fn().mockResolvedValue([
+        { id: 'abcd1234-0000-0000-0000-000000000000', summary: 'HK TVP subsidy fact' },
+      ]),
+    })
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: store as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      workerRunsStore: workerRunsStore as never,
+    })
+    // No depth → no fan-out; exercises the memory-continuity path in isolation.
+    await callee({ ...baseParams, callerChannelType: 'workflow', workflowId: 'wf-1' })
+
+    expect(store.getWorkspaceMemoriesByCategory).toHaveBeenCalledWith(expect.anything(), 'workflow:wf-1')
+    const sp = (mockQueryLoop.mock.calls[0][0] as { systemPrompt: string }).systemPrompt
+    expect(sp).toContain('Already recorded by this workflow')
+    expect(sp).toContain('HK TVP subsidy fact')
+    expect(sp).toContain('[id:abcd1234]')
+  })
+
+  it('does not fetch prior-run memories for an ordinary (non-workflow) consult', async () => {
+    const store = wsMemoryStore()
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: store as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      workerRunsStore: workerRunsStore as never,
+    })
+    await callee(baseParams) // no workflowId
+    expect(store.getWorkspaceMemoriesByCategory).not.toHaveBeenCalled()
   })
 })

@@ -29,6 +29,19 @@ export function str(o: Json | undefined, key: string): string | undefined {
   return typeof v === 'string' ? v : undefined
 }
 
+/**
+ * Read an id field that may arrive as a string OR a number, coerced to a
+ * string. Several providers return numeric ids (e.g. Fathom `recording_id`
+ * is an integer); `str()` would silently drop those, leaving the model with
+ * no id to make per-resource follow-up calls. Use this for id-shaped fields.
+ */
+export function idStr(o: Json | undefined, key: string): string | undefined {
+  const v = o?.[key]
+  if (typeof v === 'string') return v
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+  return undefined
+}
+
 /** Read a numeric field, or undefined if absent / wrong type. */
 export function num(o: Json | undefined, key: string): number | undefined {
   const v = o?.[key]

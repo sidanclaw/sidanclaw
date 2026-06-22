@@ -31,6 +31,7 @@ import type {
   CapabilityStore,
   AssistantMode,
   ResearchDepthConfig,
+  WorkerRunsStore,
 } from '@sidanclaw/core'
 import {
   queryLoop,
@@ -46,6 +47,8 @@ import {
   createConfirmationResolver,
   resolveResearchBudget,
   ASSISTANT_CALL_DEFAULT_BUDGET,
+  runPreflight,
+  buildPreflightPrompt,
 } from '@sidanclaw/core'
 import type { SavedViewStore } from '@sidanclaw/core'
 import {
@@ -144,6 +147,16 @@ export type CalleeExecutorOptions = {
    * gate + tests.)
    */
   savedViewStore?: SavedViewStore
+  /**
+   * Worker-runs persistence store. When present, a research-flagged no-page
+   * workflow step (`depth.tier === 'deep'`, no `pageAnchorId`) runs real
+   * parallel research workers (fresh per-step `WorkerManager`) on the research
+   * tier before its synthesis loop, each spawn observable as a `worker_runs`
+   * row. Absent (Phase-A boots, tests) → the step degrades to the callee's own
+   * in-loop `webSearch`/`urlReader`, no fan-out. See
+   * docs/architecture/features/workflow.md → "assistant_call research fan-out".
+   */
+  workerRunsStore?: WorkerRunsStore
 }
 
 export type CalleeQueryParams = {
@@ -217,6 +230,16 @@ export type CalleeQueryParams = {
    * as a non-workflow origin (read-only memory).
    */
   callerChannelType?: 'web' | 'telegram' | 'slack' | 'cron' | 'workflow' | 'a2a-external'
+  /**
+   * Originating workflow id (`ConsultRequest.workflowId`), set for a workflow
+   * `assistant_call` step. Drives memory continuity: memories the step writes
+   * are auto-tagged `workflow:<id>`, and prior-run memories carrying that tag
+   * are surfaced in the system prompt with a "save only new facts" instruction
+   * so a recurring workflow stops re-saving the same fact. Absent for ordinary
+   * askAssistant consults. See docs/architecture/features/workflow.md →
+   * "assistant_call memory continuity".
+   */
+  workflowId?: string
 }
 
 export type CalleeExecutor = (params: CalleeQueryParams) => Promise<string>
@@ -425,7 +448,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // stays workflow-scoped. For restricted mode the mode's exposedTools list
     // is the source of truth (the owner lists `getMemory` / `saveMemory`).
     if (params.mode === null) {
-      const { saveMemory, getMemory } = createMemoryTools(options.memoryStore)
+      // Workflow-origin consults auto-tag every created memory `workflow:<id>`
+      // (memory continuity — the deterministic key prior-run visibility reads
+      // back). Ordinary askAssistant consults get no injected tag.
+      const memoryToolOpts =
+        params.workflowId != null
+          ? { injectedTags: [`workflow:${params.workflowId}`] }
+          : undefined
+      const { saveMemory, getMemory } = createMemoryTools(options.memoryStore, memoryToolOpts)
       modeTools.set('getMemory', getMemory)
       if (params.callerChannelType === 'workflow') {
         modeTools.set('saveMemory', saveMemory)
@@ -548,7 +578,31 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       ? `\n\n${buildDocSkillBlock({ mode: 'page' })}\n## Anchored page\nThis session is anchored to page \`${params.pageAnchorId}\`. Read it with \`getCurrentPage\` before editing; edit it with \`patchPage\`. Do not create a new page unless the request explicitly asks for one.`
       : ''
 
-    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    // Memory continuity for recurring workflows: surface the facts previous
+    // runs of THIS workflow already saved (tagged `workflow:<id>`) so the step
+    // saves only genuinely new ones instead of re-inserting the same fact every
+    // fire. Visibility-and-judgment, not a hard write-time dedupe. Best-effort:
+    // a fetch failure never fails the consult. See
+    // docs/architecture/features/workflow.md → "assistant_call memory continuity".
+    let priorRunMemoryBlock = ''
+    if (params.workflowId && calleeAssistant.workspaceId) {
+      try {
+        const prior = await options.memoryStore.getWorkspaceMemoriesByCategory(
+          calleeCtx,
+          `workflow:${params.workflowId}`,
+        )
+        if (prior.length > 0) {
+          priorRunMemoryBlock =
+            `\n\n## Already recorded by this workflow\n` +
+            `Previous runs of this workflow saved the facts below. Call \`saveMemory\` ONLY for genuinely new or materially changed facts — do not re-save anything already covered here. If a fact below needs refining, update it by its id rather than creating a duplicate.\n` +
+            prior.map((m) => `- [id:${m.id.slice(0, 8)}] ${m.summary}`).join('\n')
+        }
+      } catch (err) {
+        console.warn('[inter-assistant] prior-run memory fetch failed:', err)
+      }
+    }
+
+    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
 
     // 6. Build messages and run the query loop.
     //
@@ -625,19 +679,103 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const confirmationResolver = deferredConfirmations ? createConfirmationResolver() : undefined
     const registeredToolCallIds: string[] = []
 
-    // Workflow-level model alias → resolved provider id. Absent =
-    // historical Pro-tier default. Workspace plan enforcement happens
-    // at the workflow-route layer (the alias enum + UI plan gating);
-    // unknown aliases fall back to Standard.
-    const model = params.modelAlias
-      ? MODEL_MAP[params.modelAlias] ?? MODEL_MAP.standard
-      : 'gemini-flash'
+    // Research fan-out detection. A research-flagged no-page workflow step runs
+    // REAL parallel research workers (fresh per-step WorkerManager — never the
+    // chat route's shared singleton) on the research tier before its synthesis
+    // loop; each spawn is a `worker_runs` row. Gated on a workspace + the
+    // worker store being wired (absent → graceful degrade to in-loop tools).
+    // A page-anchored step is excluded (coordinator-style delegation would
+    // strip its doc-authoring tools). See docs/architecture/features/workflow.md
+    // → "assistant_call research fan-out".
+    const isResearchFanout =
+      params.depth?.tier === 'deep' &&
+      !params.pageAnchorId &&
+      !!calleeAssistant.workspaceId &&
+      !!options.workerRunsStore
+
+    // Model: a research fan-out step runs the workers AND the synthesis loop on
+    // the research tier (Pro 3.1). Otherwise the workflow-level alias (absent =
+    // historical Pro-tier `gemini-flash` default). Workspace plan enforcement
+    // happens at the workflow-route layer; unknown aliases fall back to Standard.
+    const model = isResearchFanout
+      ? MODEL_MAP.research
+      : params.modelAlias
+        ? MODEL_MAP[params.modelAlias] ?? MODEL_MAP.standard
+        : 'gemini-flash'
+
+    // Run the parallel research pass before the synthesis loop. Best-effort:
+    // a fan-out failure must never fail the step — the synthesis loop still
+    // runs with the callee's own in-loop webSearch/urlReader. Bounded by the
+    // same wall-clock abort as the loop (workers share `abortController`).
+    let researchContext = ''
+    if (isResearchFanout) {
+      try {
+        const pre = await runPreflight({
+          provider: options.provider,
+          model,
+          message: params.question,
+          tools: finalTools,
+          context: {
+            userId: calleeActorUserId,
+            assistantId: params.calleeAssistantId,
+            sessionId: session.id,
+            appId: 'sidanclaw',
+            channelType: 'assistant-call',
+            channelId: params.callerAssistantId,
+            workspaceId: calleeAssistant.workspaceId ?? undefined,
+            assistantKind: calleeAssistant.kind,
+            researchMode: true,
+            abortSignal: abortController.signal,
+          },
+          persistence: {
+            store: options.workerRunsStore!,
+            sessionId: session.id,
+            workspaceId: calleeAssistant.workspaceId!,
+          },
+          researchMode: true,
+          maxConcurrent: 5,
+          maxWorkerTurns: 4,
+          forceResearch: true,
+        })
+        if (pre.type === 'researched') researchContext = pre.context
+        // Record the splitter classifier call as overhead so it is visible in
+        // usage_tracking. NOTE: the workers' own LLM token usage is NOT
+        // recorded here — the WorkerManager has no usage hook (a pre-existing
+        // gap that also affects chat research mode). Tracked as a follow-up;
+        // see docs/architecture/features/workflow.md → "assistant_call research fan-out".
+        if (options.usageStore && pre.usage && pre.model) {
+          options.usageStore
+            .recordUsage({
+              userId: calleeActorUserId,
+              assistantId: params.calleeAssistantId,
+              sessionId: session.id,
+              model: pre.model,
+              inputTokens: pre.usage.inputTokens,
+              outputTokens: pre.usage.outputTokens,
+              cacheReadTokens: pre.usage.cacheReadTokens,
+              cacheWriteTokens: pre.usage.cacheWriteTokens,
+              actualCostUsd: calculateCost(pre.model, pre.usage),
+              source: 'overhead:splitter',
+              triggerKey: 'parallel_split_classifier',
+            })
+            .catch((err) => console.error('[inter-assistant] splitter usage tracking failed:', err))
+        }
+      } catch (err) {
+        console.error('[inter-assistant] research fan-out failed; continuing with in-loop tools:', err)
+      }
+    }
+
+    // The synthesis loop sees the gathered findings (research fan-out only);
+    // compaction above used the un-injected prompt, which is correct.
+    const loopSystemPrompt = researchContext
+      ? buildPreflightPrompt(fullSystemPrompt, researchContext)
+      : fullSystemPrompt
 
     try {
       for await (const event of queryLoop({
         provider: options.provider,
         model,
-        systemPrompt: fullSystemPrompt,
+        systemPrompt: loopSystemPrompt,
         messages,
         tools: finalTools,
         context: {
