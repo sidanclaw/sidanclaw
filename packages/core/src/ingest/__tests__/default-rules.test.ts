@@ -6,6 +6,9 @@ import {
   type IngestSourceProvider,
 } from '../default-rules.js'
 
+// Launch sources that ship with non-empty default rules. WhatsApp is
+// intentionally excluded — it is default-drop (empty rules), asserted
+// separately below.
 const SOURCES: readonly IngestSourceProvider[] = [
   'slack',
   'github',
@@ -27,6 +30,7 @@ const SOURCE_SPECIFIC_FILTERS: Record<IngestSourceProvider, readonly string[]> =
   github: ['event_type', 'repo_match', 'actor_match', 'branch_match'],
   calendar: ['attendee_match', 'organizer_match', 'subject_contains', 'is_recurring'],
   fathom: ['meeting_subject_contains', 'attendee_match'],
+  whatsapp: ['group_match', 'sender_match', 'is_dm'],
 }
 
 const VALID_TEMPLATE_KEYS = [
@@ -139,6 +143,16 @@ describe('[COMP:brain/default-rules] Default ingest rule templates', () => {
       expect(DEFAULT_INGEST_RULES.fathom).toEqual([
         { filter_type: 'always', filter_params: {}, routing_mode: 'realtime' },
       ])
+    })
+
+    it('WhatsApp is default-drop — empty rule set, NO catch-all', () => {
+      // A linked companion device receives the entire account stream
+      // (every group + DM). Seeding any rule — especially an `always`
+      // catch-all like Slack's — would ingest personal DMs and unrelated
+      // groups. Default-drop: nothing is ingested until the owner enables
+      // a group, which appends a `group_match` rule. See
+      // docs/plans/whatsapp-bring-your-own-number.md §"The gate".
+      expect(DEFAULT_INGEST_RULES.whatsapp).toEqual([])
     })
   })
 

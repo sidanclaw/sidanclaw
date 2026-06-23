@@ -71,13 +71,19 @@ export type ChannelAssistant = {
 /**
  * Per-platform capability availability — the set a channel of each type *can*
  * enable. A new channel's `enabled_capabilities` defaults to the full set;
- * `ingest` is the operator-toggleable one (Slack only — open question 4).
- * Mirrors the platform defaults the Phase B backfill (migration 154) used.
+ * `ingest` is the operator-toggleable one (Slack + WhatsApp). Mirrors the
+ * platform defaults the Phase B backfill (migration 154) used.
+ *
+ * WhatsApp carries `ingest` for the read-only Bring-Your-Own-Number group
+ * source (the assistant silently reads enabled groups into the brain and
+ * never replies); `chat`/`broadcast` stay listed so the dormant responder
+ * can be switched on later by enabling `'chat'` — see
+ * docs/plans/whatsapp-bring-your-own-number.md §"Leave room for later".
  */
 export const CHANNEL_CAPABILITIES: Record<ChannelType, ChannelCapability[]> = {
   slack: ['chat', 'broadcast', 'ingest'],
   telegram: ['chat', 'broadcast'],
-  whatsapp: ['chat', 'broadcast'],
+  whatsapp: ['chat', 'broadcast', 'ingest'],
   discord: ['chat', 'broadcast'],
 }
 

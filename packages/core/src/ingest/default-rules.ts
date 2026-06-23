@@ -26,7 +26,7 @@ export type DefaultRuleTemplate = {
 // support and must not appear here. (Gmail stays a send/read connector but is
 // not an ingestion source — its poll producer + adapter were removed.) Do not
 // derive from OFFICIAL_CONNECTORS.
-export const INGEST_SOURCE_PROVIDERS = ['slack', 'github', 'calendar', 'fathom'] as const // drift-sweep: intentionally-narrow:ingest-engine-only
+export const INGEST_SOURCE_PROVIDERS = ['slack', 'github', 'calendar', 'fathom', 'whatsapp'] as const // drift-sweep: intentionally-narrow:ingest-engine-only
 export type IngestSourceProvider = typeof INGEST_SOURCE_PROVIDERS[number]
 
 export const DEFAULT_INGEST_RULES: Readonly<
@@ -124,6 +124,13 @@ export const DEFAULT_INGEST_RULES: Readonly<
       routing_mode: 'realtime',
     },
   ],
+  // WhatsApp is default-drop: NO catch-all. A linked companion device
+  // receives the entire account stream (every group + DM), so seeding an
+  // `always` rule would ingest personal DMs and unrelated groups the owner
+  // never meant to share. Enabling a group appends a `group_match` rule;
+  // until then the engine returns `matched=false` → drop. See
+  // adapters/whatsapp/default-rules.ts and the BYO-number plan §"The gate".
+  whatsapp: [],
 }
 
 export function getDefaultRules(
