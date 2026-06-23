@@ -33,8 +33,8 @@ const ENVELOPE_FIXTURE: EpisodeEnvelope = {
 
 describe('[COMP:brain/episode-envelope] Episode envelope contract', () => {
   describe('SourceKind vocabulary', () => {
-    it('declares all 14 locked source kinds', () => {
-      expect(SOURCE_KINDS).toHaveLength(14)
+    it('declares all 15 locked source kinds', () => {
+      expect(SOURCE_KINDS).toHaveLength(15)
     })
 
     it('includes SV 2026-05-14 additions', () => {
@@ -216,9 +216,18 @@ describe('[COMP:brain/episode-envelope] Episode envelope contract', () => {
           },
         },
       },
+      {
+        name: 'doc_page',
+        fixture: {
+          source_kind: 'doc_page',
+          page_id: 'page-1',
+          section_block_id: 'heading-1',
+          version: 7,
+        },
+      },
     ]
 
-    it('covers all 14 source kinds', () => {
+    it('covers all 15 source kinds', () => {
       expect(variants.map((v) => v.name)).toEqual(Array.from(SOURCE_KINDS))
     })
 

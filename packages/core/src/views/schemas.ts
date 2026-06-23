@@ -196,4 +196,6 @@ export const savedViewUpdateInputSchema = z.object({
    *  the setter's own workspace clearance. */
   clearance: z.enum(['public', 'internal', 'confidential']).optional(),
   binding: bindingConfigSchema.optional(),
+  /** Per-page "Sync to brain" toggle (migration 001_doc_brain_sync). */
+  brainSyncEnabled: z.boolean().optional(),
 })

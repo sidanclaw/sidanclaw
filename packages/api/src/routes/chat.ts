@@ -157,6 +157,14 @@ type WebChatOptions = {
   fileStore?: FileStore
   usageStore?: UsageStore
   /**
+   * Doc-page → brain distillation runner (the "Sync to brain" pipeline). When
+   * set, the `ingestPage` chat tool is injected on doc turns so the assistant
+   * can ingest a page on request. Absent (no Pipeline B) → the tool isn't
+   * injected. Built at boot; RLS-scoped to the caller. See
+   * docs/plans/canvas-brain-distillation.md.
+   */
+  ingestPage?: (args: { userId: string; pageId: string }) => Promise<void>
+  /**
    * Host seams DI-injected by the composition root so the chat route depends on
    * no platform-specific code (oss-local-brain-wedge.md §12.5). All optional;
    * the open build omits them and falls through to the inline defaults in
@@ -2819,6 +2827,10 @@ export function chatRoutes(options: WebChatOptions): Router {
             docSurface: docToolsTurn,
             // Cached-file store for the `importToPage` faithful AI import.
             fileStore: options.fileStore,
+            // Doc-page → brain distillation runner. When present, the
+            // `ingestPage` tool is injected so "add this page to the brain"
+            // works on request. Absent (no Pipeline B) → tool not injected.
+            ingestPage: options.ingestPage,
             pageId:
               typeof requestedDocViewId === 'string' && requestedDocViewId
                 ? requestedDocViewId

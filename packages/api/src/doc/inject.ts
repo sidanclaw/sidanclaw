@@ -82,6 +82,7 @@ import {
   createPostCommentTool,
   createResolveCommentTool,
   createGetCommentThreadTool,
+  createIngestPageTool,
   listBuiltInEntityTypes,
 } from '@sidanclaw/core'
 import { createDbDocEntityStore } from '../db/doc-entity-store.js'
@@ -165,6 +166,13 @@ export type InjectDocToolsOptions = {
   /** Comment-thread store for the `postComment` / `resolveComment` tools.
    *  Falls back to the lazily-cached DB-backed singleton when omitted. */
   commentThreadStore?: CommentThreadStore
+  /**
+   * Doc-page → brain distillation runner (the "Sync to brain" pipeline). When
+   * provided, the `ingestPage` chat tool is injected so the assistant can ingest
+   * a page on request. Absent (minimal / open build with no Pipeline B) → the
+   * tool isn't injected (tool-awareness rule). RLS-scoped to the caller.
+   */
+  ingestPage?: (args: { userId: string; pageId: string }) => Promise<void>
   /**
    * Optional live-doc gateway. When omitted, resolved from
    * `DOC_SYNC_URL`/`DOC_SYNC_SECRET` env; when those are absent the
@@ -391,6 +399,20 @@ export async function injectDocTools(
     resolveComment,
     getCommentThread,
   ]
+
+  // `ingestPage` (doc-page → brain distillation) — injected ONLY when the
+  // runner is wired (Pipeline B present). Off in minimal/open builds so the
+  // model never sees a tool that can't run (tool-awareness rule). Anchored to
+  // the open page so "add this page to the brain" needs no explicit id.
+  if (options.ingestPage) {
+    allTools.push(
+      createIngestPageTool({
+        ingestPage: options.ingestPage,
+        anchorPageId: options.pageId ?? null,
+      }),
+    )
+  }
+
   for (const tool of allTools) {
     options.tools.set(tool.name, tool)
   }

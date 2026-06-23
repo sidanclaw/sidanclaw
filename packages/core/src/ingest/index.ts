@@ -33,6 +33,7 @@ export {
   type PlatformEngagementAggregate,
   type PlatformEngagementMetrics,
   type PlatformEngagementDigestContentRef,
+  type DocPageContentRef,
   type EpisodeActor,
   type EpisodeAttachment,
   type EpisodeContent,
@@ -59,6 +60,11 @@ export * from './sensitivity-classifier.js'
 // WS-3 W3 final wave additions (coordinator-wired).
 export * from './pipeline-b.js'
 export * from './engine-triggers.js'
+
+// Doc-page → brain distillation (the "Sync to brain" pipeline). Pure,
+// port-based: the manual tool, the manual route, and the auto-on-save path all
+// funnel through `distillPageToBrain`. See ingest-page.ts header.
+export * from './ingest-page.js'
 
 // Ingest → workflow event-trigger adapter — the connector half of the
 // workflow `event` trigger (the ingest engine `onEvent` seam). The shared

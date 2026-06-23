@@ -54,6 +54,9 @@ const FULL_SELECT = `
   clearance,
   origin_prompt  AS "originPrompt",
   auto_prune_at  AS "autoPruneAt",
+  brain_sync_enabled   AS "brainSyncEnabled",
+  brain_last_ingest_hash AS "brainLastIngestHash",
+  brain_last_ingest_at AS "brainLastIngestAt",
   created_at     AS "createdAt",
   updated_at     AS "updatedAt"
 `
@@ -92,6 +95,9 @@ type FullRow = {
   clearance: 'public' | 'internal' | 'confidential'
   originPrompt: string | null
   autoPruneAt: Date | null
+  brainSyncEnabled: boolean
+  brainLastIngestHash: string | null
+  brainLastIngestAt: Date | null
   createdAt: Date
   updatedAt: Date
 }
@@ -131,6 +137,9 @@ function rowToFull(row: FullRow): SavedView {
     clearance: row.clearance,
     originPrompt: row.originPrompt,
     autoPruneAt: row.autoPruneAt,
+    brainSyncEnabled: row.brainSyncEnabled,
+    brainLastIngestHash: row.brainLastIngestHash,
+    brainLastIngestAt: row.brainLastIngestAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -323,6 +332,14 @@ export function createDbSavedViewStore(): SavedViewStore {
         values.push(fields.binding.entity)
         sets.push(`view_type = $${idx++}`)
         values.push(fields.binding.viewType)
+      }
+      if (fields.brainSyncEnabled !== undefined) {
+        // Per-page "Sync to brain" toggle (migration 001_doc_brain_sync). The
+        // route gates it on the caller being able to write the page; enabling
+        // it doesn't ingest here — the auto-on-save trigger does that on the
+        // next authored-content change.
+        sets.push(`brain_sync_enabled = $${idx++}`)
+        values.push(fields.brainSyncEnabled)
       }
 
       if (sets.length === 0) {
@@ -682,6 +699,42 @@ export function createDbSavedViewStore(): SavedViewStore {
           RETURNING id`,
       )
       return result.rows.map((r) => r.id)
+    },
+
+    // ── Brain sync (migration 001_doc_brain_sync) ──────────────────────
+
+    async getBrainSyncStateSystem(id) {
+      // System-bypass read — the auto-on-save trigger (doc-sync → API
+      // /internal/ingest-page) has no member userId; the route authorises by
+      // resolving the page owner. `createdBy` + `workspaceId` scope the ingest.
+      const result = await query<{
+        workspaceId: string
+        createdBy: string
+        brainSyncEnabled: boolean
+        brainLastIngestHash: string | null
+        brainLastIngestAt: Date | null
+      }>(
+        `SELECT workspace_id AS "workspaceId",
+                created_by    AS "createdBy",
+                brain_sync_enabled     AS "brainSyncEnabled",
+                brain_last_ingest_hash AS "brainLastIngestHash",
+                brain_last_ingest_at   AS "brainLastIngestAt"
+           FROM saved_views WHERE id = $1`,
+        [id],
+      )
+      return result.rows[0] ?? null
+    },
+
+    async markBrainIngestedSystem(id, contentHash) {
+      const result = await query<{ id: string }>(
+        `UPDATE saved_views
+            SET brain_last_ingest_hash = $2,
+                brain_last_ingest_at   = now()
+          WHERE id = $1
+          RETURNING id`,
+        [id, contentHash],
+      )
+      return result.rows.length > 0
     },
   }
 }

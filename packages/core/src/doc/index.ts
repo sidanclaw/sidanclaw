@@ -51,6 +51,7 @@ export * from './auto-title.js'
 // Doc comments (chat-as-threads): store contract + comment tools.
 export * from './comment-types.js'
 export * from './comment-tools.js'
+export * from './ingest-page-tool.js'
 
 // Doc Inbox: the sidebar Inbox wire types + notifications store contract.
 export * from './inbox-types.js'
