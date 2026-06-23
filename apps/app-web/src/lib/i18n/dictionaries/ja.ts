@@ -615,6 +615,15 @@ export const ja: Dictionary = {
     headerFavoriteAdd: "お気に入りに追加",
     headerFavoriteRemove: "お気に入りから削除",
     headerMoreAria: "その他の操作",
+    // 読み取り専用のプレビュー / 編集の表示モード切り替え（page-header）。同じ
+    // ページに対する純粋な表示切り替えで、ページの作成・変換・再生成は行わず、
+    // エディターを読み取り専用と編集可能の間で切り替えるだけ。
+    viewMode: {
+      preview: "プレビュー",
+      edit: "編集",
+      switchToEdit: "編集に切り替える",
+      switchToPreview: "プレビューに切り替える",
+    },
     // フォーマット変換（doc-conversion.md）— ⋯ メニューのエクスポート / コピー項目。
     copyAsMarkdown: "Markdown としてコピー",
     copiedAsMarkdown: "Markdown をコピーしました",

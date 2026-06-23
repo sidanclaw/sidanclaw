@@ -212,6 +212,27 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     () => new Set(),
   );
 
+  // ── View mode (Preview <-> Edit) ───────────────────────────────────────
+  // A pure VIEW-MODE switch on the active page — NOT a page-creation/conversion.
+  // It is threaded straight down as the editor's `canEdit` prop and never calls
+  // `renderPage`/`createDraft`, never changes the page's draft/saved `state`,
+  // never remounts the Y.Doc, and never adds a `saved_views` row. The page id
+  // (`urlViewId`) and the live `collab` doc are identical across the switch —
+  // only the editor's editable flag flips.
+  //
+  // Default is **preview** on every page open so an AI-authored artifact is
+  // shown cleanly first ("preview & then update"); switching to Edit is one
+  // click. We reset to preview whenever the active page id changes — keyed on
+  // `urlViewId` (the id the moment a row is clicked) so a soft swap to another
+  // page always lands in preview, while editing one page and tabbing back keeps
+  // it consistent. Switching modes does NOT touch the id, so this effect does
+  // not re-fire on a toggle.
+  const [viewMode, setViewMode] = useState<"preview" | "edit">("preview");
+  useEffect(() => {
+    setViewMode("preview");
+  }, [urlViewId]);
+  const canEdit = viewMode === "edit";
+
   // Metadata for the page the URL currently points at, or null during the brief
   // window after a switch while its `getView` is still in flight. The centre
   // pane renders a chrome skeleton over the already-syncing editor in that
@@ -945,6 +966,13 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                 }
                 assistantId={assistantId}
                 currentUser={user}
+                viewMode={viewMode}
+                // Pure view-mode flip on the SAME page: just toggles the boolean
+                // that becomes the editor's `canEdit`. No page create/convert,
+                // no state change, no remount — see the `viewMode` note above.
+                onToggleViewMode={() =>
+                  setViewMode((m) => (m === "edit" ? "preview" : "edit"))
+                }
               />
             ) : (
               <div
@@ -1008,7 +1036,10 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                         nameOrigin: pageView.nameOrigin,
                       })}
                       isPlaceholder={pageView.nameOrigin === "placeholder"}
-                      canEdit
+                      // Preview is a clean read-only artifact: the body title is
+                      // not editable either. Still the SAME page — just the
+                      // editable flag, mirroring the editor's `canEdit`.
+                      canEdit={canEdit}
                       onRename={(name) => handleRenameValue(pageView.id, name)}
                       onSetIcon={(icon) => handleSetIcon(pageView.id, icon)}
                     />
@@ -1020,7 +1051,12 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                   )}
                   <CollabPageEditor
                     collab={collab}
-                    canEdit
+                    // Preview = read-only editor (false), Edit = editable (true).
+                    // Same `collab` doc + `viewId` in both modes — this prop is
+                    // the ONLY thing the toggle changes. `canEdit=false` already
+                    // disables the slash menu, floating toolbar, Space->AI, and
+                    // the new-comment composer; existing comments stay readable.
+                    canEdit={canEdit}
                     user={user}
                     viewId={urlViewId}
                     nameOrigin={pageView?.nameOrigin}

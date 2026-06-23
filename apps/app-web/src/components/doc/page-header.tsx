@@ -29,7 +29,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Lock, MoreHorizontal, Star, Trash2 } from "lucide-react";
+import { Check, Eye, Lock, MoreHorizontal, PencilLine, Star, Trash2 } from "lucide-react";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Switch } from "@/components/ui/switch";
@@ -89,6 +89,18 @@ type PageHeaderProps = {
   assistantId?: string;
   /** The signed-in viewer — History labels their own comment rows by name. */
   currentUser: { id: string; name: string; avatarUrl?: string | null };
+  /**
+   * Current editor view mode. **Pure view switch on the SAME page** — `"preview"`
+   * renders the editor read-only (`canEdit=false`), `"edit"` makes it editable.
+   * It NEVER creates / converts / re-renders a page or touches its draft/saved
+   * state; it only flips the editable flag on the page already mounted below.
+   * The shell owns this state (default Preview per open) and threads it to the
+   * editor as `canEdit`. See `onToggleViewMode`.
+   */
+  viewMode: "preview" | "edit";
+  /** Flip the view mode (Preview <-> Edit). The shell only toggles a boolean —
+   *  same `pageId`/Y.Doc, no `renderPage`/`createDraft`, no remount. */
+  onToggleViewMode: () => void;
 };
 
 type Clearance = "public" | "internal" | "confidential";
@@ -121,6 +133,8 @@ export function PageHeader({
   onChangeClearance,
   assistantId,
   currentUser,
+  viewMode,
+  onToggleViewMode,
 }: PageHeaderProps) {
   const t = useT().docPage;
   const [busy, setBusy] = useState(false);
@@ -308,6 +322,16 @@ export function PageHeader({
             originPrompt={view.originPrompt}
           />
 
+          {/* Preview <-> Edit view-mode toggle. INVARIANT: this is a pure view
+              switch on the SAME page — clicking it only calls `onToggleViewMode`,
+              which flips a boolean in the shell that becomes the editor's
+              `canEdit` prop. It must NEVER create / convert / re-render a page,
+              change draft/saved state, remount the document, or add a
+              `saved_views` row. Preview = read-only editor (slash menu, floating
+              toolbar, Space->AI, and the new-comment composer all already key off
+              `canEdit`); existing comments stay readable in both modes. */}
+          <ViewModeToggle mode={viewMode} onToggle={onToggleViewMode} t={t} />
+
           <button
             type="button"
             onClick={toggleFavorite}
@@ -409,6 +433,49 @@ export function PageHeader({
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * Read-only Preview <-> Edit toggle. A labeled icon button that SHOWS the
+ * current mode and switches to the other on click — Preview shows an Eye + the
+ * "Edit" affordance (click to start editing), Edit shows a pencil + "Preview".
+ *
+ * INVARIANT (the spec lives here, this repo has no docs/ folder): the toggle is
+ * a pure VIEW-MODE switch on the SAME page/file. `onToggle` only flips the
+ * shell's `viewMode` boolean, which is passed straight down as the editor's
+ * `canEdit` prop. It does not create, convert, or re-render a page, does not
+ * change the page's draft/saved `state`, does not remount the Y.Doc, and does
+ * not add a `saved_views` row. The page id and the live document are identical
+ * across the switch — only the editable flag changes.
+ */
+function ViewModeToggle({
+  mode,
+  onToggle,
+  t,
+}: {
+  mode: "preview" | "edit";
+  onToggle: () => void;
+  t: ReturnType<typeof useT>["docPage"];
+}) {
+  const inPreview = mode === "preview";
+  // The button label/icon describe the ACTION (what clicking does), the way
+  // Notion's read-only banner offers "Edit". In preview we offer Edit; while
+  // editing we offer a return to Preview.
+  const Icon = inPreview ? PencilLine : Eye;
+  const label = inPreview ? t.viewMode.edit : t.viewMode.preview;
+  const aria = inPreview ? t.viewMode.switchToEdit : t.viewMode.switchToPreview;
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={aria}
+      title={aria}
+      className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+    >
+      <Icon className="size-4" aria-hidden />
+      <span className="hidden sm:inline">{label}</span>
+    </button>
   );
 }
 

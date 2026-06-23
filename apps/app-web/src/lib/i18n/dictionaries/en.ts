@@ -697,6 +697,15 @@ export const en = {
     headerFavoriteAdd: "Add to Favorites",
     headerFavoriteRemove: "Remove from Favorites",
     headerMoreAria: "More actions",
+    // Read-only Preview <-> Edit view-mode toggle (page-header). A pure view
+    // switch on the SAME page: it never creates / converts / re-renders a page,
+    // it only flips the editor between read-only and editable.
+    viewMode: {
+      preview: "Preview",
+      edit: "Edit",
+      switchToEdit: "Switch to editing",
+      switchToPreview: "Switch to preview",
+    },
     // Format conversion (doc-conversion.md) — the ⋯ menu's export/copy items.
     copyAsMarkdown: "Copy as Markdown",
     copiedAsMarkdown: "Copied as Markdown",

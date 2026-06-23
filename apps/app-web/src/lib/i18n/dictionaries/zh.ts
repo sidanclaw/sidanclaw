@@ -606,6 +606,14 @@ export const zh: Dictionary = {
     headerFavoriteAdd: "加入我的最愛",
     headerFavoriteRemove: "從我的最愛移除",
     headerMoreAria: "更多操作",
+    // 唯讀的預覽 / 編輯檢視模式切換（page-header）。對同一個頁面的純檢視切換：
+    // 不會建立、轉換或重新產生頁面，只是讓編輯器在唯讀與可編輯之間切換。
+    viewMode: {
+      preview: "預覽",
+      edit: "編輯",
+      switchToEdit: "切換為編輯",
+      switchToPreview: "切換為預覽",
+    },
     // 格式轉換（doc-conversion.md）— ⋯ 選單的匯出 / 複製項目。
     copyAsMarkdown: "複製為 Markdown",
     copiedAsMarkdown: "已複製為 Markdown",
