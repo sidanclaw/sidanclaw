@@ -775,6 +775,7 @@ export const zh: Dictionary = {
         to_do: "待辦清單",
         toggle: "摺疊清單",
         page: "頁面",
+        template: "範本",
         callout: "標註",
         quote: "引述",
         table: "表格",
@@ -795,6 +796,19 @@ export const zh: Dictionary = {
       filteredResults: "篩選結果",
       closeMenu: "關閉選單",
       esc: "esc",
+    },
+    templateGallery: {
+      title: "選擇範本",
+      searchPlaceholder: "搜尋範本",
+      empty: "沒有符合的範本。",
+      ariaLabel: "頁面範本",
+      categories: {
+        meeting: "會議",
+        planning: "規劃",
+        personal: "個人",
+        knowledge: "知識",
+        team: "團隊",
+      },
     },
     editorPlaceholder: {
       aiHint: "按「空白鍵」使用 AI，或按「/」開啟指令",

@@ -48,7 +48,7 @@ import CollaborationCursor from "@tiptap/extension-collaboration-cursor";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import type { AnyExtension, Editor } from "@tiptap/core";
 import type * as Y from "yjs";
-import { FRAGMENT_FIELD } from "@sidanclaw/doc-model";
+import { FRAGMENT_FIELD, blocksToPMDoc, instantiatePageTemplate } from "@sidanclaw/doc-model";
 import type { CollabHandle } from "@/lib/collab/use-collab-provider";
 import { colorForUserId } from "@/lib/collab/cursor-color";
 import { useT } from "@/lib/i18n/client";
@@ -82,6 +82,7 @@ import {
 } from "./ai-generating-decoration";
 import { subscribeBuildActivity } from "@/lib/build-activity";
 import { PagePicker } from "./page-picker";
+import { TemplateGallery } from "./template-gallery";
 import { InlineAiPrompt } from "./inline-ai-prompt";
 import type { PageMentionItem, PersonMentionItem } from "./mentions/mention-popup";
 import { createPersonMentionExtension } from "./mentions/person-mention";
@@ -325,6 +326,10 @@ function CollabEditorInner({
     left: number;
     insertPos: number;
   } | null>(null);
+  // The "/template" slash item — opens the centered template gallery. We
+  // capture the insert position the slash was invoked at so a pick (made later,
+  // through the modal) lands at the right place even though focus moved.
+  const [templateGallery, setTemplateGallery] = useState<{ insertPos: number } | null>(null);
   // Empty-line "Space for AI": the inline AI box, anchored at the caret of the
   // empty paragraph the user pressed Space on. Opened by `onAiSpaceRef` below.
   const [aiPrompt, setAiPrompt] = useState<{
@@ -383,6 +388,38 @@ function CollabEditorInner({
     setPagePicker({ top: coords.bottom + 4, left: coords.left, insertPos: from });
   }, []);
 
+  // "Template" slash item — open the centered gallery, remembering the caret so
+  // the pick lands where the slash was typed.
+  const openTemplateGallery = useCallback((ed: Editor) => {
+    setTemplateGallery({ insertPos: ed.state.selection.from });
+  }, []);
+
+  // Insert a template's blocks at `pos`. Instantiates the shared core template
+  // (markdown -> canonical blocks with fresh ids), maps it to ProseMirror nodes
+  // via the same `blocksToPMDoc` round-trip the renderer uses, and drops the
+  // node fragment in. When the line at `pos` is an empty paragraph it is
+  // replaced (no stray blank line), mirroring `executeSlashItem`'s atom rule.
+  const insertTemplate = useCallback(
+    (ed: Editor, pos: number, templateId: string) => {
+      const instance = instantiatePageTemplate(templateId);
+      if (!instance || instance.blocks.length === 0) return;
+      const pmDoc = blocksToPMDoc(instance.blocks);
+      const content = (pmDoc as { content?: unknown[] }).content ?? [];
+      if (content.length === 0) return;
+      const $pos = ed.state.doc.resolve(Math.min(pos, ed.state.doc.content.size));
+      const parent = $pos.parent;
+      const lineEmpty = parent.isTextblock && parent.content.size === 0;
+      const chain = ed.chain().focus();
+      if (lineEmpty) {
+        const range = { from: $pos.before(), to: $pos.after() };
+        chain.insertContentAt(range, content).run();
+      } else {
+        chain.insertContentAt(pos, content).run();
+      }
+    },
+    [],
+  );
+
   // Stable indirection: the slash/space extensions read the latest handler off
   // these refs, so the extension set never rebuilds on a state change.
   const onSlashSelectRef = useRef<(item: SlashMenuItem, ed: Editor) => void>(() => {});
@@ -393,6 +430,10 @@ function CollabEditorInner({
     }
     if (item.blockKind === "link_to_page") {
       openPagePicker(ed);
+      return;
+    }
+    if (item.blockKind === "template") {
+      openTemplateGallery(ed);
       return;
     }
     executeSlashItem(ed, item);
@@ -1056,6 +1097,21 @@ function CollabEditorInner({
             setPagePicker(null);
           }}
           onClose={() => setPagePicker(null)}
+        />
+      ) : null}
+      {/* "Template" slash item — the centered page-template gallery. On pick we
+          instantiate the chosen starter and drop its blocks at the caret the
+          slash menu was invoked on. */}
+      {templateGallery && editor ? (
+        <TemplateGallery
+          onPick={(templateId) => {
+            insertTemplate(editor, templateGallery.insertPos, templateId);
+            setTemplateGallery(null);
+          }}
+          onClose={() => {
+            setTemplateGallery(null);
+            editor.commands.focus();
+          }}
         />
       ) : null}
       {/* Empty-line "Space for AI" — the inline AI composer at the caret. On
