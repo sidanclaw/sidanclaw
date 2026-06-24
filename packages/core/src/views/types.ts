@@ -335,6 +335,25 @@ export type SavedView = {
    */
   originPrompt: string | null
   autoPruneAt: Date | null
+  /**
+   * Per-page "Sync to brain" opt-in (migration 001_doc_brain_sync). When true,
+   * an authored-content change on save/settle auto-ingests the page into the
+   * brain via Pipeline B. Default false. See
+   * docs/plans/canvas-brain-distillation.md.
+   */
+  brainSyncEnabled: boolean
+  /**
+   * The authored-content hash of the last brain ingest (or `null` if never
+   * ingested). The auto-on-save trigger compares the current authored hash
+   * against this before firing — the dedup half of the re-ingest-storm guard.
+   */
+  brainLastIngestHash: string | null
+  /**
+   * When the page was last ingested into the brain (or `null` if never). The
+   * auto-on-save trigger also waits for a cooldown since this timestamp — the
+   * cooldown half of the storm guard.
+   */
+  brainLastIngestAt: Date | null
   createdAt: Date
   updatedAt: Date
 }
@@ -384,6 +403,14 @@ export type SavedViewUpdateFields = {
    *  must validate the new value is ≤ the setter's own clearance. */
   clearance?: 'public' | 'internal' | 'confidential'
   binding?: BindingConfig
+  /**
+   * Per-page "Sync to brain" toggle (migration 001_doc_brain_sync). When true,
+   * an authored-content change on save/settle auto-ingests the page into the
+   * brain. Omit to leave unchanged. See
+   * docs/plans/canvas-brain-distillation.md (the on-request `ingestPage`
+   * becomes ALSO auto via this toggle).
+   */
+  brainSyncEnabled?: boolean
 }
 
 /**
@@ -577,4 +604,32 @@ export type SavedViewStore = {
    * required.
    */
   pruneExpiredDraftsSystem(): Promise<string[]>
+
+  // ── Brain sync (migration 001_doc_brain_sync) ──────────────────────
+
+  /**
+   * Read a page's brain-sync state WITHOUT a userId — for the auto-on-save
+   * trigger, which runs system-side (doc-sync persists with a bare `query()`;
+   * the API `/internal/ingest-page` endpoint resolves the page's owner before
+   * running the runner). Returns `null` if the row is gone.
+   *
+   * The trigger reads `brainSyncEnabled` (the gate), `brainLastIngestHash`
+   * (the dedup key), and `brainLastIngestAt` (the cooldown anchor), plus the
+   * `workspaceId` + `createdBy` it needs to scope the ingest to the page owner.
+   */
+  getBrainSyncStateSystem(id: string): Promise<{
+    workspaceId: string
+    createdBy: string
+    brainSyncEnabled: boolean
+    brainLastIngestHash: string | null
+    brainLastIngestAt: Date | null
+  } | null>
+
+  /**
+   * Stamp the result of a brain ingest — set `brain_last_ingest_hash` +
+   * `brain_last_ingest_at = now()` so the next save can dedup + cooldown
+   * against them. System-level (the runner already resolved + authorised the
+   * page owner). Returns `true` if a row was updated.
+   */
+  markBrainIngestedSystem(id: string, contentHash: string): Promise<boolean>
 }

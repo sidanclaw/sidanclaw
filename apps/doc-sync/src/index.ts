@@ -32,7 +32,12 @@ import {
 } from '@sidanclaw/doc-model'
 import { resolveAuth } from './auth-hook.js'
 import { assertPageAccess, type RlsQuery } from './clearance-gate.js'
-import { loadPageUpdate, storePageSnapshot, type SysQuery } from './persistence.js'
+import {
+  loadPageUpdate,
+  maybeEnqueueBrainIngest,
+  storePageSnapshot,
+  type SysQuery,
+} from './persistence.js'
 import { bridgeConnection } from './ws-bridge.js'
 import { createRunRegistry, type RunRegistry } from './run-registry.js'
 
@@ -45,6 +50,16 @@ dotenv.config({ path: resolve(import.meta.dirname, '..', '..', '..', '.env') })
 const PORT = parseInt(process.env.PORT || '8080', 10)
 const JWT_SECRET = process.env.JWT_SECRET
 const DOC_SYNC_SECRET = process.env.DOC_SYNC_SECRET
+// API base for the reverse-direction auto-on-save brain-ingest enqueue
+// (doc-sync → API `/internal/ingest-page`). Authed with the SAME DOC_SYNC_SECRET
+// the API→doc-sync `/internal/apply` direction uses (see persistence.ts +
+// packages/api/src/doc/internal-ingest-route.ts). Unset → the auto-ingest path
+// is simply off (manual ingest still works through the API directly).
+const API_INTERNAL_URL = process.env.API_INTERNAL_URL
+// Cooldown between auto-enqueues of one page. Mirrors INGEST_COOLDOWN_MS in
+// packages/api/src/doc/internal-ingest-route.ts (the API re-gates, but a local
+// gate avoids a POST on every 2s debounce).
+const BRAIN_INGEST_COOLDOWN_MS = 5 * 60 * 1000
 
 if (!JWT_SECRET) {
   console.error('[doc-sync] JWT_SECRET is required. Refusing to start.')
@@ -127,11 +142,27 @@ const hocuspocus = new Hocuspocus({
   },
 
   async onStoreDocument(data) {
-    await storePageSnapshot({
+    const { page } = await storePageSnapshot({
       pageId: data.documentName,
       ydoc: data.document as unknown as Y.Doc,
       query: sysQuery,
     })
+    // Auto-on-save brain-ingest enqueue (canvas-brain-distillation.md
+    // deviation). Best-effort, fire-and-forget, gated by the per-page toggle +
+    // dedup + cooldown inside the helper — never blocks / breaks this store.
+    // Off unless BOTH the API URL and the shared secret are configured.
+    if (API_INTERNAL_URL && DOC_SYNC_SECRET) {
+      void maybeEnqueueBrainIngest({
+        pageId: data.documentName,
+        page,
+        query: sysQuery,
+        config: {
+          apiBaseUrl: API_INTERNAL_URL,
+          syncSecret: DOC_SYNC_SECRET,
+          cooldownMs: BRAIN_INGEST_COOLDOWN_MS,
+        },
+      })
+    }
   },
 })
 

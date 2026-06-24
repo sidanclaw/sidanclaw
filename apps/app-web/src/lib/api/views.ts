@@ -465,6 +465,13 @@ export type ViewMetadata = {
    */
   originPrompt: string | null;
   autoPruneAt: string | null;
+  /**
+   * Per-page "Sync to brain" toggle (migration 001_doc_brain_sync). When true,
+   * an authored-content change on save/settle auto-ingests the page into the
+   * brain. The page-header ⋯ menu reads it to reflect the switch and sets it via
+   * `setViewBrainSync`. Default false.
+   */
+  brainSyncEnabled: boolean;
   page: Page | null;
   createdAt: string;
   updatedAt: string;
@@ -724,6 +731,39 @@ export async function setViewFullWidth(
     body: JSON.stringify({ fullWidth }),
   });
   return json<ViewMetadata>(res);
+}
+
+/**
+ * Toggle a page's "Sync to brain" mode (migration 001_doc_brain_sync). Maps to
+ * `PATCH /saved-views/:id` with `{ brainSyncEnabled }` - mirrors
+ * `setViewFullWidth`. When enabled, an authored-content change on save
+ * auto-ingests the page into the brain. Returns the updated metadata.
+ */
+export async function setViewBrainSync(
+  viewId: string,
+  brainSyncEnabled: boolean,
+): Promise<ViewMetadata> {
+  const res = await authFetch(`${API_URL}/api/saved-views/${viewId}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ brainSyncEnabled }),
+  });
+  return json<ViewMetadata>(res);
+}
+
+/**
+ * Manually trigger a page's "Sync to brain" ingestion now. Maps to
+ * `POST /api/saved-views/:id/ingest`; the server queues the distillation in the
+ * background and returns 202. Resolves once queued.
+ */
+export async function ingestViewToBrain(viewId: string): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/saved-views/${viewId}/ingest`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}${text ? `: ${text}` : ""}`);
+  }
 }
 
 /**

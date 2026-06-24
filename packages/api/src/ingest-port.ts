@@ -9,7 +9,7 @@
  */
 
 import type { EpisodeSensitivity } from './db/episodes-store.js'
-import type { PipelineBResult } from '@sidanclaw/core'
+import type { PipelineBResult, SourceKind } from '@sidanclaw/core'
 
 export type ChatEpisodeInput = {
   workspaceId: string
@@ -32,6 +32,22 @@ export type BrainEpisodeInput = {
   occurredAt: Date
   sourceLabel?: string
   sensitivity?: EpisodeSensitivity
+  /**
+   * Override the Episode's `source_kind` (default the closed impl uses for a
+   * generic text ingest). Doc-page distillation passes `'doc_page'` so the
+   * derived facts carry doc-page provenance. The closed Pipeline B impl stamps
+   * this onto the Episode and Pipeline B inherits the general trust model like
+   * any source. See docs/plans/canvas-brain-distillation.md §"New vs. reused".
+   */
+  sourceKind?: SourceKind
+  /**
+   * The Episode's `source_ref` payload (JSONB). Doc-page distillation passes
+   * `{ source_kind:'doc_page', page_id, section_block_id, version }` so every
+   * fact gets a precise `(page_id, block_id)` back-edge via `source_episode_id`.
+   * Omitted for the generic text ingest path (the closed impl supplies a
+   * default ref). The closed impl persists it verbatim.
+   */
+  sourceRef?: Record<string, unknown>
 }
 
 /** Ingest an arbitrary text Episode (e.g. an MCP `ingestToBrain` call). */

@@ -187,6 +187,9 @@ import { createDeliveryTargetResolver } from './scheduling/delivery-target.js'
 import { viewsRoutes } from './routes/views.js'
 import { publicShareRoutes } from './routes/public-share.js'
 import { docThemesRoutes } from './routes/doc-themes.js'
+import { runIngestPage } from './doc/ingest-page-runner.js'
+import { internalIngestRoutes } from './doc/internal-ingest-route.js'
+import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { createDbPageGrantStore } from './db/page-grant-store.js'
 import { createDbWorkspaceGroupStore } from './db/workspace-group-store.js'
@@ -1013,6 +1016,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     return result.rows[0]?.id ?? null
   }
 
+  // Doc-page → brain distillation runner (the "Sync to brain" pipeline). Wired
+  // only when Pipeline B is present (`brainEpisodeIngestor`). Shared by the
+  // manual route, the `ingestPage` chat tool, and the auto-on-save internal
+  // endpoint. See packages/api/src/doc/ingest-page-runner.ts +
+  // docs/plans/canvas-brain-distillation.md.
+  const docPageSourceStore = createDbDocPageSourceStore()
+  const ingestPageRunner = brainEpisodeIngestor
+    ? (args: { userId: string; pageId: string; skipIfHashUnchanged?: string | null }) =>
+        runIngestPage(args, {
+          savedViewStore,
+          docPageStore: createDbDocPageStore(),
+          docPageSourceStore,
+          brainEpisodeIngestor,
+          resolvePrimaryAssistant: resolvePrimaryAssistantForWorkspace,
+        }).then(() => undefined)
+    : undefined
+
   const workflowExecutorDeps: WorkflowExecutorDeps = {
     workflowStore,
     runStore: workflowRunStore,
@@ -1567,6 +1587,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     fileStore,
     workspaceFilesStore,
     usageStore,
+    // Doc-page → brain distillation runner — backs the `ingestPage` chat tool.
+    ingestPage: ingestPageRunner
+      ? ({ userId, pageId }) => ingestPageRunner({ userId, pageId })
+      : undefined,
     analytics,
     cacheStore,
     connectorStore,
@@ -1925,7 +1949,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     docPageStore: createDbDocPageStore(),
     jobStore,
     docEntityStore,
+    // Manual "Sync to brain" — the runner runs in the background. Absent when
+    // Pipeline B isn't wired (the route then 503s).
+    ingestPage: ingestPageRunner
+      ? ({ userId, pageId }) => ingestPageRunner({ userId, pageId })
+      : undefined,
   }))
+
+  // Internal auto-on-save ingest endpoint — doc-sync POSTs here on a debounced
+  // settle when a page's "Sync to brain" toggle is on. Shared-secret gated
+  // (DOC_SYNC_SECRET) + dedup/cooldown re-gated server-side. Mounted only when
+  // the runner exists. NB: NO requireAuth — it authenticates via the shared
+  // secret header, not a user JWT (doc-sync has no member context).
+  if (ingestPageRunner) {
+    app.use('/', internalIngestRoutes({
+      savedViewStore,
+      ingestPage: ingestPageRunner,
+    }))
+  }
 
   app.use('/api', requireAuth(env.JWT_SECRET), docEntitiesRoutes({ docEntityStore, workspaceStore }))
 

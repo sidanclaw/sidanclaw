@@ -37,6 +37,12 @@ export const SOURCE_KINDS = [
   'profile_materialization',
   'voice_memo',
   'platform_engagement_digest',
+  // Doc-page distillation (canvas-brain-distillation.md — "canvas" == today's
+  // "doc"). One Episode per page section; `source_ref` carries the
+  // `(page_id, section_block_id, version)` back-edge so every derived fact
+  // points at the exact block it came from. "Canvas is just another
+  // source_kind" — it rides Pipeline B, trust, and supersession unmodified.
+  'doc_page',
 ] as const
 
 export type SourceKind = typeof SOURCE_KINDS[number]
@@ -171,6 +177,27 @@ export type PlatformEngagementDigestContentRef = {
   metrics: PlatformEngagementMetrics
 }
 
+/**
+ * One Episode per heading-delimited page section. `section_block_id` is the
+ * heading block's id (or `null` for the pre-first-heading preamble), so every
+ * fact Pipeline B derives from this Episode carries a precise `(page_id,
+ * block_id)` back-edge via `source_episode_id` — the durable provenance the
+ * plan's Decision 1 makes the load-bearing requirement.
+ *
+ * `version` is the page version at distillation time (`saved_views.version`
+ * or the live `documents.seq`). It is recorded for audit / staleness-by-the-
+ * user's-workflow, not consulted by Pipeline B itself.
+ *
+ * See docs/plans/canvas-brain-distillation.md §"The ingestion pipeline" step 2.
+ */
+export type DocPageContentRef = {
+  source_kind: 'doc_page'
+  page_id: string
+  /** The section's heading block id, or `null` for the preamble. */
+  section_block_id: string | null
+  version: number
+}
+
 export type EpisodeContentRef =
   | WebChatContentRef
   | SlackThreadContentRef
@@ -186,6 +213,7 @@ export type EpisodeContentRef =
   | ProfileMaterializationContentRef
   | VoiceMemoContentRef
   | PlatformEngagementDigestContentRef
+  | DocPageContentRef
 
 // ── EpisodeEnvelope universal contract ────────────────────────────────
 

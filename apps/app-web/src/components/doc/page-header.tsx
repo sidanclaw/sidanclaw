@@ -45,7 +45,9 @@ import {
   downloadPageExport,
   fetchPageMarkdown,
   importDocument,
+  ingestViewToBrain,
   saveView,
+  setViewBrainSync,
   unsaveView,
   type ViewMetadata,
 } from "@/lib/api/views";
@@ -159,6 +161,25 @@ export function PageHeader({
       setError(format(isSaved ? t.unsaveFailed : t.saveFailed, { message }));
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Flip the per-page "Sync to brain" toggle. Enabling it auto-ingests on the
+  // next authored-content change; we also kick one ingest now so an already-
+  // written page enters the brain immediately. Reflects via `onMutated`.
+  async function toggleBrainSync(next: boolean) {
+    setError(null);
+    try {
+      const updated = await setViewBrainSync(view.id, next);
+      onMutated(updated);
+      if (next) {
+        // Best-effort immediate sync; the server queues it in the background.
+        await ingestViewToBrain(view.id).catch(() => {});
+        setNotice(t.brainSyncOnNotice);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(format(t.brainSyncFailed, { message }));
     }
   }
 
@@ -370,6 +391,18 @@ export function PageHeader({
                   checked={fullWidth}
                   onCheckedChange={onToggleFullWidth}
                   aria-label={t.headerFullWidth}
+                />
+              </label>
+              {/* Sync to brain — a switch ROW like Full width (kept open on
+                  click so the toggle state is visible). Enabling it distils the
+                  page's authored prose into searchable brain facts and keeps it
+                  in sync as the page is edited. */}
+              <label className="flex w-full cursor-pointer items-center justify-between gap-3 rounded-md px-2.5 py-1.5 text-sm select-none hover:bg-accent hover:text-accent-foreground">
+                <span>{t.brainSync}</span>
+                <Switch
+                  checked={view.brainSyncEnabled}
+                  onCheckedChange={(next) => void toggleBrainSync(next)}
+                  aria-label={t.brainSync}
                 />
               </label>
               <DropdownMenuSeparator />
