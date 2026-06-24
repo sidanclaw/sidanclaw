@@ -42,6 +42,10 @@ const env: OpenApiEnv = {
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   GCS_FILES_BUCKET: process.env.GCS_FILES_BUCKET,
   SKILLS_AUTO_GEN_ENABLED: process.env.SKILLS_AUTO_GEN_ENABLED === 'true',
+  // AES-GCM key for connector credentials at rest. The launcher generates +
+  // persists it; absent (bare `node index.js` boot) → connectors can't store
+  // credentials, every other surface is unaffected.
+  CHANNEL_CREDENTIAL_KEY: process.env.CHANNEL_CREDENTIAL_KEY,
 }
 
 const { start } = await bootOpenApi({ env, runWorkers: true })
