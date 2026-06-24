@@ -92,6 +92,7 @@ import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-cli
 import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
 import { createSessionResumeReplay } from './routes/session-resume-replay.js'
 import { brainRoutes } from './routes/brain.js'
+import { brainInboxRoutes } from './routes/brain-inbox.js'
 import { homeRoutes } from './routes/home.js'
 import { homeDockRoutes } from './routes/home-dock.js'
 import { createDbHomeDockStore } from './db/home-dock-store.js'
@@ -1938,6 +1939,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/brain/stream', brainStreamRoutes({ workspaceStore, jwtSecret: env.JWT_SECRET }))
   startBrainStreamFanout()
   app.use('/api/brain', requireAuth(env.JWT_SECRET), brainRoutes({ entitiesStore, entityLinksStore, retrievalStore, knowledgeStore, workspaceSkillStore, connectorInstanceStore }))
+  // Brain inbox (verification surface). Open + hosted share this one mount: the
+  // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /
+  // notify). `entityKindClassifier` is boot's own; `pendingClassificationStore` is
+  // an optional closed port (undefined in OSS → classify/pending endpoints no-op).
+  app.use('/api/brain-inbox', requireAuth(env.JWT_SECRET), brainInboxRoutes({
+    workspaceStore,
+    entityKindClassifier,
+    pendingClassificationStore: ports.pendingClassificationStore,
+    filesApi,
+  }))
   app.use('/api/home', requireAuth(env.JWT_SECRET), homeRoutes())
   app.use('/api/home-dock', requireAuth(env.JWT_SECRET), homeDockRoutes({
     homeDockStore,
