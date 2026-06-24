@@ -38,6 +38,10 @@ export * from './to-markdown.js'
 export * from './rich-text.js'
 export * from './convert/to-docx.js'
 
+// Page templates — Notion-style starter layouts shared by the editor slash
+// menu and the brain-MCP template tools. See doc-templates.md.
+export * from './templates.js'
+
 // Phase 1 chat tools
 export * from './tools.js'
 
