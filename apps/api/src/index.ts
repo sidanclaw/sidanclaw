@@ -16,6 +16,7 @@
 import dotenv from 'dotenv'
 import { bootOpenApi, type OpenApiEnv } from '@sidanclaw/api/boot.js'
 import { buildEpisodeIngestors } from '@sidanclaw/api/build-episode-ingestors.js'
+import { buildSyncCredentials } from '@sidanclaw/api/build-sync-credentials.js'
 
 dotenv.config()
 
@@ -49,13 +50,15 @@ const env: OpenApiEnv = {
   CHANNEL_CREDENTIAL_KEY: process.env.CHANNEL_CREDENTIAL_KEY,
 }
 
-// Wire the OPEN Pipeline B episode ingestors so brain distillation (doc-page
-// "Sync to brain", brain-MCP ingestToBrain, chat compaction) runs locally. This
-// is the one closed seam the open edition fills with an open impl over the same
-// store graph — see packages/api/src/build-episode-ingestors.ts.
+// Wire the OPEN closed-seam fillers so the single-player edition runs the same
+// features locally over the open store graph:
+//   - buildEpisodeIngestors: Pipeline B brain distillation (doc-page "Sync to
+//     brain", brain-MCP ingestToBrain, chat compaction).
+//   - buildSyncCredentials: resolve the knowledge-sync GitHub PAT from the
+//     connected GitHub connector (see build-sync-credentials.ts).
 const { start } = await bootOpenApi({
   env,
   runWorkers: true,
-  ports: { buildEpisodeIngestors },
+  ports: { buildEpisodeIngestors, buildSyncCredentials },
 })
 await start()
