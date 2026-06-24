@@ -184,8 +184,9 @@ export type BrainFileTools = {
  * resolved (owner, primary-assistant) principal — and `editPage` reuses the
  * very CAS + undo-capture path the chat editor's `patchPage` uses.
  *
- *   - `savedViewStore` — `list` (title search) + `remove` (RLS delete; the
- *     `saved_views` FK cascade drops nested child pages, per migration 210).
+ *   - `savedViewStore` — `list` (title search + `listPages` enumeration) +
+ *     `remove` (RLS delete; the `saved_views` FK cascade drops nested child
+ *     pages, per migration 210) + `createDraft` (the `createPage` seam).
  *   - `docPageStore`   — `getVersionedPage` (RLS read → markdown / access
  *     confirm) + `applyPatch` (atomic version CAS + `last_undo` capture).
  */
@@ -196,6 +197,9 @@ export type BrainDocTools = {
 
 /** Cap on `readPage` title-search matches surfaced to the agent. */
 const READ_PAGE_MAX_MATCHES = 10
+/** `listPages`: default row count, and the hard cap a caller can request. */
+const LIST_PAGES_DEFAULT = 50
+const LIST_PAGES_MAX = 200
 /** Cap on a page's Markdown body so one huge page can't blow the MCP reply. */
 const READ_PAGE_MARKDOWN_CAP = 16_000
 /** Cap on `editPage` content so a single edit can't balloon the page row. */
@@ -309,6 +313,7 @@ const READ_TOOL_NAMES = new Set<string>([
   'fileSearch',
   // Doc pages (read) — present only when docTools are wired
   'readPage',
+  'listPages',
   'listPageTemplates',
 ])
 
@@ -336,6 +341,8 @@ function capPageMarkdown(md: string): string {
  * Reuse, not reinvention:
  *   - `readPage`   → `rankPagesByTitle` (the `findPage` matcher) + `pageToMarkdown`
  *                    (the `exportPage` / `findPage` page-to-Markdown path).
+ *   - `listPages`  → the same RLS-scoped `savedViewStore.list`, filtered by an
+ *                    optional case-insensitive `titlePrefix` and recency-ranked.
  *   - `editPage`   → builds an `Op[]` and runs it through `applyOps` +
  *                    `docPageStore.applyPatch` — the same validated CAS +
  *                    `last_undo` capture the chat editor's `patchPage` uses.
@@ -358,6 +365,7 @@ function buildDocPageTools(
   workspaceId: string,
 ): {
   readPage: BrainTool
+  listPages: BrainTool
   editPage: BrainTool
   deletePage: BrainTool
   createPage: BrainTool
@@ -428,6 +436,65 @@ function buildDocPageTools(
       return text(
         `${matches.length} pages match "${title}". Re-call readPage with the right pageId:\n${list}`,
       )
+    },
+  }
+
+  // ── listPages ─────────────────────────────────────────────────
+  //
+  // Enumerate workspace doc pages as `{ pageId, title }` rows — the page
+  // analog of `fileSearch`, and the companion `readPage` lacks (it finds at
+  // most one page, by title). Reuses the same RLS-scoped `savedViewStore.list`
+  // read `readPage`'s title search rides. Saved views carry no tag column, so
+  // grouping is by a shared `titlePrefix` (case-insensitive) the caller stamps
+  // on related pages — that is how a programmatic writer (e.g. a tool that
+  // persists its own plan/record pages) lists just its own. Ids + titles only;
+  // call `readPage` with a `pageId` for content.
+  const listPages: BrainTool = {
+    name: 'listPages',
+    description:
+      'List workspace doc pages as `{ pageId, title }` rows, most-recently-updated ' +
+      'first. Optional `titlePrefix` returns only pages whose title starts with it ' +
+      '(case-insensitive) — stamp a shared prefix on related pages to group them. ' +
+      `Optional \`limit\` caps the rows (default ${LIST_PAGES_DEFAULT}, max ${LIST_PAGES_MAX}). ` +
+      'Returns ids + titles only; call `readPage` with a `pageId` for full content. ' +
+      "Scoped to the key's workspace and clearance.",
+    inputSchema: {
+      titlePrefix: z
+        .string()
+        .min(1)
+        .max(256)
+        .optional()
+        .describe('Only pages whose title starts with this text (case-insensitive).'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(LIST_PAGES_MAX)
+        .optional()
+        .describe(`Max rows to return (default ${LIST_PAGES_DEFAULT}).`),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const prefix = typeof args.titlePrefix === 'string' ? args.titlePrefix.trim().toLowerCase() : ''
+      const rawLimit =
+        typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.floor(args.limit) : LIST_PAGES_DEFAULT
+      const limit = Math.min(Math.max(rawLimit, 1), LIST_PAGES_MAX)
+
+      // Same RLS-scoped list readPage's title search uses; ranking here is
+      // recency (updatedAt desc) rather than title closeness.
+      const rows = await savedViewStore.list({ userId: ctx.userId, workspaceId, state: 'all' })
+      const matched = (prefix ? rows.filter((r) => (r.name ?? '').toLowerCase().startsWith(prefix)) : rows)
+        .slice()
+        .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+        .slice(0, limit)
+      if (matched.length === 0) {
+        return text(
+          prefix ? `No pages whose title starts with "${args.titlePrefix}".` : 'No pages in this workspace.',
+        )
+      }
+      const list = matched.map((r) => `- ${r.name} (pageId: ${r.id})`).join('\n')
+      return text(`${matched.length} page(s):\n${list}`)
     },
   }
 
@@ -742,6 +809,7 @@ function buildDocPageTools(
 
   return {
     readPage,
+    listPages,
     editPage,
     deletePage,
     createPage,
@@ -1039,7 +1107,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'getDeal' || t.name === 'listDeals',
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
-    ...(docPageTools ? [docPageTools.readPage, docPageTools.listPageTemplates] : []),
+    ...(docPageTools
+      ? [docPageTools.readPage, docPageTools.listPages, docPageTools.listPageTemplates]
+      : []),
     ...agentReadBridges,
     // Writes
     saveMemory,

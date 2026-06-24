@@ -779,7 +779,7 @@ describe('[COMP:api/brain-mcp] primary-assistant authority (agent-facing capabil
   })
 })
 
-describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / deletePage / createPage / templates)', () => {
+describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages / editPage / deletePage / createPage / templates)', () => {
   // A minimal page row the doc-page store stub returns. One heading block is
   // enough for the Markdown export + the delete/edit access-confirm read.
   const SAMPLE_PAGE = {
@@ -915,6 +915,56 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / 
     expect(body).toContain('pb')
     // No content fetch on an ambiguous search.
     expect(docTools.docPageStore.getVersionedPage).not.toHaveBeenCalled()
+  })
+
+  it('listPages is exposed on a read key', () => {
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools: docToolsStub() })
+    expect(tools.map((t) => t.name)).toContain('listPages')
+  })
+
+  it('listPages returns every page as a { pageId, title } row, newest first', async () => {
+    const docTools = docToolsStub({
+      list: async () => [
+        { ...listRow('Older', 'p-old'), updatedAt: new Date('2026-01-01T00:00:00Z') },
+        { ...listRow('Newer', 'p-new'), updatedAt: new Date('2026-02-01T00:00:00Z') },
+      ],
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const listPages = tools.find((t) => t.name === 'listPages')!
+    const result = await listPages.handler({})
+    expect(result.isError).toBeFalsy()
+    const body = textBody(result)
+    expect(body).toContain('Newer')
+    expect(body).toContain('p-new')
+    expect(body).toContain('p-old')
+    // Recency order: the newer page is listed before the older one.
+    expect(body.indexOf('p-new')).toBeLessThan(body.indexOf('p-old'))
+  })
+
+  it('listPages filters by a case-insensitive titlePrefix', async () => {
+    const docTools = docToolsStub({
+      list: async () => [
+        listRow('sidanCode plan: alpha', 'pa'),
+        listRow('sidanCode plan: beta', 'pb'),
+        listRow('Unrelated page', 'pu'),
+      ],
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const listPages = tools.find((t) => t.name === 'listPages')!
+    const result = await listPages.handler({ titlePrefix: 'SIDANCODE PLAN:' })
+    const body = textBody(result)
+    expect(body).toContain('pa')
+    expect(body).toContain('pb')
+    expect(body).not.toContain('pu')
+  })
+
+  it('listPages reports an empty result for a prefix that matches nothing', async () => {
+    const docTools = docToolsStub({ list: async () => [listRow('Something else', 'px')] })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const listPages = tools.find((t) => t.name === 'listPages')!
+    const result = await listPages.handler({ titlePrefix: 'no-such-prefix' })
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toMatch(/no pages/i)
   })
 
   it('editPage append confirms access then applies a CAS patch', async () => {
