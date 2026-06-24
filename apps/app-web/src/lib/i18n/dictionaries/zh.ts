@@ -2367,6 +2367,13 @@ export const zh: Dictionary = {
       provenanceHeading: "來源",
       savedBy: "由 {author} 儲存",
       savedAt: "儲存時間：{date}",
+      filePreview: {
+        heading: "預覽",
+        loading: "正在載入預覽…",
+        error: "無法載入此檔案。",
+        download: "下載檔案",
+        tagsPlaceholder: "標籤1, 標籤2",
+      },
       authorUser: "你",
       authorAssistant: "{name}",
       nameLabel: "名稱",

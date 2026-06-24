@@ -2561,6 +2561,13 @@ export const en = {
       provenanceHeading: "Source",
       savedBy: "Saved by {author}",
       savedAt: "Saved {date}",
+      filePreview: {
+        heading: "Preview",
+        loading: "Loading preview…",
+        error: "Couldn't load this file.",
+        download: "Download file",
+        tagsPlaceholder: "tag1, tag2",
+      },
       authorUser: "you",
       authorAssistant: "{name}",
       nameLabel: "Name",

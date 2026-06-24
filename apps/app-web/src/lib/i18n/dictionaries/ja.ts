@@ -2385,6 +2385,13 @@ export const ja: Dictionary = {
       provenanceHeading: "出典",
       savedBy: "{author} が保存",
       savedAt: "保存日時: {date}",
+      filePreview: {
+        heading: "プレビュー",
+        loading: "プレビューを読み込んでいます…",
+        error: "このファイルを読み込めませんでした。",
+        download: "ファイルをダウンロード",
+        tagsPlaceholder: "タグ1, タグ2",
+      },
       authorUser: "あなた",
       authorAssistant: "{name}",
       nameLabel: "名前",
