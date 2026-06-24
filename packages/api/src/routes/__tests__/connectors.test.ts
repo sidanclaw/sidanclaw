@@ -158,9 +158,12 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     })
   })
 
-  it('GET /:provider/tools is empty for a connector with no catalog', async () => {
+  it('GET /:provider/tools is empty for a provider with no catalog entry', async () => {
+    // A slug absent from OFFICIAL_CONNECTOR_TOOLS (e.g. a custom connector) has
+    // no built-in tool set. Note official connectors — including `files` — DO
+    // carry catalogs, so this must use a genuinely unlisted provider.
     const { app } = makeApp('u1')
-    const res = await request(app).get('/api/connectors/files/tools')
+    const res = await request(app).get('/api/connectors/no-such-connector/tools')
     expect(res.status).toBe(200)
     expect(res.body.tools).toEqual([])
   })
