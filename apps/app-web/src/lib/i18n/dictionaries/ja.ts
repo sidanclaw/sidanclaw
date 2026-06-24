@@ -785,6 +785,7 @@ export const ja: Dictionary = {
         to_do: "ToDo リスト",
         toggle: "トグルリスト",
         page: "ページ",
+        template: "テンプレート",
         callout: "コールアウト",
         quote: "引用",
         table: "テーブル",
@@ -805,6 +806,19 @@ export const ja: Dictionary = {
       filteredResults: "絞り込み結果",
       closeMenu: "メニューを閉じる",
       esc: "esc",
+    },
+    templateGallery: {
+      title: "テンプレートを選択",
+      searchPlaceholder: "テンプレートを検索",
+      empty: "一致するテンプレートがありません。",
+      ariaLabel: "ページテンプレート",
+      categories: {
+        meeting: "会議",
+        planning: "計画",
+        personal: "個人",
+        knowledge: "ナレッジ",
+        team: "チーム",
+      },
     },
     editorPlaceholder: {
       aiHint: "「スペース」で AI、「/」でコマンド",

@@ -41,6 +41,26 @@ export {
 // without pulling the core barrel.
 export { markdownToBlocks } from '@sidanclaw/core/dist/doc/markdown.js'
 
+// Page templates — re-exported from core's `dist/doc/templates.js` leaf, which
+// imports only the fs-free `markdown.js` + `blocks.js` leaves (no barrel, no
+// `skills/loader`/`fs`), so the browser editor's "/template" gallery
+// (`apps/app-web` `template-gallery.tsx`) can list + instantiate templates
+// without pulling the core barrel. Same source of truth the brain-MCP
+// `listPageTemplates` / `createPageFromTemplate` tools read.
+// See docs/architecture/features/doc-templates.md.
+export {
+  type PageTemplate,
+  type PageTemplateSummary,
+  type PageTemplateCategory,
+  type InstantiatedTemplate,
+  type TemplateVars,
+  PAGE_TEMPLATES,
+  listPageTemplates,
+  getPageTemplate,
+  pageTemplateIds,
+  instantiatePageTemplate,
+} from '@sidanclaw/core/dist/doc/templates.js'
+
 export {
   pageToYDoc,
   pageToYDocUpdate,

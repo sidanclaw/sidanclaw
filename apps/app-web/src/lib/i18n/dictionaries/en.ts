@@ -897,6 +897,7 @@ export const en = {
         to_do: "To-do list",
         toggle: "Toggle list",
         page: "Page",
+        template: "Template",
         callout: "Callout",
         quote: "Quote",
         table: "Table",
@@ -917,6 +918,21 @@ export const en = {
       filteredResults: "Filtered results",
       closeMenu: "Close menu",
       esc: "esc",
+    },
+    // Page template gallery: opened by the "/template" slash item, inserts a
+    // starter layout's blocks at the caret.
+    templateGallery: {
+      title: "Pick a template",
+      searchPlaceholder: "Search templates",
+      empty: "No templates match.",
+      ariaLabel: "Page templates",
+      categories: {
+        meeting: "Meetings",
+        planning: "Planning",
+        personal: "Personal",
+        knowledge: "Knowledge",
+        team: "Team",
+      },
     },
     // Empty-line affordances: the "Press 'space' for AI or '/' for commands"
     // placeholder on an empty paragraph, and the quieter empty-heading hint.
