@@ -171,6 +171,10 @@ type ConnectorRow = McpConnector
 export function createDbConnectorStore(encryptionKey: Buffer | null): ConnectorStore {
   return {
     async list(userId) {
+      // `connector_instance` exists in every edition: the hosted overlay-v1
+      // baseline creates it, and migration 280_oss_connectors creates it for the
+      // OSS open schema. (It was previously OSS-stubbed to `[]` because the table
+      // was absent there.)
       const result = await queryWithRLS<ConnectorRow>(
         userId,
         `SELECT ${PUBLIC_COLS} FROM connector_instance
