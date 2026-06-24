@@ -49,12 +49,14 @@ import {
 } from "@/lib/api/brain";
 import { getActiveAssistantId } from "@/lib/sidebar-cache";
 import { requestBrainRefresh } from "@/lib/brain-events";
+import { authFetch } from "@/lib/auth-fetch";
 import {
   type AdjustMemoryChanges,
   type BrainInboxRowDetail,
   type BrainPrimitive as InboxPrimitive,
   type ExplainContext,
   adjustBrainRow,
+  brainFileContentUrl,
   deleteBrainRow,
   explainBrainRow,
   fetchBrainRow,
@@ -1661,6 +1663,102 @@ type PrimitiveSectionProps = {
   onUpdated: (next: BrainInboxRowDetail) => void;
 };
 
+// ── File content preview (workspace_file) ────────────────────────
+//
+// Streams the file's bytes from the auth-gated brain-inbox content
+// endpoint (`brainFileContentUrl`) via `authFetch` — a plain <img src>
+// could not carry the bearer token. Images render inline, text/markdown
+// as text, everything else as a download link. Object URLs are revoked
+// on unmount / row change.
+function FileContentPreview({
+  workspaceId,
+  fileId,
+  mime,
+  name,
+}: {
+  workspaceId: string;
+  fileId: string;
+  mime: string;
+  name: string;
+}) {
+  const t = useT();
+  const fp = t.brainPage.detailDrawer.filePreview;
+  type PreviewState =
+    | { kind: "loading" }
+    | { kind: "image"; url: string }
+    | { kind: "text"; text: string }
+    | { kind: "download"; url: string }
+    | { kind: "error" };
+  const [state, setState] = useState<PreviewState>({ kind: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setState({ kind: "loading" });
+    const isText =
+      mime.startsWith("text/") ||
+      mime === "application/json" ||
+      mime === "application/xml" ||
+      name.toLowerCase().endsWith(".md");
+    authFetch(brainFileContentUrl(workspaceId, fileId))
+      .then(async (res) => {
+        if (!res.ok) throw new Error(String(res.status));
+        if (mime.startsWith("image/")) {
+          const blob = await res.blob();
+          objectUrl = URL.createObjectURL(blob);
+          if (!cancelled) setState({ kind: "image", url: objectUrl });
+        } else if (isText) {
+          const text = await res.text();
+          if (!cancelled) setState({ kind: "text", text });
+        } else {
+          const blob = await res.blob();
+          objectUrl = URL.createObjectURL(blob);
+          if (!cancelled) setState({ kind: "download", url: objectUrl });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setState({ kind: "error" });
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [workspaceId, fileId, mime, name]);
+
+  if (state.kind === "loading") {
+    return <p className="text-xs text-muted-foreground">{fp.loading}</p>;
+  }
+  if (state.kind === "error") {
+    return <p className="text-xs text-muted-foreground">{fp.error}</p>;
+  }
+  if (state.kind === "image") {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element -- object URL, not an optimizable asset
+      <img
+        src={state.url}
+        alt={name}
+        className="max-h-80 w-auto rounded-md border border-border object-contain"
+      />
+    );
+  }
+  if (state.kind === "text") {
+    return (
+      <pre className="max-h-96 overflow-auto rounded-md border border-border bg-muted/30 p-3 text-[12px] leading-relaxed whitespace-pre-wrap break-words font-mono">
+        {state.text}
+      </pre>
+    );
+  }
+  return (
+    <a
+      href={state.url}
+      download={name}
+      className="inline-block w-max text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted"
+    >
+      {fp.download}
+    </a>
+  );
+}
+
 function PrimitiveSection({
   workspaceId,
   primitive,
@@ -1675,6 +1773,7 @@ function PrimitiveSection({
 
   const isMemory = primitive === "memory";
   const isCrm = primitive === "company" || primitive === "contact" || primitive === "deal";
+  const isFile = primitive === "workspace_file";
   const isVerified = Boolean(detail.verifiedAt);
   const summary = String(detail.body.summary ?? "");
   const memoryDetail = (detail.body.detail as string | null) ?? null;
@@ -1699,6 +1798,13 @@ function PrimitiveSection({
   const [draftDetail, setDraftDetail] = useState(memoryDetail ?? "");
   // CRM name draft — shared field for company/contact/deal edits.
   const [draftCrmName, setDraftCrmName] = useState(crmName);
+  // workspace_file tags draft — comma-separated for editing; the original
+  // set drives the change detection in `submitEdit`.
+  const fileTags: string[] = Array.isArray(detail.body.tags)
+    ? (detail.body.tags as unknown[]).filter((x): x is string => typeof x === "string")
+    : [];
+  const fileTagsJoined = fileTags.join(", ");
+  const [draftFileTags, setDraftFileTags] = useState(fileTagsJoined);
 
   const [whyDetailsOpen, setWhyDetailsOpen] = useState(false);
   const [whyLoading, setWhyLoading] = useState(true);
@@ -1731,10 +1837,11 @@ function PrimitiveSection({
     setDraftSummary(summary);
     setDraftDetail(memoryDetail ?? "");
     setDraftCrmName(crmName);
+    setDraftFileTags(fileTagsJoined);
     setDraftReason("");
     setMode("view");
     setError(null);
-  }, [detail.id, inferredScope, inferredSensitivity, summary, memoryDetail, crmName]);
+  }, [detail.id, inferredScope, inferredSensitivity, summary, memoryDetail, crmName, fileTagsJoined]);
 
   async function handleConfirm() {
     setBusy(true);
@@ -1774,6 +1881,7 @@ function PrimitiveSection({
     setDraftSensitivity(inferredSensitivity);
     setDraftSummary(summary);
     setDraftDetail(memoryDetail ?? "");
+    setDraftFileTags(fileTagsJoined);
     setDraftReason("");
     setError(null);
   }
@@ -1794,6 +1902,21 @@ function PrimitiveSection({
       if (draftSensitivity !== inferredSensitivity) {
         changes.sensitivity = draftSensitivity;
       }
+    } else if (isFile) {
+      // File edit shape — sensitivity + tags (rename is path-coupled and
+      // out of scope; the server's workspace_file adjust handler patches
+      // the metadata and stamps the row verified).
+      if (draftSensitivity !== inferredSensitivity) {
+        changes.sensitivity = draftSensitivity;
+      }
+      const parsedTags = draftFileTags
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const tagsChanged =
+        parsedTags.length !== fileTags.length ||
+        parsedTags.some((tag, i) => tag !== fileTags[i]);
+      if (tagsChanged) changes.tags = parsedTags;
     } else {
       // Memory edit shape — scope/sensitivity/summary/detail.
       if (draftScope !== inferredScope) changes.scope = draftScope;
@@ -1815,7 +1938,9 @@ function PrimitiveSection({
     if (Object.keys(changes).length === 0 || (
       isCrm
         ? changes.display_name === undefined && changes.sensitivity === undefined
-        : false
+        : isFile
+          ? changes.sensitivity === undefined && changes.tags === undefined
+          : false
     )) {
       // Nothing to change — collapse the form. If the row was unverified,
       // also stamp it verified so the user's "no, this is right" intent
@@ -1892,7 +2017,7 @@ function PrimitiveSection({
               {review.confirm}
             </button>
           )}
-          {(isMemory || isCrm) && (
+          {(isMemory || isCrm || isFile) && (
             <button
               type="button"
               disabled={busy}
@@ -2196,31 +2321,117 @@ function PrimitiveSection({
             })}
           </p>
         </section>
+      ) : isFile && mode === "edit" ? (
+        <section className="flex flex-col gap-2">
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
+            {labels.detailsHeading}
+          </h3>
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-2 text-sm items-start">
+            <div className="contents">
+              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
+                {humaniseKey("sensitivity")}
+              </dt>
+              <dd>
+                <Select
+                  value={draftSensitivity}
+                  onValueChange={(v) => {
+                    if (v) setDraftSensitivity(v as Sensitivity);
+                  }}
+                  disabled={busy}
+                  items={{
+                    public: review.sensitivityPublic,
+                    internal: review.sensitivityInternal,
+                    confidential: review.sensitivityConfidential,
+                  }}
+                >
+                  <SelectTrigger className="text-xs w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent alignItemWithTrigger={false}>
+                    <SelectItem value="public">{review.sensitivityPublic}</SelectItem>
+                    <SelectItem value="internal">{review.sensitivityInternal}</SelectItem>
+                    <SelectItem value="confidential">{review.sensitivityConfidential}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </dd>
+            </div>
+            <div className="contents">
+              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
+                {humaniseKey("tags")}
+              </dt>
+              <dd>
+                <input
+                  type="text"
+                  value={draftFileTags}
+                  onChange={(e) => setDraftFileTags(e.target.value)}
+                  placeholder={labels.filePreview.tagsPlaceholder}
+                  disabled={busy}
+                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
+                />
+              </dd>
+            </div>
+            <div className="contents">
+              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
+                {review.why}
+              </dt>
+              <dd>
+                <input
+                  type="text"
+                  value={draftReason}
+                  onChange={(e) => setDraftReason(e.target.value)}
+                  placeholder={review.reasonPlaceholder}
+                  disabled={busy}
+                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
+                />
+              </dd>
+            </div>
+          </dl>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            {format(labels.savedAt, {
+              date: new Date(detail.createdAt).toLocaleString(),
+            })}
+          </p>
+        </section>
       ) : (
-        fields.length > 0 && (
-          <section className="flex flex-col gap-2">
-            <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-              {labels.detailsHeading}
-            </h3>
-            <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1.5 text-sm">
-              {fields.map(([k, v]) => (
-                <div key={k} className="contents">
-                  <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-0.5">
-                    {humaniseKey(k)}
-                  </dt>
-                  <dd className="break-words font-mono text-[12px] leading-relaxed">
-                    {v}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-            <p className="text-[11px] text-muted-foreground mt-2">
-              {format(labels.savedAt, {
-                date: new Date(detail.createdAt).toLocaleString(),
-              })}
-            </p>
-          </section>
-        )
+        <>
+          {isFile && (
+            <section className="flex flex-col gap-2">
+              <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
+                {labels.filePreview.heading}
+              </h3>
+              <FileContentPreview
+                workspaceId={workspaceId}
+                fileId={detail.id}
+                mime={String(detail.body.mime_type ?? "")}
+                name={String(detail.body.name ?? "file")}
+              />
+            </section>
+          )}
+          {fields.length > 0 && (
+            <section className="flex flex-col gap-2">
+              <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
+                {labels.detailsHeading}
+              </h3>
+              <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1.5 text-sm">
+                {fields.map(([k, v]) => (
+                  <div key={k} className="contents">
+                    <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-0.5">
+                      {humaniseKey(k)}
+                    </dt>
+                    <dd className="break-words font-mono text-[12px] leading-relaxed">
+                      {v}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="text-[11px] text-muted-foreground mt-2">
+                {format(labels.savedAt, {
+                  date: new Date(detail.createdAt).toLocaleString(),
+                })}
+              </p>
+            </section>
+          )}
+        </>
       )}
 
       {crmEntity && <EmbeddedRollupSections rollup={crmEntity} />}
