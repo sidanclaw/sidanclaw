@@ -101,6 +101,12 @@ export type WhatsappConnectHandlers = {
   onConnected?: (phoneNumber: string) => void;
   /** The QR expired before it was scanned. */
   onTimeout?: (message: string) => void;
+  /**
+   * The connector failed to start pairing (e.g. logged out, session conflict,
+   * persistence unavailable). Without this the stream just ends silently and
+   * the modal hangs on the loading state forever.
+   */
+  onError?: (error: string) => void;
 };
 
 /**
@@ -161,4 +167,6 @@ function dispatchFrame(frame: string, handlers: WhatsappConnectHandlers): void {
     handlers.onConnected?.(payload.phoneNumber);
   else if (event === "timeout")
     handlers.onTimeout?.(typeof payload.message === "string" ? payload.message : "");
+  else if (event === "error")
+    handlers.onError?.(typeof payload.error === "string" ? payload.error : "");
 }

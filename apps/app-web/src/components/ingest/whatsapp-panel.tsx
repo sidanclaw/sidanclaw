@@ -96,6 +96,27 @@ export function WhatsappIngestPanel({ workspaceId }: { workspaceId: string }) {
     load();
   }, [load]);
 
+  // A phone-side logout (unlinking the device) flips the integration to
+  // `revoked` server-side, but the panel otherwise only loads on mount - so it
+  // would keep showing "Connected as <number>" until a manual reload. Re-fetch
+  // on tab focus/visibility and on a light interval so the disconnected state
+  // surfaces on its own. Skipped while the QR modal is open, where
+  // `reloadUntilConnected` owns refresh.
+  useEffect(() => {
+    if (connecting) return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    const id = window.setInterval(refresh, 30_000);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      window.clearInterval(id);
+    };
+  }, [connecting, load]);
+
   // ── QR pairing ────────────────────────────────────────────────
   const startConnect = useCallback(() => {
     abortRef.current?.abort();
@@ -113,6 +134,7 @@ export function WhatsappIngestPanel({ workspaceId }: { workspaceId: string }) {
           void reloadUntilConnected();
         },
         onTimeout: () => setPhase({ kind: "expired" }),
+        onError: (message) => setPhase({ kind: "error", message }),
       },
       controller.signal,
     ).catch((e: unknown) => {

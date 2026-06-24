@@ -11,7 +11,13 @@ const nextConfig: NextConfig = {
   env: {
     NEXT_PUBLIC_GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ?? "",
     API_URL: API_URL,
-    NEXT_PUBLIC_API_URL: process.env.NODE_ENV === "development" ? "" : API_URL,
+    // Dev defaults to "" (browser uses the /api rewrite). But the dev rewrite
+    // BUFFERS gzip SSE responses, so streaming endpoints (WhatsApp QR connect)
+    // hang. An explicit NEXT_PUBLIC_API_URL override lets dev hit the API
+    // directly (CORS-allowed), bypassing the rewrite.
+    NEXT_PUBLIC_API_URL:
+      process.env.NEXT_PUBLIC_API_URL ??
+      (process.env.NODE_ENV === "development" ? "" : API_URL),
     NEXT_PUBLIC_CORE_WEB_URL: process.env.NEXT_PUBLIC_CORE_WEB_URL ?? "https://sidan.ai",
     GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ?? "",
     GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ?? "",

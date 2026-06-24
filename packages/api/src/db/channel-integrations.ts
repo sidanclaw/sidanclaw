@@ -340,6 +340,20 @@ export type ChannelIntegrationStore = {
   touchLastEventAt(id: string): Promise<void>
 
   /**
+   * System-level status flip by `channel_id` (no RLS). The wa-connector calls
+   * `/internal/whatsapp/disconnected` when WhatsApp logs the linked device out
+   * (status 401); the route flips the integration to `'revoked'` so the status
+   * endpoint reports it disconnected and the UI prompts a reconnect. A later
+   * reconnect re-activates it via `upsert` (which sets `status = 'active'`).
+   * Returns whether a row matched. Pre-auth: the connector has no session user.
+   */
+  setStatusByChannelSystem(
+    channelId: string,
+    channelType: string,
+    status: 'active' | 'revoked' | 'invalid',
+  ): Promise<boolean>
+
+  /**
    * List every active integration of a channel type whose owning channel is
    * also active, with decrypted credentials + bot user id. System-level
    * (no RLS) — the Discord Gateway connector calls this via
@@ -616,6 +630,15 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
         `UPDATE channel_integrations SET last_event_at = now() WHERE id = $1`,
         [id],
       )
+    },
+
+    async setStatusByChannelSystem(channelId, channelType, status) {
+      const result = await query(
+        `UPDATE channel_integrations SET status = $3, updated_at = now()
+         WHERE channel_id = $1 AND channel_type = $2`,
+        [channelId, channelType, status],
+      )
+      return (result.rowCount ?? 0) > 0
     },
 
     async listActiveWithCredentialsSystem(channelType) {
