@@ -145,6 +145,7 @@ import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
 import { connectionRoutes } from './routes/connections.js'
+import { connectorRoutes } from './routes/connectors.js'
 import { discoverRoutes } from './routes/discover.js'
 import { createModesRouter } from './routes/modes.js'
 import { pendingMessageRoutes } from './routes/pending-messages.js'
@@ -1716,6 +1717,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     getTelegramBotUsername,
     blobClient: filesBlobClient ?? undefined,
   }))
+
+  // Built-in connector lifecycle (list / store-credentials / disconnect /
+  // rename / delete). OSS-only: the hosted edition mounts its own richer closed
+  // `/api/connectors` route, so mounting this open one there would shadow it.
+  // Gated on the same `SIDANCLAW_EDITION` flag the launcher sets for the open
+  // single-player edition. See routes/connectors.ts.
+  if (process.env.SIDANCLAW_EDITION === 'oss') {
+    app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
+      connectorStore,
+      connectorInstanceStore,
+    }))
+  }
 
   // GET/POST /api/assistants (inline)
   app.get('/api/assistants', requireAuth(env.JWT_SECRET), async (req, res) => {
