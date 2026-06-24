@@ -48,7 +48,13 @@ import CollaborationCursor from "@tiptap/extension-collaboration-cursor";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import type { AnyExtension, Editor } from "@tiptap/core";
 import type * as Y from "yjs";
-import { FRAGMENT_FIELD, blocksToPMDoc, instantiatePageTemplate } from "@sidanclaw/doc-model";
+import {
+  FRAGMENT_FIELD,
+  blocksToPMDoc,
+  instantiatePageTemplate,
+  withFreshBlockIds,
+  type CustomPageTemplateSummary,
+} from "@sidanclaw/doc-model";
 import type { CollabHandle } from "@/lib/collab/use-collab-provider";
 import { colorForUserId } from "@/lib/collab/cursor-color";
 import { useT } from "@/lib/i18n/client";
@@ -58,6 +64,9 @@ import {
   createDraft,
   newBlockId,
   getAssistantIdentity,
+  listCustomPageTemplates,
+  getCustomPageTemplate,
+  deleteCustomPageTemplate,
   type AssistantIdentity,
 } from "@/lib/api/views";
 import { browserDocExtensions } from "./doc-schema";
@@ -142,6 +151,12 @@ export type CollabPageEditorProps = {
    * page content left so the comment rail has somewhere to dock (Notion-style).
    */
   onCommentsPresenceChange?: (present: boolean) => void;
+  /**
+   * Start the "author a template from scratch" flow (the gallery's "New
+   * template" button). Owned by the shell — it mints a transient draft and
+   * routes to it. When absent the button is hidden.
+   */
+  onNewTemplate?: () => void;
 };
 
 export function CollabPageEditor({
@@ -154,6 +169,7 @@ export function CollabPageEditor({
   assistantId,
   buildSlot,
   onCommentsPresenceChange,
+  onNewTemplate,
 }: CollabPageEditorProps) {
   const { doc, provider, synced } = collab;
   if (!doc || !provider) {
@@ -177,6 +193,7 @@ export function CollabPageEditor({
       assistantId={assistantId}
       buildSlot={buildSlot}
       onCommentsPresenceChange={onCommentsPresenceChange}
+      onNewTemplate={onNewTemplate}
     />
   );
 }
@@ -193,6 +210,7 @@ function CollabEditorInner({
   assistantId,
   buildSlot,
   onCommentsPresenceChange,
+  onNewTemplate,
 }: {
   doc: Y.Doc;
   provider: HocuspocusProvider;
@@ -205,6 +223,7 @@ function CollabEditorInner({
   assistantId?: string;
   buildSlot?: ReactNode;
   onCommentsPresenceChange?: (present: boolean) => void;
+  onNewTemplate?: () => void;
 }) {
   const t = useT().docPage;
   const ws = useWorkspaceContext();
@@ -330,6 +349,16 @@ function CollabEditorInner({
   // capture the insert position the slash was invoked at so a pick (made later,
   // through the modal) lands at the right place even though focus moved.
   const [templateGallery, setTemplateGallery] = useState<{ insertPos: number } | null>(null);
+  // Workspace custom templates, loaded lazily when the gallery opens.
+  const [customTemplates, setCustomTemplates] = useState<CustomPageTemplateSummary[]>([]);
+  const refreshCustomTemplates = useCallback(() => {
+    void listCustomPageTemplates(ws.workspaceId)
+      .then(setCustomTemplates)
+      .catch(() => setCustomTemplates([]));
+  }, [ws.workspaceId]);
+  useEffect(() => {
+    if (templateGallery) refreshCustomTemplates();
+  }, [templateGallery, refreshCustomTemplates]);
   // Empty-line "Space for AI": the inline AI box, anchored at the caret of the
   // empty paragraph the user pressed Space on. Opened by `onAiSpaceRef` below.
   const [aiPrompt, setAiPrompt] = useState<{
@@ -418,6 +447,31 @@ function CollabEditorInner({
       }
     },
     [],
+  );
+
+  // Insert a CUSTOM template's stored blocks at `pos`. Fetches the snapshot,
+  // mints fresh block ids (so they never collide with the page's), then runs
+  // the same `blocksToPMDoc` insert path as `insertTemplate`.
+  const insertCustomTemplate = useCallback(
+    async (ed: Editor, pos: number, templateId: string) => {
+      const tpl = await getCustomPageTemplate(ws.workspaceId, templateId).catch(() => null);
+      if (!tpl || tpl.blocks.length === 0) return;
+      const blocks = withFreshBlockIds(tpl.blocks, () => crypto.randomUUID());
+      const pmDoc = blocksToPMDoc(blocks);
+      const content = (pmDoc as { content?: unknown[] }).content ?? [];
+      if (content.length === 0) return;
+      const $pos = ed.state.doc.resolve(Math.min(pos, ed.state.doc.content.size));
+      const parent = $pos.parent;
+      const lineEmpty = parent.isTextblock && parent.content.size === 0;
+      const chain = ed.chain().focus();
+      if (lineEmpty) {
+        const range = { from: $pos.before(), to: $pos.after() };
+        chain.insertContentAt(range, content).run();
+      } else {
+        chain.insertContentAt(pos, content).run();
+      }
+    },
+    [ws.workspaceId],
   );
 
   // Stable indirection: the slash/space extensions read the latest handler off
@@ -1104,9 +1158,24 @@ function CollabEditorInner({
           slash menu was invoked on. */}
       {templateGallery && editor ? (
         <TemplateGallery
+          customTemplates={customTemplates}
           onPick={(templateId) => {
             insertTemplate(editor, templateGallery.insertPos, templateId);
             setTemplateGallery(null);
+          }}
+          onPickCustom={(templateId) => {
+            const pos = templateGallery.insertPos;
+            setTemplateGallery(null);
+            void insertCustomTemplate(editor, pos, templateId);
+          }}
+          onDeleteCustom={(templateId) => {
+            void deleteCustomPageTemplate(ws.workspaceId, templateId).then(
+              refreshCustomTemplates,
+            );
+          }}
+          onNewTemplate={() => {
+            setTemplateGallery(null);
+            onNewTemplate?.();
           }}
           onClose={() => {
             setTemplateGallery(null);
