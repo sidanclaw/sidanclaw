@@ -21,12 +21,14 @@ whole company every morning, like the guy in Memento.
 
 sidanclaw is for solo founders, indie hackers, and small teams who want a work
 brain that actually remembers. You talk to it, drop notes, decisions, and general
-mess into it, and it remembers. Then, while you are away, it **dreams**: a
+mess into it, and it remembers. It does the work, too: a chat agent that acts
+through your own tools, workflows that run on a schedule or a trigger, and docs to
+hold the output, all in one local app. Then, while you are away, it **dreams**: a
 background consolidation loop (Light / REM / Deep) reorganizes what it has learned
 and synthesizes a **SOUL**, an evolving, written portrait of how *you* think,
 work, and decide.
 
-This is not a memory layer for an agent. It is a portrait of you.
+This is not a memory layer for someone else's agent. It is a portrait of you.
 
 <div align="center">
 <img src="assets/soul-diff.png" alt="The SOUL rewriting itself after a week of notes" width="780" />
@@ -34,7 +36,8 @@ This is not a memory layer for an agent. It is a portrait of you.
 
 - **Runs locally** on a single model key. No cloud account, no second secret, no
   "your data is important to us" email three years from now.
-- **The whole vertical:** chat, the dreaming brain, a canvas, and a frontend.
+- **The whole vertical:** a chat agent, the dreaming brain, workflows, docs, and
+  the frontend they live in.
 - **Yours:** your brain lives on your machine, in a store you can open and read.
   It will end up knowing you better than your last three managers. That is the
   point, not the bug.
@@ -87,7 +90,9 @@ key. Nothing about your work leaves your computer otherwise.
 |---|---|
 | **Engine** | The query loop, tool executor, compaction, provider abstraction. |
 | **Brain** | Memory, hybrid retrieval (RRF + MMR), an entity / edge / task graph, a knowledge base, and the **consolidation / dreaming** loop with SOUL synthesis. |
-| **Canvas** | A collaborative document surface (runs a local sync sidecar). |
+| **Agent** | A chat loop that uses your tools and connectors to do the work, not describe it. |
+| **Workflows** | Multi-step automations that run on a schedule or a trigger, with conditions and approvals. |
+| **Docs** | A collaborative document surface, the canvas, where the work lands (runs a local sync sidecar). |
 | **App** | The desktop and web frontend. |
 
 <!-- Feature GIFs (brain graph, canvas) belong here, captured from a LOCALLY seeded
