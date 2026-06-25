@@ -154,6 +154,14 @@ const platformEngagementDigestContentRefSchema = z.object({
   }),
 })
 
+const docPageContentRefSchema = z.object({
+  source_kind: z.literal('doc_page'),
+  page_id: z.string().min(1),
+  // The section heading block id; `null` for the pre-first-heading preamble.
+  section_block_id: z.string().min(1).nullable(),
+  version: z.number().int().nonnegative(),
+})
+
 export const episodeContentRefSchema = z.discriminatedUnion('source_kind', [
   webChatContentRefSchema,
   slackThreadContentRefSchema,
@@ -169,6 +177,7 @@ export const episodeContentRefSchema = z.discriminatedUnion('source_kind', [
   profileMaterializationContentRefSchema,
   voiceMemoContentRefSchema,
   platformEngagementDigestContentRefSchema,
+  docPageContentRefSchema,
 ])
 
 // ── Envelope supporting schemas ──────────────────────────────────────

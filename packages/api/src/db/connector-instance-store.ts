@@ -439,6 +439,8 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
     },
 
     async listByWorkspaceSystem(workspaceId) {
+      // `connector_instance` now exists in OSS too (migration 280_oss_connectors),
+      // so this no longer needs the edition stub. See connector-store.list.
       const result = await query<PublicRow>(
         `SELECT ${PUBLIC_COLS} FROM connector_instance
          WHERE scope = 'workspace' AND workspace_id = $1

@@ -15,6 +15,7 @@
 
 import dotenv from 'dotenv'
 import { bootOpenApi, type OpenApiEnv } from '@sidanclaw/api/boot.js'
+import { buildEpisodeIngestors } from '@sidanclaw/api/build-episode-ingestors.js'
 
 dotenv.config()
 
@@ -42,7 +43,19 @@ const env: OpenApiEnv = {
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   GCS_FILES_BUCKET: process.env.GCS_FILES_BUCKET,
   SKILLS_AUTO_GEN_ENABLED: process.env.SKILLS_AUTO_GEN_ENABLED === 'true',
+  // AES-GCM key for connector credentials at rest. The launcher generates +
+  // persists it; absent (bare `node index.js` boot) → connectors can't store
+  // credentials, every other surface is unaffected.
+  CHANNEL_CREDENTIAL_KEY: process.env.CHANNEL_CREDENTIAL_KEY,
 }
 
-const { start } = await bootOpenApi({ env, runWorkers: true })
+// Wire the OPEN Pipeline B episode ingestors so brain distillation (doc-page
+// "Sync to brain", brain-MCP ingestToBrain, chat compaction) runs locally. This
+// is the one closed seam the open edition fills with an open impl over the same
+// store graph — see packages/api/src/build-episode-ingestors.ts.
+const { start } = await bootOpenApi({
+  env,
+  runWorkers: true,
+  ports: { buildEpisodeIngestors },
+})
 await start()

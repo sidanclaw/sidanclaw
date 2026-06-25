@@ -21,6 +21,10 @@ export async function migratePglite(db: PGlite, migrationsDir: string): Promise<
   await db.exec(
     `CREATE TABLE IF NOT EXISTS public._migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
   )
+  // Edition signal for OSS-only migrations (see 280_oss_connectors.sql). The
+  // embedded PGLite path is ALWAYS the open edition, so mark it 'oss' for the
+  // whole session; the node-pg runner sets the same GUC from MIGRATION_DIRS.
+  await db.exec(`SELECT set_config('app.migration_edition', 'oss', false)`)
   const { rows } = await db.query<{ name: string }>('SELECT name FROM public._migrations')
   const applied = new Set(rows.map((r) => r.name))
   const files = (await readdir(migrationsDir)).filter((f) => f.endsWith('.sql')).sort()

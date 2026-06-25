@@ -95,6 +95,9 @@ function makeSavedView(over: Partial<SavedView>): SavedView {
     position: 0,
     originPrompt: null,
     autoPruneAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    brainSyncEnabled: false,
+    brainLastIngestHash: null,
+    brainLastIngestAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...over,
@@ -123,6 +126,8 @@ function fakeSavedViewStore(opts: { parentExists?: boolean } = {}): SavedViewSto
     reparent: vi.fn().mockResolvedValue(true),
     reorderSiblings: vi.fn().mockResolvedValue(undefined),
     pruneExpiredDraftsSystem: vi.fn().mockResolvedValue([]),
+    getBrainSyncStateSystem: vi.fn().mockResolvedValue(null),
+    markBrainIngestedSystem: vi.fn().mockResolvedValue(true),
   }
 }
 

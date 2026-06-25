@@ -21,16 +21,48 @@
 import { spawn } from 'node:child_process'
 import { connect } from 'node:net'
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { homedir, platform, userInfo } from 'node:os'
+import { homedir, platform, arch, userInfo } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { createInterface } from 'node:readline/promises'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const CONFIG_DIR = join(homedir(), '.sidanclaw')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const BRAIN_DIR = join(CONFIG_DIR, 'brain')
+
+// Load sidanclaw/.env into process.env BEFORE any env read below, so `pnpm
+// start` honors it the same way the standalone migrate + doc-sync paths
+// already do (both dotenv.config this exact file). Without this the launcher
+// only saw real shell vars, so a DATABASE_URL in .env was silently ignored and
+// the embedded-vs-external decision (useEmbedded, below) never reacted to it.
+// Self-contained (no dotenv dependency at the repo root): shell env always
+// wins (we never overwrite an already-set var), full-line and inline `#`
+// comments are stripped from unquoted values, and quoted values keep their
+// contents verbatim so a DATABASE_URL/password containing `#` survives.
+function loadDotEnv(path) {
+  if (!existsSync(path)) return
+  for (const raw of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    const m = raw.match(/^\s*(?:export\s+)?([\w.-]+)\s*=\s*(.*)$/)
+    if (!m) continue
+    const key = m[1]
+    if (key in process.env) continue // shell wins; never override an existing var
+    let val = m[2]
+    const quote = val[0]
+    if (quote === '"' || quote === "'") {
+      const end = val.indexOf(quote, 1)
+      val = end === -1 ? val.slice(1) : val.slice(1, end)
+      if (quote === '"') val = val.replace(/\\n/g, '\n')
+    } else {
+      val = val.replace(/(^|\s)#.*$/, '').trim() // drop inline comment (`#` at start or after space)
+    }
+    process.env[key] = val
+  }
+}
+loadDotEnv(join(ROOT, '.env'))
+
 // The embedded brain uses a distinctive high port so it never collides with a
 // developer's local Postgres on the default 5432 (verified failure mode).
 const PORTS = { pglite: 54329, api: 4000, docSync: 8080, appWeb: 3003 }
@@ -55,7 +87,23 @@ if (!geminiKey || !ownerName) {
   rl.close()
 }
 const jwtSecret = config.jwtSecret || randomBytes(32).toString('hex')
-writeFileSync(CONFIG_FILE, JSON.stringify({ ...config, geminiApiKey: geminiKey, jwtSecret, ownerName }, null, 2))
+// Shared secret for the API <-> doc-sync internal routes (both directions:
+// API -> doc-sync `/internal/apply`, and doc-sync -> API `/internal/ingest-page`
+// for the auto-on-save brain ingest). Generated + persisted like JWT_SECRET so
+// both child processes get the same value; without it the auto-ingest enqueue
+// is gated off and the API endpoint refuses.
+const docSyncSecret = config.docSyncSecret || randomBytes(32).toString('hex')
+// AES-GCM key that encrypts connector OAuth refresh-tokens / PATs at rest in
+// `connector_instance.credentials`. Without it the api boots with a null
+// credential key and `/api/connectors/:provider/store-credentials` returns 503,
+// so connectors (Google Calendar, GitHub, Notion, ...) can't be connected.
+// Base64 of 32 random bytes -- the format `loadChannelCredentialKey` decodes.
+// Generated + persisted like the other secrets so it survives restarts.
+const channelCredentialKey = config.channelCredentialKey || randomBytes(32).toString('base64')
+writeFileSync(
+  CONFIG_FILE,
+  JSON.stringify({ ...config, geminiApiKey: geminiKey, jwtSecret, docSyncSecret, channelCredentialKey, ownerName }, null, 2),
+)
 
 // External-store escape hatch: a real Postgres URL skips the embedded brain.
 const useEmbedded = !process.env.DATABASE_URL
@@ -68,6 +116,19 @@ const env = {
   JWT_SECRET: jwtSecret,
   DATABASE_URL: databaseUrl,
   SIDANCLAW_SINGLE_PROCESS: '1',
+  // API <-> doc-sync internal auth + the base URL doc-sync POSTs back to for the
+  // auto-on-save brain ingest. 127.0.0.1 (not localhost) avoids the IPv6 ::1
+  // resolution that the api's IPv4 listener refuses.
+  DOC_SYNC_SECRET: docSyncSecret,
+  // Encrypts connector credentials at rest (see generation note above).
+  CHANNEL_CREDENTIAL_KEY: channelCredentialKey,
+  API_INTERNAL_URL: `http://127.0.0.1:${PORTS.api}`,
+  // The embedded brain is one PGLite instance with a single shared session;
+  // concurrent pool connections clobber its unnamed prepared statement. Force
+  // client.ts onto a single serialized connection (see its SINGLE_CONNECTION
+  // note + oss-local-brain-wedge.md §12.4). The external-Postgres escape hatch
+  // leaves it unset — a real Postgres isolates statements per connection.
+  ...(useEmbedded ? { PG_SINGLE_CONNECTION: '1' } : {}),
   // This is the single-player open edition: app-web hides hosted-only surfaces
   // (billing, teammates) and shows the upgrade affordance instead. The flag
   // defaults to the full hosted edition when unset, so only the local launcher
@@ -117,6 +178,33 @@ function openBrowser(url) {
   const cmd = platform() === 'darwin' ? 'open' : platform() === 'win32' ? 'start' : 'xdg-open'
   spawn(cmd, [url], { stdio: 'ignore', detached: true }).unref()
 }
+// Next 16 defaults to Turbopack, which HARD-REQUIRES the native @next/swc
+// binding for this platform (it crashes on boot with "native bindings are not
+// available" when only the WASM fallback loaded). That happens when node_modules
+// was populated on a different OS/arch and copied over (e.g. a Linux-built tree
+// synced to a Mac) rather than freshly `pnpm install`ed here. Detect the missing
+// native binding and fall back to Next's webpack mode, which runs on the WASM
+// swc bindings. A healthy install keeps Turbopack. Override with SIDANCLAW_WEBPACK.
+function nextHasNativeSwc() {
+  const a = arch()
+  const p = platform()
+  const pkgs =
+    p === 'linux' ? [`@next/swc-linux-${a}-gnu`, `@next/swc-linux-${a}-musl`]
+    : p === 'win32' ? [`@next/swc-win32-${a}-msvc`]
+    : [`@next/swc-${p}-${a}`]
+  try {
+    // pnpm nests the @next/swc-* optional deps under `next`, not where app-web
+    // can reach them — resolve relative to next's own package, not app-web's.
+    const appReq = createRequire(join(ROOT, 'apps/app-web/package.json'))
+    const nextReq = createRequire(appReq.resolve('next/package.json'))
+    return pkgs.some((pkg) => {
+      try { nextReq.resolve(`${pkg}/package.json`); return true } catch { return false }
+    })
+  } catch {
+    // Can't even resolve `next` — don't second-guess; keep the default (Turbopack).
+    return true
+  }
+}
 let shuttingDown = false
 function shutdown(code = 0) {
   if (shuttingDown) return
@@ -145,9 +233,23 @@ console.log('[launch] starting api (:4000), doc-sync (:8080), app-web (:3003) ..
 run('api', 'pnpm', ['--filter', '@sidanclaw/api-open', 'exec', 'tsx', 'src/index.ts'])
 run('doc-sync', 'pnpm', ['--filter', '@sidanclaw/doc-sync', 'exec', 'tsx', 'src/index.ts'],
   { PORT: String(PORTS.docSync) })
-run('app-web', 'pnpm', ['--filter', 'app-web', 'dev'])
+const forceWebpack = process.env.SIDANCLAW_WEBPACK === '1' || !nextHasNativeSwc()
+if (forceWebpack) {
+  console.log('[launch] native @next/swc binding for this platform not found — starting app-web with webpack (run `pnpm install` to restore Turbopack).')
+  run('app-web', 'pnpm', ['--filter', 'app-web', 'exec', 'next', 'dev', '--webpack', '--port', String(PORTS.appWeb)])
+} else {
+  run('app-web', 'pnpm', ['--filter', 'app-web', 'dev'])
+}
 
-await waitForPort(PORTS.appWeb, 'app-web', 120_000)
+// Wait for BOTH the api (:4000) and app-web (:3003) before opening the browser.
+// The entry URL immediately proxies to the api's /auth/local-session, and the
+// api binds its port only after its workers + tool registry finish booting
+// (well after app-web's ~200ms dev-server start). Waiting on app-web alone
+// raced that startup and 500'd local-session with ECONNREFUSED.
+await Promise.all([
+  waitForPort(PORTS.api, 'api', 120_000),
+  waitForPort(PORTS.appWeb, 'app-web', 120_000),
+])
 const entryUrl = `http://localhost:${PORTS.appWeb}/api/auth/local-session`
 console.log(`\n[launch] sidanclaw is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb})\n  Ctrl-C to stop everything.\n`)
 openBrowser(entryUrl)

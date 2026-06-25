@@ -70,6 +70,7 @@ import {
   createEntityKindClassifier,
   createCircuitBreaker,
   createKnowledgeSyncWorker,
+  type SyncCredentials,
   type ExecutorDeps as WorkflowExecutorDeps,
   type LLMProvider,
   type Tool,
@@ -92,6 +93,7 @@ import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-cli
 import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
 import { createSessionResumeReplay } from './routes/session-resume-replay.js'
 import { brainRoutes } from './routes/brain.js'
+import { brainInboxRoutes } from './routes/brain-inbox.js'
 import { homeRoutes } from './routes/home.js'
 import { homeDockRoutes } from './routes/home-dock.js'
 import { createDbHomeDockStore } from './db/home-dock-store.js'
@@ -144,6 +146,7 @@ import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
 import { connectionRoutes } from './routes/connections.js'
+import { connectorRoutes } from './routes/connectors.js'
 import { discoverRoutes } from './routes/discover.js'
 import { createModesRouter } from './routes/modes.js'
 import { pendingMessageRoutes } from './routes/pending-messages.js'
@@ -186,8 +189,12 @@ import { createDeliveryTargetResolver } from './scheduling/delivery-target.js'
 import { viewsRoutes } from './routes/views.js'
 import { publicShareRoutes } from './routes/public-share.js'
 import { docThemesRoutes } from './routes/doc-themes.js'
+import { runIngestPage } from './doc/ingest-page-runner.js'
+import { internalIngestRoutes } from './doc/internal-ingest-route.js'
+import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { createDbPageGrantStore } from './db/page-grant-store.js'
+import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbWorkspaceGroupStore } from './db/workspace-group-store.js'
 import { createDbDocThemesStore } from './db/doc-themes-store.js'
 import { createDbDocPageStore } from './db/doc-page-store.js'
@@ -367,6 +374,19 @@ export interface OpenApiPorts {
   pendingClassificationStore?: PendingClassificationStore
   /** Google-Drive knowledge-file store; absent → gdrive files unavailable to chat/workflow. */
   gdriveFilesStore?: GDriveFilesStore
+  /**
+   * Builds the closed GitHub-PAT resolver for the knowledge sync worker over
+   * boot's connector stores (the same stores the knowledge route resolves edit
+   * proposals through). Open default: unset → the worker ticks but every GitHub
+   * source fails resolution with a clear "not configured" error rather than
+   * syncing.
+   */
+  buildSyncCredentials?: (deps: {
+    connectorInstanceStore: ReturnType<typeof createConnectorInstanceStore>
+    connectorGrantStore: Awaited<
+      ReturnType<typeof import('./db/connector-grant-store.js').createConnectorGrantStore>
+    >
+  }) => SyncCredentials
 
   // ── Direct file ingest — open default: unset (no /api/files/ingest) ──
   /**
@@ -586,6 +606,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const workflowRunStore = createDbWorkflowRunStore()
   const pendingApprovalsStore = createPendingApprovalsStore()
   const savedViewStore = createDbSavedViewStore()
+  const pageTemplateStore = createDbPageTemplateStore()
   const homeDockStore = createDbHomeDockStore()
   const docEntityStore = createDbDocEntityStore()
   const pageGrantStore = createDbPageGrantStore()
@@ -1017,6 +1038,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     )
     return result.rows[0]?.id ?? null
   }
+
+  // Doc-page → brain distillation runner (the "Sync to brain" pipeline). Wired
+  // only when Pipeline B is present (`brainEpisodeIngestor`). Shared by the
+  // manual route, the `ingestPage` chat tool, and the auto-on-save internal
+  // endpoint. See packages/api/src/doc/ingest-page-runner.ts +
+  // docs/plans/canvas-brain-distillation.md.
+  const docPageSourceStore = createDbDocPageSourceStore()
+  const ingestPageRunner = brainEpisodeIngestor
+    ? (args: { userId: string; pageId: string; skipIfHashUnchanged?: string | null }) =>
+        runIngestPage(args, {
+          savedViewStore,
+          docPageStore: createDbDocPageStore(),
+          docPageSourceStore,
+          brainEpisodeIngestor,
+          resolvePrimaryAssistant: resolvePrimaryAssistantForWorkspace,
+        }).then(() => undefined)
+    : undefined
 
   const workflowExecutorDeps: WorkflowExecutorDeps = {
     workflowStore,
@@ -1572,6 +1610,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     fileStore,
     workspaceFilesStore,
     usageStore,
+    // Doc-page → brain distillation runner — backs the `ingestPage` chat tool.
+    ingestPage: ingestPageRunner
+      ? ({ userId, pageId }) => ingestPageRunner({ userId, pageId })
+      : undefined,
     analytics,
     cacheStore,
     connectorStore,
@@ -1643,8 +1685,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     crmTools,
     retrievalTools: brainRetrievalTools,
     fileTools: brainFileTools ?? undefined,
+    // Doc-page tools (readPage / editPage / deletePage) reuse the same RLS-gated
+    // saved-views + doc-page stores the chat doc tools use, so a brain-key page
+    // op runs the identical SQL (CAS + undo for edits, cascade delete) as an
+    // in-app edit. See packages/api/src/brain-mcp/tools.ts → buildDocPageTools.
+    docTools: { savedViewStore, docPageStore: createDbDocPageStore(), pageTemplateStore },
     ingest: brainEpisodeIngestor,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
+    // Powers the searchRecording tool's vector arm (recording-to-brain).
+    embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
   }))
 
   app.use(oauthMetadataRoutes({ apiUrl: env.API_URL, webUrl: env.APP_URL }))
@@ -1692,6 +1741,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     getTelegramBotUsername,
     blobClient: filesBlobClient ?? undefined,
   }))
+
+  // Built-in connector lifecycle (list / store-credentials / disconnect /
+  // rename / delete). OSS-only: the hosted edition mounts its own richer closed
+  // `/api/connectors` route, so mounting this open one there would shadow it.
+  // Gated on the same `SIDANCLAW_EDITION` flag the launcher sets for the open
+  // single-player edition. See routes/connectors.ts.
+  if (process.env.SIDANCLAW_EDITION === 'oss') {
+    app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
+      connectorStore,
+      connectorInstanceStore,
+    }))
+  }
 
   // GET/POST /api/assistants (inline)
   app.get('/api/assistants', requireAuth(env.JWT_SECRET), async (req, res) => {
@@ -1917,6 +1978,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api', requireAuth(env.JWT_SECRET), viewsRoutes({
     savedViewStore,
+    pageTemplateStore,
     pageGrantStore,
     workspaceGroupStore,
     analytics,
@@ -1930,7 +1992,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     docPageStore: createDbDocPageStore(),
     jobStore,
     docEntityStore,
+    // Manual "Sync to brain" — the runner runs in the background. Absent when
+    // Pipeline B isn't wired (the route then 503s).
+    ingestPage: ingestPageRunner
+      ? ({ userId, pageId }) => ingestPageRunner({ userId, pageId })
+      : undefined,
   }))
+
+  // Internal auto-on-save ingest endpoint — doc-sync POSTs here on a debounced
+  // settle when a page's "Sync to brain" toggle is on. Shared-secret gated
+  // (DOC_SYNC_SECRET) + dedup/cooldown re-gated server-side. Mounted only when
+  // the runner exists. NB: NO requireAuth — it authenticates via the shared
+  // secret header, not a user JWT (doc-sync has no member context).
+  if (ingestPageRunner) {
+    app.use('/', internalIngestRoutes({
+      savedViewStore,
+      ingestPage: ingestPageRunner,
+    }))
+  }
 
   app.use('/api', requireAuth(env.JWT_SECRET), docEntitiesRoutes({ docEntityStore, workspaceStore }))
 
@@ -1944,6 +2023,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/brain/stream', brainStreamRoutes({ workspaceStore, jwtSecret: env.JWT_SECRET }))
   startBrainStreamFanout()
   app.use('/api/brain', requireAuth(env.JWT_SECRET), brainRoutes({ entitiesStore, entityLinksStore, retrievalStore, knowledgeStore, workspaceSkillStore, connectorInstanceStore }))
+  // Brain inbox (verification surface). Open + hosted share this one mount: the
+  // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /
+  // notify). `entityKindClassifier` is boot's own; `pendingClassificationStore` is
+  // an optional closed port (undefined in OSS → classify/pending endpoints no-op).
+  app.use('/api/brain-inbox', requireAuth(env.JWT_SECRET), brainInboxRoutes({
+    workspaceStore,
+    entityKindClassifier,
+    pendingClassificationStore: ports.pendingClassificationStore,
+    filesApi,
+  }))
   app.use('/api/home', requireAuth(env.JWT_SECRET), homeRoutes())
   app.use('/api/home-dock', requireAuth(env.JWT_SECRET), homeDockRoutes({
     homeDockStore,
@@ -2408,8 +2497,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (runWorkers) embeddingWorker.start()
 
   // ── Knowledge sync worker ──
-  // The sync-credential provider is closed; without it the worker still ticks
-  // but resolves no PAT credentials (no GitHub source syncs locally).
+  // The sync-credential provider is closed (api-platform) and arrives via the
+  // `syncCredentials` port. When absent (open standalone build), fall back to a
+  // stub that fails resolution with a clear message — the worker still ticks but
+  // no GitHub source syncs.
+  const syncCredentials: SyncCredentials = ports.buildSyncCredentials?.({
+    connectorInstanceStore,
+    connectorGrantStore,
+  }) ?? {
+    getPat: async () => {
+      throw new Error('GitHub knowledge sync is not configured in this build')
+    },
+  }
   const knowledgeSyncWorker = createKnowledgeSyncWorker({
     store: knowledgeStore as never,
     api: {
@@ -2421,7 +2520,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       },
       compareCommits,
     },
-    credentials: { resolve: async () => null } as never,
+    credentials: syncCredentials,
     intervalMs: 15 * 60 * 1000,
     onEvent: (event) => {
       console.log(`[knowledge-sync] ${event.type}: ${event.repo}`, event)

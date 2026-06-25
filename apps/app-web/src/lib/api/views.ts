@@ -21,6 +21,11 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 import type { ViewPayload } from "@sidanclaw/views-renderer";
+import type {
+  CustomPageTemplate,
+  CustomPageTemplateSummary,
+  CustomTemplateCreateInput,
+} from "@sidanclaw/doc-model";
 import {
   Briefcase,
   Building2,
@@ -465,6 +470,13 @@ export type ViewMetadata = {
    */
   originPrompt: string | null;
   autoPruneAt: string | null;
+  /**
+   * Per-page "Sync to brain" toggle (migration 001_doc_brain_sync). When true,
+   * an authored-content change on save/settle auto-ingests the page into the
+   * brain. The page-header ⋯ menu reads it to reflect the switch and sets it via
+   * `setViewBrainSync`. Default false.
+   */
+  brainSyncEnabled: boolean;
   page: Page | null;
   createdAt: string;
   updatedAt: string;
@@ -517,6 +529,53 @@ export async function getView(viewId: string): Promise<ViewMetadata> {
 export async function getViewPayload(viewId: string): Promise<ViewPayload> {
   const res = await authFetch(`${API_URL}/api/views/${viewId}/payload`);
   return json<ViewPayload>(res);
+}
+
+// ── Custom page templates (migration 281) ─────────────────────────────
+//
+// Workspace-shared, user-authored templates. Distinct from the built-in
+// `listPageTemplates()` catalog (`@sidanclaw/doc-model`, no args) — these are
+// fetched per workspace. The gallery merges both.
+
+export async function listCustomPageTemplates(
+  workspaceId: string,
+): Promise<CustomPageTemplateSummary[]> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/page-templates`);
+  const body = await json<{ templates: CustomPageTemplateSummary[] }>(res);
+  return body.templates;
+}
+
+export async function getCustomPageTemplate(
+  workspaceId: string,
+  id: string,
+): Promise<CustomPageTemplate> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/page-templates/${id}`);
+  const body = await json<{ template: CustomPageTemplate }>(res);
+  return body.template;
+}
+
+export async function createCustomPageTemplate(
+  workspaceId: string,
+  input: CustomTemplateCreateInput,
+): Promise<CustomPageTemplate> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/page-templates`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const body = await json<{ template: CustomPageTemplate }>(res);
+  return body.template;
+}
+
+export async function deleteCustomPageTemplate(
+  workspaceId: string,
+  id: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${workspaceId}/page-templates/${id}`,
+    { method: "DELETE" },
+  );
+  await json<{ ok: true }>(res);
 }
 
 // ── Page sharing (migration 249) ──────────────────────────────────────
@@ -727,6 +786,39 @@ export async function setViewFullWidth(
 }
 
 /**
+ * Toggle a page's "Sync to brain" mode (migration 001_doc_brain_sync). Maps to
+ * `PATCH /saved-views/:id` with `{ brainSyncEnabled }` - mirrors
+ * `setViewFullWidth`. When enabled, an authored-content change on save
+ * auto-ingests the page into the brain. Returns the updated metadata.
+ */
+export async function setViewBrainSync(
+  viewId: string,
+  brainSyncEnabled: boolean,
+): Promise<ViewMetadata> {
+  const res = await authFetch(`${API_URL}/api/saved-views/${viewId}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ brainSyncEnabled }),
+  });
+  return json<ViewMetadata>(res);
+}
+
+/**
+ * Manually trigger a page's "Sync to brain" ingestion now. Maps to
+ * `POST /api/saved-views/:id/ingest`; the server queues the distillation in the
+ * background and returns 202. Resolves once queued.
+ */
+export async function ingestViewToBrain(viewId: string): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/saved-views/${viewId}/ingest`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}${text ? `: ${text}` : ""}`);
+  }
+}
+
+/**
  * Set a page's clearance (migration 212). Maps to `PATCH /saved-views/:id`
  * with `{ clearance }` — mirrors `setViewFullWidth`. The server rejects (403)
  * a value above the caller's own workspace clearance. Returns updated metadata.
@@ -797,6 +889,11 @@ export async function createDraft(params: {
    * root-level draft.
    */
   nestParentId?: string | null;
+  /**
+   * Optional block seed (migration 281) — "Start from a template" creates the
+   * draft pre-filled with a template's blocks. Omit for an empty page.
+   */
+  blocks?: Block[];
 }): Promise<ViewMetadata> {
   const res = await authFetch(
     `${API_URL}/api/workspaces/${params.workspaceId}/views/draft`,
@@ -807,6 +904,7 @@ export async function createDraft(params: {
         ...(params.name ? { name: params.name } : {}),
         ...(params.binding ? { binding: params.binding } : {}),
         ...(params.nestParentId ? { nestParentId: params.nestParentId } : {}),
+        ...(params.blocks ? { blocks: params.blocks } : {}),
       }),
     },
   );

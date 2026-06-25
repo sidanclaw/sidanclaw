@@ -168,8 +168,19 @@ export type AdjustMemoryChanges = {
   summary?: string;
   detail?: string;
   display_name?: string;
+  /** workspace_file adjust — replace the tag set. */
+  tags?: string[];
   reason?: string;
 };
+
+/**
+ * URL for a `workspace_file` row's raw bytes, used by the brain detail
+ * drawer's preview. The endpoint is auth-gated, so fetch it through
+ * `authFetch` (a plain `<img src>` would not carry the bearer token).
+ */
+export function brainFileContentUrl(workspaceId: string, rowId: string): string {
+  return `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}/workspace_file/${encodeURIComponent(rowId)}/content`;
+}
 
 export async function adjustBrainRow(
   workspaceId: string,

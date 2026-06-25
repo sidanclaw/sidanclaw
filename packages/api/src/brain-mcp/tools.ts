@@ -46,10 +46,38 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { SensitivityAccumulator, isSensitivity, minSensitivity } from '@sidanclaw/core'
-import type { PipelineBResult, Sensitivity, Tool, ToolContext } from '@sidanclaw/core'
+import {
+  SensitivityAccumulator,
+  isSensitivity,
+  minSensitivity,
+  applyOps,
+  buildUndoEntry,
+  markdownToBlocks,
+  normalizeMarkdownBlocks,
+  pageToMarkdown,
+  rankPagesByTitle,
+  listPageTemplates,
+  instantiatePageTemplate,
+  pageTemplateIds,
+  withFreshBlockIds,
+} from '@sidanclaw/core'
+import type {
+  BindingConfig,
+  Block,
+  DocPageStore,
+  Op,
+  Page,
+  PipelineBResult,
+  SavedViewStore,
+  Sensitivity,
+  Tool,
+  ToolContext,
+  Embedder,
+} from '@sidanclaw/core'
 import { query } from '../db/client.js'
+import { searchRecording as searchRecordingFn, readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
+import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { toEpisodeSensitivity } from '../episode-sensitivity.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import { BRAIN_WRITE_TOOL_SIGNALS, notifyBrainChange } from '../brain-stream/notify.js'
@@ -150,6 +178,45 @@ export type BrainFileTools = {
 }
 
 /**
+ * Doc-page stores for the brain MCP page surface (`readPage` / `editPage` /
+ * `deletePage`). Optional on `BuildOpts` — a deploy that doesn't build the doc
+ * stores omits the whole page surface rather than exposing tools with no
+ * backing store (mirrors `BrainFileTools`). Both stores are the SAME concrete
+ * singletons the chat-side doc tools use (`createDbSavedViewStore` /
+ * `createDbDocPageStore`), so a brain-key page read/edit/delete runs through
+ * the identical RLS-gated SQL — `queryWithRLS(userId, …)` keyed on the
+ * resolved (owner, primary-assistant) principal — and `editPage` reuses the
+ * very CAS + undo-capture path the chat editor's `patchPage` uses.
+ *
+ *   - `savedViewStore` — `list` (title search + `listPages` enumeration) +
+ *     `remove` (RLS delete; the `saved_views` FK cascade drops nested child
+ *     pages, per migration 210) + `createDraft` (the `createPage` seam).
+ *   - `docPageStore`   — `getVersionedPage` (RLS read → markdown / access
+ *     confirm) + `applyPatch` (atomic version CAS + `last_undo` capture).
+ */
+export type BrainDocTools = {
+  savedViewStore: Pick<SavedViewStore, 'list' | 'remove' | 'createDraft'>
+  docPageStore: Pick<DocPageStore, 'getVersionedPage' | 'applyPatch'>
+  /**
+   * Custom page templates (migration 281). When wired, `listPageTemplates`
+   * also surfaces the workspace's custom templates and `createPageFromTemplate`
+   * resolves a custom template id (a uuid) to its stored blocks. Optional — a
+   * deploy without the store still serves the built-in catalog.
+   */
+  pageTemplateStore?: Pick<PageTemplateStore, 'list' | 'getById'>
+}
+
+/** Cap on `readPage` title-search matches surfaced to the agent. */
+const READ_PAGE_MAX_MATCHES = 10
+/** `listPages`: default row count, and the hard cap a caller can request. */
+const LIST_PAGES_DEFAULT = 50
+const LIST_PAGES_MAX = 200
+/** Cap on a page's Markdown body so one huge page can't blow the MCP reply. */
+const READ_PAGE_MARKDOWN_CAP = 16_000
+/** Cap on `editPage` content so a single edit can't balloon the page row. */
+const MAX_EDIT_CHARS = 32_000
+
+/**
  * The historical fixed clearance ceiling for a programmatic credential.
  * Since migration 262 the brain MCP binds to the workspace's PRIMARY
  * assistant and reads at `effectiveBrainClearance(primary.clearance,
@@ -208,6 +275,13 @@ type BuildOpts = {
   crmTools: BrainCrmTools
   retrievalTools: BrainRetrievalTools
   /**
+   * Query embedder for the dedicated `searchRecording` tool's vector arm
+   * (recording-to-brain). Optional — without it, recording retrieval degrades
+   * to keyword (ILIKE) search, which still works (and works before a
+   * recording's segments are embedded). See db/retrieval-store.ts → searchRecording.
+   */
+  embedder?: Pick<Embedder, 'embed'>
+  /**
    * Workspace filesystem tools. Optional — omitted on deployments without a
    * blob client, where the file primitive has no backing store. When absent,
    * `buildBrainTools` exposes no file tools.
@@ -222,6 +296,13 @@ type BuildOpts = {
    * `apps/api/src/index.ts` via `createBrainEpisodeIngestor`.
    */
   ingest?: BrainEpisodeIngestor
+  /**
+   * Doc-page stores for the `readPage` / `editPage` / `deletePage` surface.
+   * Optional — a deploy that omits it exposes no page tools (mirrors
+   * `fileTools`). `readPage` rides both key scopes; `editPage` / `deletePage`
+   * are write tools (`read_write` keys only). See `BrainDocTools`.
+   */
+  docTools?: BrainDocTools
 }
 
 /**
@@ -231,6 +312,8 @@ type BuildOpts = {
 const READ_TOOL_NAMES = new Set<string>([
   // Unified read
   'searchBrain',
+  // Scoped single-recording retrieval (recording-to-brain)
+  'searchRecording',
   // Deprecated read alias
   'searchKnowledge',
   // Entity read + edge discovery
@@ -248,12 +331,536 @@ const READ_TOOL_NAMES = new Set<string>([
   // Workspace files (read) — present only when fileTools are wired
   'fileRead',
   'fileSearch',
+  // Doc pages (read) — present only when docTools are wired
+  'readPage',
+  'listPages',
+  'listPageTemplates',
 ])
 
 function text(body: string, isError = false): CallToolResult {
   return {
     content: [{ type: 'text', text: body }],
     ...(isError ? { isError: true } : {}),
+  }
+}
+
+/** Truncate a page's Markdown export so one large page can't blow the reply. */
+function capPageMarkdown(md: string): string {
+  if (md.length <= READ_PAGE_MARKDOWN_CAP) return md
+  return `${md.slice(0, READ_PAGE_MARKDOWN_CAP)}\n\n…[truncated — read a smaller page or narrow the request]`
+}
+
+/**
+ * Build the doc-page tools (`readPage` / `editPage` / `deletePage`). All three
+ * resolve the per-request principal via `resolveCtx` and pass its `userId`
+ * straight into the RLS-gated stores, so a brain-key page op is confined to the
+ * key's workspace + the bound primary assistant's clearance exactly like every
+ * other bridged tool. `readPage` is a read tool (both scopes); `editPage` /
+ * `deletePage` are writes (filtered to `read_write` keys by `buildBrainTools`).
+ *
+ * Reuse, not reinvention:
+ *   - `readPage`   → `rankPagesByTitle` (the `findPage` matcher) + `pageToMarkdown`
+ *                    (the `exportPage` / `findPage` page-to-Markdown path).
+ *   - `listPages`  → the same RLS-scoped `savedViewStore.list`, filtered by an
+ *                    optional case-insensitive `titlePrefix` and recency-ranked.
+ *   - `editPage`   → builds an `Op[]` and runs it through `applyOps` +
+ *                    `docPageStore.applyPatch` — the same validated CAS +
+ *                    `last_undo` capture the chat editor's `patchPage` uses.
+ *   - `deletePage` → confirms RLS-scoped access via `getVersionedPage`, then
+ *                    `savedViewStore.remove` (RLS `DELETE`; the `saved_views`
+ *                    FK cascade drops nested child pages per migration 210).
+ *   - `listPageTemplates` (read) + `createPageFromTemplate` (write) → the
+ *                    shared Notion-style template catalog (`@sidanclaw/core`
+ *                    `listPageTemplates` / `instantiatePageTemplate`). The
+ *                    create path reuses the same `createDraft` seam as
+ *                    `createPage`, seeding the page with the template's blocks
+ *                    + icon. See docs/architecture/features/doc-templates.md.
+ *
+ * Spec pointer (file is OSS, not present in this repo):
+ * docs/architecture/integrations/mcp.md → brain MCP page tools.
+ */
+function buildDocPageTools(
+  docTools: BrainDocTools,
+  resolveCtx: () => Promise<ToolContext | { error: string }>,
+  workspaceId: string,
+): {
+  readPage: BrainTool
+  listPages: BrainTool
+  editPage: BrainTool
+  deletePage: BrainTool
+  createPage: BrainTool
+  listPageTemplates: BrainTool
+  createPageFromTemplate: BrainTool
+} {
+  const { savedViewStore, docPageStore, pageTemplateStore } = docTools
+
+  const readPage: BrainTool = {
+    name: 'readPage',
+    description:
+      'Read a workspace doc page as Markdown. Pass `pageId` to read a specific ' +
+      'page, or `title` to find one by name (case-insensitive, ranked by ' +
+      'closeness). When several pages match a `title`, the call returns the ' +
+      'ranked list (each `{ pageId, title }`) WITHOUT content — pick one and ' +
+      're-call with its `pageId`. When exactly one matches, its Markdown body ' +
+      "is returned directly. Scoped to the key's workspace and clearance — a " +
+      'page you cannot access reads as not-found.',
+    inputSchema: {
+      pageId: z
+        .string()
+        .min(1)
+        .max(128)
+        .optional()
+        .describe('Read one specific page by id (e.g. a `pageId` from a prior search).'),
+      title: z
+        .string()
+        .min(1)
+        .max(256)
+        .optional()
+        .describe('Find a page by title (or partial title). Omit when reading by `pageId`.'),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const pageId = typeof args.pageId === 'string' ? args.pageId.trim() : ''
+      const title = typeof args.title === 'string' ? args.title.trim() : ''
+      if (!pageId && !title) {
+        return text('Pass `pageId` to read a page, or `title` to search by name.', true)
+      }
+
+      // Read-by-id: RLS hides cross-workspace rows, so a null read is both
+      // "not found" and "no access" — never leak which.
+      if (pageId) {
+        const current = await docPageStore.getVersionedPage(ctx.userId, pageId)
+        if (!current) {
+          return text(`Page not found: ${pageId}. It may not exist or you may not have access.`, true)
+        }
+        return text(capPageMarkdown(pageToMarkdown(current.page, current.title)))
+      }
+
+      // Search-by-title: RLS-scoped list, then the shared title ranker.
+      const rows = await savedViewStore.list({ userId: ctx.userId, workspaceId, state: 'all' })
+      const matches = rankPagesByTitle(rows, title, READ_PAGE_MAX_MATCHES)
+      if (matches.length === 0) {
+        return text(`No page matches "${title}". It may not exist or you may not have access.`)
+      }
+      if (matches.length === 1) {
+        const current = await docPageStore.getVersionedPage(ctx.userId, matches[0].id)
+        if (!current) {
+          return text(`Page not found: ${matches[0].id}. It may not exist or you may not have access.`, true)
+        }
+        return text(capPageMarkdown(pageToMarkdown(current.page, current.title)))
+      }
+      const list = matches
+        .map((m) => `- ${m.name} (pageId: ${m.id})`)
+        .join('\n')
+      return text(
+        `${matches.length} pages match "${title}". Re-call readPage with the right pageId:\n${list}`,
+      )
+    },
+  }
+
+  // ── listPages ─────────────────────────────────────────────────
+  //
+  // Enumerate workspace doc pages as `{ pageId, title }` rows — the page
+  // analog of `fileSearch`, and the companion `readPage` lacks (it finds at
+  // most one page, by title). Reuses the same RLS-scoped `savedViewStore.list`
+  // read `readPage`'s title search rides. Saved views carry no tag column, so
+  // grouping is by a shared `titlePrefix` (case-insensitive) the caller stamps
+  // on related pages — that is how a programmatic writer (e.g. a tool that
+  // persists its own plan/record pages) lists just its own. Ids + titles only;
+  // call `readPage` with a `pageId` for content.
+  const listPages: BrainTool = {
+    name: 'listPages',
+    description:
+      'List workspace doc pages as `{ pageId, title }` rows, most-recently-updated ' +
+      'first. Optional `titlePrefix` returns only pages whose title starts with it ' +
+      '(case-insensitive) — stamp a shared prefix on related pages to group them. ' +
+      `Optional \`limit\` caps the rows (default ${LIST_PAGES_DEFAULT}, max ${LIST_PAGES_MAX}). ` +
+      'Returns ids + titles only; call `readPage` with a `pageId` for full content. ' +
+      "Scoped to the key's workspace and clearance.",
+    inputSchema: {
+      titlePrefix: z
+        .string()
+        .min(1)
+        .max(256)
+        .optional()
+        .describe('Only pages whose title starts with this text (case-insensitive).'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(LIST_PAGES_MAX)
+        .optional()
+        .describe(`Max rows to return (default ${LIST_PAGES_DEFAULT}).`),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const prefix = typeof args.titlePrefix === 'string' ? args.titlePrefix.trim().toLowerCase() : ''
+      const rawLimit =
+        typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.floor(args.limit) : LIST_PAGES_DEFAULT
+      const limit = Math.min(Math.max(rawLimit, 1), LIST_PAGES_MAX)
+
+      // Same RLS-scoped list readPage's title search uses; ranking here is
+      // recency (updatedAt desc) rather than title closeness.
+      const rows = await savedViewStore.list({ userId: ctx.userId, workspaceId, state: 'all' })
+      const matched = (prefix ? rows.filter((r) => (r.name ?? '').toLowerCase().startsWith(prefix)) : rows)
+        .slice()
+        .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+        .slice(0, limit)
+      if (matched.length === 0) {
+        return text(
+          prefix ? `No pages whose title starts with "${args.titlePrefix}".` : 'No pages in this workspace.',
+        )
+      }
+      const list = matched.map((r) => `- ${r.name} (pageId: ${r.id})`).join('\n')
+      return text(`${matched.length} page(s):\n${list}`)
+    },
+  }
+
+  const editPage: BrainTool = {
+    name: 'editPage',
+    description:
+      'Edit an existing workspace doc page. Two modes: `mode: "append"` adds ' +
+      'your Markdown `content` to the END of the page, `mode: "replace"` ' +
+      'replaces the entire page body with `content` (the title is kept). ' +
+      'Content is parsed as Markdown into the page block format. The edit goes ' +
+      'through the same validated, version-checked path the in-app editor uses ' +
+      '(atomic compare-and-swap with single-step undo capture), so a concurrent ' +
+      'edit is detected and reported rather than silently clobbered. Scoped to ' +
+      "the key's workspace and clearance.",
+    inputSchema: {
+      pageId: z.string().min(1).max(128).describe('The id of the page to edit.'),
+      content: z
+        .string()
+        .min(1)
+        .max(MAX_EDIT_CHARS)
+        .describe('Markdown content to append, or to replace the whole body with.'),
+      mode: z
+        .enum(['append', 'replace'])
+        .optional()
+        .describe('`append` (default) adds to the end; `replace` swaps the entire body.'),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const pageId = typeof args.pageId === 'string' ? args.pageId.trim() : ''
+      const content = typeof args.content === 'string' ? args.content : ''
+      const mode = args.mode === 'replace' ? 'replace' : 'append'
+      if (!pageId) return text('Provide a `pageId` to edit.', true)
+      if (!content.trim()) return text('Provide non-empty `content`.', true)
+
+      // 1. RLS-scoped read confirms access AND gives the CAS base version.
+      //    Never trust the input id without this — a null read is no-access.
+      const current = await docPageStore.getVersionedPage(ctx.userId, pageId)
+      if (!current) {
+        return text(`Page not found: ${pageId}. It may not exist or you may not have access.`, true)
+      }
+
+      // 2. Build the new block list from the Markdown content. `replace`
+      //    swaps the whole body; `append` keeps existing blocks and adds the
+      //    new ones. `normalizeMarkdownBlocks` runs the same expansion the
+      //    chat path applies so inline Markdown lands as canonical blocks.
+      const newBlocks = normalizeMarkdownBlocks(markdownToBlocks(content))
+      if (newBlocks.length === 0) {
+        return text('The content produced no blocks — provide some Markdown text.', true)
+      }
+
+      // 3. Express the change as the canonical `Op[]`: replace = delete every
+      //    existing block then append the new ones; append = just add. Running
+      //    it through `applyOps` (the same engine `patchPage` uses) gives us a
+      //    validated working copy + the inverse for single-step undo.
+      const ops: Op[] = []
+      if (mode === 'replace') {
+        for (const b of current.page.blocks) ops.push({ op: 'delete', blockId: b.id })
+      }
+      for (const b of newBlocks) ops.push({ op: 'add', block: b })
+
+      let nextPage: Page
+      try {
+        nextPage = applyOps(current.page, ops).page
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return text(`Could not apply the edit: ${msg}`, true)
+      }
+
+      // 4. Atomic compare-and-swap with undo capture — the legacy `patchPage`
+      //    DB seam. `null` means a concurrent writer bumped the version first.
+      const undo = buildUndoEntry(current.page, ops, {}, current.version + 1)
+      let result: { newVersion: number } | null
+      try {
+        result = await docPageStore.applyPatch({
+          userId: ctx.userId,
+          pageId,
+          expectedVersion: current.version,
+          nextPage,
+          undo,
+        })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return text(`Failed to save the edit: ${msg}`, true)
+      }
+      if (!result) {
+        return text('The page was updated concurrently. Re-read it and retry the edit.', true)
+      }
+
+      // Note: doc pages have their own realtime path (the doc-sync service for
+      // live collaborative docs); they're NOT part of the brain-stream NOTIFY
+      // surface (`BrainPrimitive` covers memory/task/CRM/file/entity only), so
+      // no `notifyBrainChange` here. The web reads the page via the saved-views
+      // / doc endpoints, which reflect this committed version on next fetch.
+      return text(
+        `Edited page "${current.title}" (${mode === 'replace' ? 'replaced body' : 'appended content'}). ` +
+          `New version ${result.newVersion}.`,
+      )
+    },
+  }
+
+  const deletePage: BrainTool = {
+    name: 'deletePage',
+    description:
+      'Permanently delete a workspace doc page by id. Any pages nested under ' +
+      'it are deleted too (the page tree cascades). There is no undo over MCP ' +
+      '— the `read_write` scope is the authorization. The key must be able to ' +
+      "access the page (it's scoped to the key's workspace and clearance) or " +
+      'the call reports not-found.',
+    inputSchema: {
+      pageId: z.string().min(1).max(128).describe('The id of the page to delete.'),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const pageId = typeof args.pageId === 'string' ? args.pageId.trim() : ''
+      if (!pageId) return text('Provide a `pageId` to delete.', true)
+
+      // Confirm RLS-scoped access BEFORE deleting — never trust the input id.
+      // A page the key can't see reads null here, so we report not-found
+      // rather than issuing a delete that RLS would no-op anyway.
+      const current = await docPageStore.getVersionedPage(ctx.userId, pageId)
+      if (!current) {
+        return text(`Page not found: ${pageId}. It may not exist or you may not have access.`, true)
+      }
+
+      let removed: boolean
+      try {
+        removed = await savedViewStore.remove(ctx.userId, pageId)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return text(`Failed to delete the page: ${msg}`, true)
+      }
+      if (!removed) {
+        return text(`Page not deleted: ${pageId}. It may have already been removed.`, true)
+      }
+
+      // No brain-stream NOTIFY — doc pages aren't a `BrainPrimitive` (see the
+      // editPage note above); the sidebar re-reads the saved-views list.
+      return text(`Deleted page "${current.title}" (${pageId}).`)
+    },
+  }
+
+  // ── createPage ────────────────────────────────────────────────
+  //
+  // The only create path on this surface — `editPage` requires an existing
+  // `pageId` and refuses to mint one. Persists through the same
+  // `savedViewStore.createDraft` seam the chat `renderPage` tool uses (RLS
+  // keyed on the resolved principal), so a brain-key page is born identical
+  // to one authored in-app. Markdown body is parsed with the same
+  // `markdownToBlocks` + `normalizeMarkdownBlocks` expansion `editPage` runs.
+  const createPage: BrainTool = {
+    name: 'createPage',
+    description:
+      'Create a NEW workspace doc page from a `title` and optional Markdown ' +
+      '`content`. Returns the new `pageId` — use `editPage` to add more or ' +
+      '`readPage` to read it back. This is the only way to create a page; ' +
+      "`editPage` only edits existing pages. Scoped to the key's workspace.",
+    inputSchema: {
+      title: z
+        .string()
+        .min(1)
+        .max(200)
+        .describe('Title for the new page.'),
+      content: z
+        .string()
+        .max(MAX_EDIT_CHARS)
+        .optional()
+        .describe('Optional Markdown body. Omit to create an empty page.'),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const title = typeof args.title === 'string' ? args.title.trim() : ''
+      if (!title) return text('Provide a `title` for the new page.', true)
+      const content = typeof args.content === 'string' ? args.content : ''
+
+      // Build the initial block list from the Markdown body (same expansion
+      // the chat path + `editPage` apply). An empty body still needs one
+      // block so the page is well-formed.
+      const blocks: Block[] = content.trim()
+        ? normalizeMarkdownBlocks(markdownToBlocks(content))
+        : []
+      if (blocks.length === 0) {
+        blocks.push({ kind: 'text', id: randomUUID(), text: '' })
+      }
+
+      // Prose page: the legacy `entity` / `viewType` columns are placeholders
+      // (the block list is the authoritative content), mirroring `renderPage`'s
+      // non-data default binding.
+      const binding = { entity: 'tasks', viewType: 'table' } as BindingConfig
+      try {
+        const draft = await savedViewStore.createDraft({
+          userId: ctx.userId,
+          workspaceId,
+          name: title,
+          nameOrigin: 'user',
+          icon: null,
+          entity: 'tasks',
+          viewType: 'table',
+          binding,
+          page: { blocks },
+        })
+        return text(
+          `Created page "${title}" (pageId: ${draft.id}). Use editPage to add more, or readPage to read it back.`,
+        )
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return text(`Failed to create the page: ${msg}`, true)
+      }
+    },
+  }
+
+  // ── listPageTemplates ─────────────────────────────────────────
+  //
+  // A read tool surfacing the shared Notion-style template catalog
+  // (`@sidanclaw/core` `listPageTemplates`) — the same registry the editor
+  // slash menu reads. Catalog-only (no bodies), so the agent can pick a
+  // `templateId` to pass to `createPageFromTemplate`. Workspace-independent
+  // (the catalog is a code constant), but it still resolves the principal so a
+  // `read`-scope key behaves identically to every other read tool.
+  const listPageTemplatesTool: BrainTool = {
+    name: 'listPageTemplates',
+    description:
+      'List the available doc-page templates (Notion-style starters like ' +
+      'meeting notes, weekly review, project plan). Returns each template as ' +
+      '`{ id, name, description, icon, category }`. Pick an `id` and pass it ' +
+      'to `createPageFromTemplate` to create a pre-structured page.',
+    inputSchema: {},
+    async handler() {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const builtin = listPageTemplates().map(
+        (r) => `- ${r.icon} ${r.name} (id: ${r.id}, category: ${r.category}): ${r.description}`,
+      )
+      // Workspace custom templates (migration 281), when the store is wired.
+      let custom: string[] = []
+      if (pageTemplateStore) {
+        const rows = await pageTemplateStore.list(ctx.userId, workspaceId)
+        custom = rows.map(
+          (r) =>
+            `- ${r.icon ?? '📄'} ${r.name} (id: ${r.id}, category: ${r.category}, custom)` +
+            (r.description ? `: ${r.description}` : ''),
+        )
+      }
+      const all = [...builtin, ...custom]
+      return text(`${all.length} page templates:\n${all.join('\n')}`)
+    },
+  }
+
+  // ── createPageFromTemplate ────────────────────────────────────
+  //
+  // A write tool that creates a NEW page seeded from a template. Reuses the
+  // shared `instantiatePageTemplate` (markdown→blocks via the same path
+  // `createPage` runs) and the same `savedViewStore.createDraft` seam — so a
+  // template-born page is identical to one authored in-app, with the template's
+  // emoji as the page icon. `title` overrides the template's suggested title.
+  const createPageFromTemplate: BrainTool = {
+    name: 'createPageFromTemplate',
+    description:
+      'Create a NEW workspace doc page pre-filled from a template. Call ' +
+      '`listPageTemplates` first to get a `templateId`. The page is seeded with ' +
+      "the template's structure (headings, lists, checklists, tables) and its " +
+      'icon; date placeholders resolve to today. Pass `title` to override the ' +
+      "template's suggested title. Returns the new `pageId`. Scoped to the " +
+      "key's workspace.",
+    inputSchema: {
+      templateId: z
+        .string()
+        .min(1)
+        .max(128)
+        .describe('The template id from `listPageTemplates` (e.g. "meeting-notes").'),
+      title: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Optional title override. Omit to use the template's suggested title."),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const templateId = typeof args.templateId === 'string' ? args.templateId.trim() : ''
+      if (!templateId) return text('Provide a `templateId` (see listPageTemplates).', true)
+      const titleOverride =
+        typeof args.title === 'string' && args.title.trim() ? args.title.trim() : undefined
+
+      // Built-in slug → instantiate the Markdown catalog. Otherwise fall back
+      // to a workspace CUSTOM template (a uuid) resolved from the store, whose
+      // stored blocks get fresh ids so they never collide with an existing page.
+      let resolved: { title: string; icon: string | null; blocks: Block[] } | null = null
+      const instance = instantiatePageTemplate(templateId, { titleOverride })
+      if (instance) {
+        resolved = { title: instance.title, icon: instance.icon, blocks: instance.blocks }
+      } else if (pageTemplateStore) {
+        const custom = await pageTemplateStore.getById(ctx.userId, templateId)
+        if (custom) {
+          resolved = {
+            title: titleOverride ?? custom.name,
+            icon: custom.icon,
+            blocks: withFreshBlockIds(custom.blocks, () => randomUUID()),
+          }
+        }
+      }
+      if (!resolved) {
+        return text(
+          `Unknown template: ${templateId}. Call listPageTemplates for valid ids ` +
+            `(built-in: ${pageTemplateIds().join(', ')}; custom templates list there too).`,
+          true,
+        )
+      }
+
+      // Same default binding placeholder + createDraft seam as `createPage`
+      // (the block list is the authoritative content).
+      const binding = { entity: 'tasks', viewType: 'table' } as BindingConfig
+      try {
+        const draft = await savedViewStore.createDraft({
+          userId: ctx.userId,
+          workspaceId,
+          name: resolved.title,
+          nameOrigin: 'user',
+          icon: resolved.icon,
+          entity: 'tasks',
+          viewType: 'table',
+          binding,
+          page: { blocks: resolved.blocks },
+        })
+        return text(
+          `Created page "${resolved.title}" from template "${templateId}" (pageId: ${draft.id}). ` +
+            'Use editPage to add more, or readPage to read it back.',
+        )
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return text(`Failed to create the page: ${msg}`, true)
+      }
+    },
+  }
+
+  return {
+    readPage,
+    listPages,
+    editPage,
+    deletePage,
+    createPage,
+    listPageTemplates: listPageTemplatesTool,
+    createPageFromTemplate,
   }
 }
 
@@ -274,6 +881,61 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       'Optional `scope` (single primitive name or omit for all). Clearance-filtered ' +
       "to the key's ceiling, scoped to the key's workspace.",
   })
+
+  // ── Scoped recording retrieval: searchRecording (recording-to-brain).
+  // Hand-rolled (not bridged) — it routes into the dedicated `searchRecording`
+  // scope handler, which is intentionally NOT in KNOWN_SCOPES so an unscoped
+  // searchBrain never floods on a recording's 70-110 segments. Vector + ILIKE
+  // fused, scoped to one recording, through queryWithRLS + the access predicate.
+  const searchRecordingTool: BrainTool = {
+    name: 'searchRecording',
+    description:
+      'Retrieve passages from ONE transcribed recording, scoped to that recording only ' +
+      '(never the whole company brain). Pass the recording Episode id as `recordingId` plus a `query`; ' +
+      'returns the most relevant segments with `start_ms` timestamps and `speaker`, so you can cite the ' +
+      'exact moment ("around 47:12, Priya said ..."). For a summarize/overview intent that spans many ' +
+      'segments, page sequential windows with `fromIndex`/`toIndex` instead of relying on top-K. ' +
+      'Never returns the whole transcript at once.',
+    inputSchema: {
+      recordingId: z.string().uuid(),
+      query: z.string().default(''),
+      topK: z.number().int().min(1).max(20).optional(),
+      fromIndex: z.number().int().min(0).optional(),
+      toIndex: z.number().int().min(0).optional(),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const recordingId = String(args.recordingId ?? '')
+      if (!recordingId) return text('recordingId is required', true)
+      if (!ctx.workspaceId) return text('No workspace is bound to this call.', true)
+      const actor = {
+        workspaceId: ctx.workspaceId,
+        userId: ctx.userId,
+        assistantId: ctx.assistantId,
+        assistantKind: ctx.assistantKind ?? 'standard',
+        clearance: ctx.clearance,
+        compartments: ctx.compartments,
+      }
+      try {
+        let hits: RecordingSegmentHit[]
+        if (typeof args.fromIndex === 'number') {
+          const from = args.fromIndex
+          const to = typeof args.toIndex === 'number' ? args.toIndex : from + 9
+          hits = await readRecordingRange(actor, { recordingId, fromIndex: from, toIndex: to })
+        } else {
+          hits = await searchRecordingFn(
+            actor,
+            { recordingId, query: String(args.query ?? ''), topK: typeof args.topK === 'number' ? args.topK : undefined },
+            opts.embedder ? { embedder: opts.embedder } : undefined,
+          )
+        }
+        return text(JSON.stringify(hits, null, 2))
+      } catch (err) {
+        return text(`searchRecording failed: ${err instanceof Error ? err.message : String(err)}`, true)
+      }
+    },
+  }
 
   // ── Entity read + edge discovery: getEntity (bridged from createRetrievalTools.getEntity).
   // The one read path that surfaces an entity's existing edges + resolves its
@@ -512,6 +1174,14 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       ]
     : []
 
+  // ── Doc-page tools (readPage / editPage / deletePage). Present only when the
+  // doc stores are wired (opts.docTools set) — mirrors the file surface. The
+  // same RLS-gated stores the chat doc tools use: `readPage` rides both scopes,
+  // `editPage` / `deletePage` are filtered to read_write keys by the split below.
+  const docPageTools = opts.docTools
+    ? buildDocPageTools(opts.docTools, resolveCtx, workspaceId)
+    : null
+
   // ── Agent capability toolset (agent-facing capability surface §3/§4).
   // Reads ride both scopes; writes require read_write + the configure gate
   // (pre-resolved by the server into `agentWritesEnabled`). Same bridge as
@@ -528,6 +1198,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
   const all: BrainTool[] = [
     // Reads
     searchBrain,
+    searchRecordingTool,
     searchKnowledge,
     getEntity,
     getMemory,
@@ -538,6 +1209,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'getDeal' || t.name === 'listDeals',
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
+    ...(docPageTools
+      ? [docPageTools.readPage, docPageTools.listPages, docPageTools.listPageTemplates]
+      : []),
     ...agentReadBridges,
     // Writes
     saveMemory,
@@ -558,6 +1232,14 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'fileSetMeta' || t.name === 'fileDelete' ||
       t.name === 'saveFileBytes' || t.name === 'saveFileToBrain',
     ),
+    ...(docPageTools
+      ? [
+          docPageTools.editPage,
+          docPageTools.deletePage,
+          docPageTools.createPage,
+          docPageTools.createPageFromTemplate,
+        ]
+      : []),
     ...agentWriteBridges,
   ]
   return opts.scope === 'read'

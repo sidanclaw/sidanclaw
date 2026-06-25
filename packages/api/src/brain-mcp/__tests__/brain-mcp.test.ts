@@ -18,6 +18,7 @@ import {
   buildBrainTools,
   effectiveBrainClearance,
   type BrainCrmTools,
+  type BrainDocTools,
   type BrainFileTools,
   type BrainMemoryTools,
   type BrainRetrievalTools,
@@ -165,6 +166,7 @@ const READ_TOOL_NAMES = [
   'listTasks',
   'searchBrain',
   'searchKnowledge',
+  'searchRecording',
 ] as const
 
 const WRITE_TOOL_NAMES = [
@@ -775,5 +777,374 @@ describe('[COMP:api/brain-mcp] primary-assistant authority (agent-facing capabil
     expect(capturedCtx!.clearance).toBe('public')
     expect(capturedCtx!.assistantClearance).toBe('public')
     expect(capturedCtx!.sensitivity?.max).toBe('public')
+  })
+})
+
+describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages / editPage / deletePage / createPage / templates)', () => {
+  // A minimal page row the doc-page store stub returns. One heading block is
+  // enough for the Markdown export + the delete/edit access-confirm read.
+  const SAMPLE_PAGE = {
+    page: { blocks: [{ kind: 'heading', id: 'b1', level: 1, text: 'Hello' }] },
+    version: 3,
+    title: 'Worker Maintenance Log',
+    nameOrigin: 'user' as const,
+    icon: null,
+  }
+
+  function listRow(name: string, id: string) {
+    return {
+      id,
+      workspaceId: 'ws',
+      name,
+      nameOrigin: 'user' as const,
+      description: null,
+      icon: null,
+      entity: 'tasks' as const,
+      viewType: 'table' as const,
+      state: 'saved' as const,
+      nestParentId: null,
+      position: 0,
+      updatedAt: new Date('2026-01-01T00:00:00Z'),
+    }
+  }
+
+  /** A spyable BrainDocTools stub. The spies let each test assert the right
+   *  store path ran (read → getVersionedPage, edit → applyPatch, delete →
+   *  remove) without a real database. */
+  function docToolsStub(overrides: Partial<{
+    getVersionedPage: (userId: string, pageId: string) => Promise<typeof SAMPLE_PAGE | null>
+    list: (...args: unknown[]) => Promise<ReturnType<typeof listRow>[]>
+    applyPatch: (...args: unknown[]) => Promise<{ newVersion: number } | null>
+    remove: (...args: unknown[]) => Promise<boolean>
+    createDraft: (...args: unknown[]) => Promise<{ id: string }>
+    // Custom page templates (migration 281) — wired only when provided so the
+    // existing tests still exercise the built-in-only catalog.
+    templateList: (...args: unknown[]) => Promise<unknown[]>
+    templateGetById: (...args: unknown[]) => Promise<unknown>
+  }> = {}): BrainDocTools {
+    const tools: BrainDocTools = {
+      savedViewStore: {
+        list: vi.fn(overrides.list ?? (async () => [listRow('Worker Maintenance Log', 'p1')])),
+        remove: vi.fn(overrides.remove ?? (async () => true)),
+        createDraft: vi.fn(overrides.createDraft ?? (async () => ({ id: 'new-page-1' }))),
+      } as unknown as BrainDocTools['savedViewStore'],
+      docPageStore: {
+        getVersionedPage: vi.fn(overrides.getVersionedPage ?? (async () => SAMPLE_PAGE)),
+        applyPatch: vi.fn(overrides.applyPatch ?? (async () => ({ newVersion: 4 }))),
+      } as unknown as BrainDocTools['docPageStore'],
+    }
+    if (overrides.templateList || overrides.templateGetById) {
+      tools.pageTemplateStore = {
+        list: vi.fn(overrides.templateList ?? (async () => [])),
+        getById: vi.fn(overrides.templateGetById ?? (async () => null)),
+      } as unknown as NonNullable<BrainDocTools['pageTemplateStore']>
+    }
+    return tools
+  }
+
+  const BASE = {
+    workspaceId: '33333333-3333-3333-3333-333333333333',
+    keyId: '982d4a41-c568-4a5d-8614-833c7594bc1a',
+    maxClearance: null,
+    ...ALL_STUBS,
+  } as const
+
+  it('readPage is exposed on a read key; editPage/deletePage/createPage are NOT', () => {
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools: docToolsStub() })
+    const names = tools.map((t) => t.name)
+    expect(names).toContain('readPage')
+    expect(names).not.toContain('editPage')
+    expect(names).not.toContain('deletePage')
+    expect(names).not.toContain('createPage')
+  })
+
+  it('editPage, deletePage and createPage appear only on a read_write key', () => {
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools: docToolsStub() })
+    const names = tools.map((t) => t.name)
+    expect(names).toContain('readPage')
+    expect(names).toContain('editPage')
+    expect(names).toContain('deletePage')
+    expect(names).toContain('createPage')
+  })
+
+  it('omits the whole page surface when no docTools are wired', () => {
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write' })
+    const names = tools.map((t) => t.name)
+    for (const n of ['readPage', 'editPage', 'deletePage', 'createPage']) expect(names).not.toContain(n)
+  })
+
+  it('createPage mints a new page via createDraft and returns its id', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const createPage = tools.find((t) => t.name === 'createPage')!
+    const result = await createPage.handler({ title: 'Launch checklist', content: '## Step 1\nShip it.' })
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toContain('new-page-1')
+    expect(docTools.savedViewStore.createDraft).toHaveBeenCalledTimes(1)
+  })
+
+  it('createPage rejects an empty title', async () => {
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools: docToolsStub() })
+    const createPage = tools.find((t) => t.name === 'createPage')!
+    const result = await createPage.handler({ title: '   ' })
+    expect(result.isError).toBe(true)
+  })
+
+  it('readPage by id returns the page as Markdown', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const readPage = tools.find((t) => t.name === 'readPage')!
+    const result = await readPage.handler({ pageId: 'p1' })
+    expect(result.isError).toBeFalsy()
+    const body = textBody(result)
+    // pageToMarkdown renders the title as an H1 + the heading block.
+    expect(body).toContain('Worker Maintenance Log')
+    expect(body).toContain('Hello')
+    expect(docTools.docPageStore.getVersionedPage).toHaveBeenCalledWith(
+      '11111111-1111-1111-1111-111111111111', // resolved owner userId (mocked query)
+      'p1',
+    )
+  })
+
+  it('readPage by title returns content for a single match', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const readPage = tools.find((t) => t.name === 'readPage')!
+    const result = await readPage.handler({ title: 'Worker Maintenance' })
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toContain('Hello')
+  })
+
+  it('readPage by title lists matches (no content) when several pages match', async () => {
+    const docTools = docToolsStub({
+      list: async () => [listRow('Report A', 'pa'), listRow('Report B', 'pb')],
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const readPage = tools.find((t) => t.name === 'readPage')!
+    const result = await readPage.handler({ title: 'Report' })
+    const body = textBody(result)
+    expect(body).toContain('pa')
+    expect(body).toContain('pb')
+    // No content fetch on an ambiguous search.
+    expect(docTools.docPageStore.getVersionedPage).not.toHaveBeenCalled()
+  })
+
+  it('listPages is exposed on a read key', () => {
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools: docToolsStub() })
+    expect(tools.map((t) => t.name)).toContain('listPages')
+  })
+
+  it('listPages returns every page as a { pageId, title } row, newest first', async () => {
+    const docTools = docToolsStub({
+      list: async () => [
+        { ...listRow('Older', 'p-old'), updatedAt: new Date('2026-01-01T00:00:00Z') },
+        { ...listRow('Newer', 'p-new'), updatedAt: new Date('2026-02-01T00:00:00Z') },
+      ],
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const listPages = tools.find((t) => t.name === 'listPages')!
+    const result = await listPages.handler({})
+    expect(result.isError).toBeFalsy()
+    const body = textBody(result)
+    expect(body).toContain('Newer')
+    expect(body).toContain('p-new')
+    expect(body).toContain('p-old')
+    // Recency order: the newer page is listed before the older one.
+    expect(body.indexOf('p-new')).toBeLessThan(body.indexOf('p-old'))
+  })
+
+  it('listPages filters by a case-insensitive titlePrefix', async () => {
+    const docTools = docToolsStub({
+      list: async () => [
+        listRow('sidanCode plan: alpha', 'pa'),
+        listRow('sidanCode plan: beta', 'pb'),
+        listRow('Unrelated page', 'pu'),
+      ],
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const listPages = tools.find((t) => t.name === 'listPages')!
+    const result = await listPages.handler({ titlePrefix: 'SIDANCODE PLAN:' })
+    const body = textBody(result)
+    expect(body).toContain('pa')
+    expect(body).toContain('pb')
+    expect(body).not.toContain('pu')
+  })
+
+  it('listPages reports an empty result for a prefix that matches nothing', async () => {
+    const docTools = docToolsStub({ list: async () => [listRow('Something else', 'px')] })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const listPages = tools.find((t) => t.name === 'listPages')!
+    const result = await listPages.handler({ titlePrefix: 'no-such-prefix' })
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toMatch(/no pages/i)
+  })
+
+  it('editPage append confirms access then applies a CAS patch', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const editPage = tools.find((t) => t.name === 'editPage')!
+    const result = await editPage.handler({ pageId: 'p1', content: 'New paragraph.' })
+    expect(result.isError).toBeFalsy()
+    expect(docTools.docPageStore.getVersionedPage).toHaveBeenCalled()
+    expect(docTools.docPageStore.applyPatch).toHaveBeenCalledTimes(1)
+    const call = (docTools.docPageStore.applyPatch as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    // CAS uses the read version as the expected base; undo entry captured.
+    expect(call.expectedVersion).toBe(3)
+    expect(call.pageId).toBe('p1')
+    expect(call.undo).toBeDefined()
+    expect(textBody(result)).toMatch(/version 4/i)
+  })
+
+  it('editPage surfaces a concurrent-edit conflict when applyPatch returns null', async () => {
+    const docTools = docToolsStub({ applyPatch: async () => null })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const editPage = tools.find((t) => t.name === 'editPage')!
+    const result = await editPage.handler({ pageId: 'p1', content: 'x' })
+    expect(result.isError).toBe(true)
+    expect(textBody(result)).toMatch(/concurrent/i)
+  })
+
+  it('editPage refuses a page the key cannot access (null read)', async () => {
+    const docTools = docToolsStub({ getVersionedPage: async () => null })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const editPage = tools.find((t) => t.name === 'editPage')!
+    const result = await editPage.handler({ pageId: 'nope', content: 'x' })
+    expect(result.isError).toBe(true)
+    // Access not confirmed → never reaches applyPatch.
+    expect(docTools.docPageStore.applyPatch).not.toHaveBeenCalled()
+  })
+
+  it('deletePage confirms access then calls the RLS-scoped remove', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const deletePage = tools.find((t) => t.name === 'deletePage')!
+    const result = await deletePage.handler({ pageId: 'p1' })
+    expect(result.isError).toBeFalsy()
+    expect(docTools.docPageStore.getVersionedPage).toHaveBeenCalled()
+    expect(docTools.savedViewStore.remove).toHaveBeenCalledWith(
+      '11111111-1111-1111-1111-111111111111',
+      'p1',
+    )
+  })
+
+  it('deletePage refuses (and never removes) a page the key cannot access', async () => {
+    const docTools = docToolsStub({ getVersionedPage: async () => null })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const deletePage = tools.find((t) => t.name === 'deletePage')!
+    const result = await deletePage.handler({ pageId: 'nope' })
+    expect(result.isError).toBe(true)
+    expect(docTools.savedViewStore.remove).not.toHaveBeenCalled()
+  })
+
+  // ── template tools ────────────────────────────────────────────
+
+  it('listPageTemplates is a read tool; createPageFromTemplate is read_write only', () => {
+    const readNames = buildBrainTools({ ...BASE, scope: 'read', docTools: docToolsStub() }).map(
+      (t) => t.name,
+    )
+    expect(readNames).toContain('listPageTemplates')
+    expect(readNames).not.toContain('createPageFromTemplate')
+
+    const rwNames = buildBrainTools({ ...BASE, scope: 'read_write', docTools: docToolsStub() }).map(
+      (t) => t.name,
+    )
+    expect(rwNames).toContain('listPageTemplates')
+    expect(rwNames).toContain('createPageFromTemplate')
+  })
+
+  it('the template tools are omitted when no docTools are wired', () => {
+    const names = buildBrainTools({ ...BASE, scope: 'read_write' }).map((t) => t.name)
+    expect(names).not.toContain('listPageTemplates')
+    expect(names).not.toContain('createPageFromTemplate')
+  })
+
+  it('listPageTemplates returns the catalog with ids', async () => {
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools: docToolsStub() })
+    const tool = tools.find((t) => t.name === 'listPageTemplates')!
+    const result = await tool.handler({})
+    expect(result.isError).toBeFalsy()
+    const body = textBody(result)
+    expect(body).toContain('meeting-notes')
+    expect(body).toMatch(/page templates/i)
+  })
+
+  it('createPageFromTemplate seeds a page (with icon) via createDraft', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    const result = await tool.handler({ templateId: 'meeting-notes' })
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toContain('new-page-1')
+    expect(docTools.savedViewStore.createDraft).toHaveBeenCalledTimes(1)
+    const arg = (docTools.savedViewStore.createDraft as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    // Template icon + non-empty seeded blocks reach the store.
+    expect(arg.icon).toBe('📝')
+    expect(arg.page.blocks.length).toBeGreaterThan(0)
+  })
+
+  it('createPageFromTemplate honors a title override', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    await tool.handler({ templateId: 'standup', title: 'Monday sync' })
+    const arg = (docTools.savedViewStore.createDraft as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(arg.name).toBe('Monday sync')
+  })
+
+  it('createPageFromTemplate rejects an unknown templateId without writing', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    const result = await tool.handler({ templateId: 'no-such-template' })
+    expect(result.isError).toBe(true)
+    expect(docTools.savedViewStore.createDraft).not.toHaveBeenCalled()
+  })
+
+  it('listPageTemplates appends workspace custom templates when the store is wired', async () => {
+    const docTools = docToolsStub({
+      templateList: async () => [
+        {
+          id: 'ct-uuid-1',
+          name: 'Sprint plan',
+          description: 'two-week sprint',
+          icon: '🏃',
+          category: 'planning',
+        },
+      ],
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const tool = tools.find((t) => t.name === 'listPageTemplates')!
+    const body = textBody(await tool.handler({}))
+    expect(body).toContain('meeting-notes') // built-in still present
+    expect(body).toContain('ct-uuid-1') // custom appended
+    expect(body).toMatch(/custom/i)
+  })
+
+  it('createPageFromTemplate resolves a custom template id via the store (fresh ids)', async () => {
+    const docTools = docToolsStub({
+      templateGetById: async () => ({
+        id: 'ct-uuid-1',
+        workspaceId: 'ws',
+        createdBy: 'u',
+        name: 'Sprint plan',
+        description: null,
+        icon: '🏃',
+        category: 'planning',
+        blocks: [{ kind: 'heading', id: 'orig-block', level: 1, text: 'Sprint' }],
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+      }),
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    const result = await tool.handler({ templateId: 'ct-uuid-1' })
+    expect(result.isError).toBeFalsy()
+    expect(docTools.savedViewStore.createDraft).toHaveBeenCalledTimes(1)
+    const arg = (docTools.savedViewStore.createDraft as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(arg.name).toBe('Sprint plan')
+    expect(arg.icon).toBe('🏃')
+    // Block ids are re-minted, so the stored 'orig-block' id never reaches the page.
+    expect(arg.page.blocks).toHaveLength(1)
+    expect(arg.page.blocks[0].id).not.toBe('orig-block')
   })
 })

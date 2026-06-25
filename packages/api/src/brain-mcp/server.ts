@@ -19,7 +19,7 @@
 import { Router } from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import type { Tool } from '@sidanclaw/core'
+import type { Tool, Embedder } from '@sidanclaw/core'
 import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
@@ -28,6 +28,7 @@ import {
   buildBrainTools,
   resolveAgentGate,
   type BrainCrmTools,
+  type BrainDocTools,
   type BrainFileTools,
   type BrainMemoryTools,
   type BrainRetrievalTools,
@@ -60,6 +61,13 @@ type Options = {
    */
   fileTools?: BrainFileTools
   /**
+   * Doc-page tools (`readPage` / `editPage` / `deletePage`). Optional — only
+   * deployments that build the doc stores pass it; a doc-less deploy omits the
+   * page surface. `readPage` rides both key scopes, `editPage` / `deletePage`
+   * require a `read_write` key. See `BrainDocTools`.
+   */
+  docTools?: BrainDocTools
+  /**
    * Programmatic ingest entry to Pipeline B. When wired, the `ingestToBrain`
    * tool decomposes content into entities / edges / memories / tasks instead of
    * a flat memory write. Built at boot via `createBrainEpisodeIngestor`. When
@@ -75,6 +83,12 @@ type Options = {
    * holds the `configure` capability (`resolveAgentGate`).
    */
   agentTools?: { reads: Map<string, Tool>; writes: Map<string, Tool> }
+  /**
+   * Query embedder for the `searchRecording` tool's vector arm
+   * (recording-to-brain). Optional — without it, recording retrieval degrades
+   * to keyword (ILIKE) search. The same embedder that powers `retrievalTools`.
+   */
+  embedder?: Pick<Embedder, 'embed'>
 }
 
 export function brainMcpRoutes(opts: Options): Router {
@@ -111,9 +125,11 @@ export function brainMcpRoutes(opts: Options): Router {
       crmTools: opts.crmTools,
       retrievalTools: opts.retrievalTools,
       fileTools: opts.fileTools,
+      docTools: opts.docTools,
       ingest: opts.ingest,
       agentTools: opts.agentTools,
       agentWritesEnabled,
+      embedder: opts.embedder,
     })) {
       server.registerTool(
         tool.name,

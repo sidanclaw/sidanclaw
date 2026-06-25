@@ -40,11 +40,29 @@ export const EMBEDDED_PRIMITIVES = [
   'kb_chunks',
   'workspace_files',
   'episodes',
+  // Long-recording transcript segments (recording-to-brain). Carries a real
+  // VECTOR(768) column; the worker drains it like kb_chunks via the
+  // PRIMITIVE_CONFIGS entry in embedding-store.ts. See
+  // docs/plans/recording-to-brain.md.
+  'transcript_segment',
 ] as const
 
 export type EmbeddingPrimitive = typeof EMBEDDED_PRIMITIVES[number]
 
-const DEFAULT_PRIMITIVES: readonly EmbeddingPrimitive[] = EMBEDDED_PRIMITIVES
+/**
+ * The primitives the worker actually DRAINS each tick (claim → embed → commit).
+ * A strict subset of EMBEDDED_PRIMITIVES: `episodes` is in the registry for
+ * enumeration / observability but has no `embedding` column of its own — its
+ * summaries embed indirectly via `kb_chunks` materialized by Pipeline B. The
+ * embedding store throws if asked to claim `episodes` rows (no vector column),
+ * so the worker must skip it or it logs a drain failure every tick. Derived
+ * from EMBEDDED_PRIMITIVES (not a second hardcoded list) so a newly-embedded
+ * primitive flows through automatically; non-drainable kinds are excluded here.
+ */
+export const DRAINABLE_PRIMITIVES: readonly EmbeddingPrimitive[] =
+  EMBEDDED_PRIMITIVES.filter((p) => p !== 'episodes')
+
+const DEFAULT_PRIMITIVES: readonly EmbeddingPrimitive[] = DRAINABLE_PRIMITIVES
 
 /**
  * One row handed back from `withClaimedRows`. The store has already taken

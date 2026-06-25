@@ -43,6 +43,16 @@ async function migrate() {
     .filter(Boolean)
   const dirs = [openDir, ...extraDirs]
 
+  // Edition signal for OSS-only migrations. The hosted tier injects its closed
+  // overlay dir(s) via MIGRATION_DIRS; OSS/standalone leaves it unset. A
+  // migration whose table is owned by the closed overlay in hosted but must be
+  // created for OSS guards its body on `current_setting('app.migration_edition')`
+  // — see 280_oss_connectors.sql. Session-level (is_local=false) so it persists
+  // across every file on this one migrate connection. Unset second arg → the
+  // migration treats it as not-oss and no-ops, which is the safe default.
+  const migrationEdition = extraDirs.length > 0 ? 'hosted' : 'oss'
+  await client.query(`SELECT set_config('app.migration_edition', $1, false)`, [migrationEdition])
+
   let count = 0
   for (const dir of dirs) {
     const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort()

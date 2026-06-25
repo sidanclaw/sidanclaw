@@ -213,6 +213,9 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
     },
 
     async listForTargetSystem(targetType, targetId) {
+      // `connector_grant` + `connector_instance` now exist in OSS too
+      // (migration 280_oss_connectors), so this no longer needs the edition stub.
+      // See connector-store.list.
       const result = await query<FlatGrantInstanceRow>(
         `SELECT
            cg.id, cg.connector_instance_id AS "connectorInstanceId",

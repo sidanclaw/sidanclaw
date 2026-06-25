@@ -18,6 +18,7 @@ import { computeNextRun, type HomeSignals, type WorkflowTrigger } from '@sidancl
 import type { SavedViewStore } from '@sidanclaw/core'
 import { query } from '../db/client.js'
 import { countBrainInbox } from '../db/brain-inbox-store.js'
+import { isOssEdition } from '../routes/local-session.js'
 
 const UPCOMING_CAP = 4
 const DRAFTS_CAP = 4
@@ -126,6 +127,11 @@ async function countBrainEntries(workspaceId: string): Promise<{ total: number; 
 }
 
 async function workspaceHasConnector(workspaceId: string): Promise<boolean> {
+  // `connector_instance` is a closed/overlay table that does not exist in the
+  // OSS edition (no connector surface ships there), so skip the probe instead
+  // of letting every home-dock assembly throw + log a benign "relation does not
+  // exist". Returns false → onboarding shows "no connector", which is correct.
+  if (isOssEdition()) return false
   const res = await query<{ ok: number }>(
     `SELECT 1 AS ok FROM connector_instance
      WHERE workspace_id = $1 AND scope = 'workspace' AND connected = true LIMIT 1`,

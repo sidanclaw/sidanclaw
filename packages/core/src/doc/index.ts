@@ -38,6 +38,15 @@ export * from './to-markdown.js'
 export * from './rich-text.js'
 export * from './convert/to-docx.js'
 
+// Page templates — Notion-style starter layouts shared by the editor slash
+// menu and the brain-MCP template tools. See doc-templates.md.
+export * from './templates.js'
+
+// Custom (user-authored, workspace-shared) page templates — pure types +
+// validation + the block-id refresh helper. Persistence lives in the api
+// package; this leaf stays DB-free. See doc-templates.md -> "Custom templates".
+export * from './custom-template-types.js'
+
 // Phase 1 chat tools
 export * from './tools.js'
 
@@ -51,6 +60,7 @@ export * from './auto-title.js'
 // Doc comments (chat-as-threads): store contract + comment tools.
 export * from './comment-types.js'
 export * from './comment-tools.js'
+export * from './ingest-page-tool.js'
 
 // Doc Inbox: the sidebar Inbox wire types + notifications store contract.
 export * from './inbox-types.js'
