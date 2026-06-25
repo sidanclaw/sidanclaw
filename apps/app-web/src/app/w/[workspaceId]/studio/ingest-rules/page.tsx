@@ -32,6 +32,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { authFetch } from "@/lib/auth-fetch";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
+import { WhatsappEventSource } from "@/components/ingest/whatsapp-groups";
 import { IngestRuleEditor, type EditableRule } from "@/components/ingest/rule-editor";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { useT } from "@/lib/i18n/client";
@@ -312,6 +313,10 @@ export default function StudioIngestRulesPage() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
   const [pickerId, setPickerId] = useState<string | null>(null);
+  // WhatsApp ingest is a bespoke source (group toggles, not generic rules) and
+  // self-hides when the workspace has no WhatsApp number. Track its presence so
+  // the generic "no sources" empty state doesn't show alongside it.
+  const [waPresent, setWaPresent] = useState(false);
 
   const fetchSources = useCallback(() => {
     // The list is workspace-scoped server-side — don't fetch until the
@@ -530,6 +535,11 @@ export default function StudioIngestRulesPage() {
         </div>
       )}
 
+      {/* WhatsApp ingest source — bespoke card (group toggles), self-hides when
+          the workspace has no WhatsApp number. Always mounted so it can report
+          presence regardless of the generic sources' load state. */}
+      <WhatsappEventSource workspaceId={workspaceId} onPresence={setWaPresent} />
+
       {sources === null ? (
         <div className="text-sm text-muted-foreground py-10 text-center">
           {copy.loading}
@@ -538,7 +548,7 @@ export default function StudioIngestRulesPage() {
         <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-3 text-center">
           {copy.loadError}
         </div>
-      ) : sources.length === 0 && available.length === 0 ? (
+      ) : sources.length === 0 && available.length === 0 && !waPresent ? (
         <section className="border border-border rounded-xl bg-card/50 p-8 flex flex-col items-center gap-2 text-center">
           <div className="font-medium text-sm">{copy.emptyTitle}</div>
           <p className="text-sm text-muted-foreground max-w-sm">

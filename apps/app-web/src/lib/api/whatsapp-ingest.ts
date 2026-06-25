@@ -106,11 +106,33 @@ export type WhatsappBotTrigger = {
   filterParams: Record<string, unknown>;
 };
 
+/**
+ * Who the bot may answer (Telegram-parity allowlist, WhatsApp flavour):
+ *   - `allow_all` — everyone.
+ *   - `allowlist` — only the numbers in `allowedNumbers`.
+ *   - `blocklist` — everyone except the numbers in `blockedNumbers`.
+ *   - `group_members` — only people who share a group with the connected number.
+ */
+export type WhatsappBotAccessMode =
+  | "allow_all"
+  | "allowlist"
+  | "blocklist"
+  | "group_members";
+
 export type WhatsappBotConfig = {
   connected: boolean;
   chatEnabled: boolean;
   sendScope: WhatsappBotSendScope;
   triggers: WhatsappBotTrigger[];
+  accessMode: WhatsappBotAccessMode;
+  /** Allowed sender numbers (phone digits) when `accessMode='allowlist'`. */
+  allowedNumbers: string[];
+  /** Blocked sender numbers (phone digits) when `accessMode='blocklist'`. */
+  blockedNumbers: string[];
+  /** Acknowledgment reaction emoji (reacted when the bot starts); "" = none. */
+  ackReaction: string;
+  /** Group chat JIDs the bot may reply in (consulted when scope is groups). */
+  groupOptIn: string[];
 };
 
 /** Fetch the bot config (chat enabled + send scope + reply triggers). */
@@ -178,6 +200,64 @@ export async function deleteWhatsappBotTrigger(
     { method: "DELETE" },
   );
   if (!res.ok) throw new Error(`Remove trigger failed (${res.status})`);
+}
+
+/**
+ * Set who the bot may answer. `numbers` is the list for whichever number-mode
+ * is active: the allowlist when `accessMode='allowlist'`, the blocklist when
+ * `'blocklist'` (phone digits, normalized server-side); `allow_all` /
+ * `group_members` ignore it. Returns the persisted (normalized) lists.
+ */
+export async function setWhatsappBotAccess(
+  workspaceId: string,
+  accessMode: WhatsappBotAccessMode,
+  numbers: string[],
+): Promise<{
+  accessMode: WhatsappBotAccessMode;
+  allowedNumbers: string[];
+  blockedNumbers: string[];
+}> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/whatsapp/bot/access`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accessMode, numbers }),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Save access failed (${res.status})`);
+  }
+  return (await res.json()) as {
+    accessMode: WhatsappBotAccessMode;
+    allowedNumbers: string[];
+    blockedNumbers: string[];
+  };
+}
+
+/**
+ * Set bot behavior — the acknowledgment reaction emoji and/or the per-group
+ * reply opt-in (group chat JIDs the bot may answer in). Only the provided
+ * fields are written. Returns the persisted values.
+ */
+export async function setWhatsappBotBehavior(
+  workspaceId: string,
+  patch: { ackReaction?: string; groupOptIn?: string[] },
+): Promise<{ ackReaction: string; groupOptIn: string[] }> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/whatsapp/bot/behavior`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Save behavior failed (${res.status})`);
+  }
+  return (await res.json()) as { ackReaction: string; groupOptIn: string[] };
 }
 
 /** Events surfaced by the connect SSE stream. */

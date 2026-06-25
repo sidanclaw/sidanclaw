@@ -39,17 +39,17 @@ import { QRCodeSVG } from "qrcode.react";
 import {
   connectWhatsappIngest,
   getWhatsappIngest,
-  enableWhatsappGroup,
-  disableWhatsappGroup,
   getWhatsappBot,
   enableWhatsappBot,
   disableWhatsappBot,
   addWhatsappBotTrigger,
   deleteWhatsappBotTrigger,
+  setWhatsappBotAccess,
+  setWhatsappBotBehavior,
   type WhatsappGroup,
-  type WhatsappGroupRouting,
   type WhatsappBotConfig,
   type WhatsappBotSendScope,
+  type WhatsappBotAccessMode,
 } from "@/lib/api/whatsapp-ingest";
 import {
   API_URL,
@@ -1875,174 +1875,6 @@ function WhatsappConnectTab({
 }
 
 /**
- * WhatsApp per-group ingest manager — rendered on the WhatsApp channel card.
- * A connected number's enable-able groups come from `seenChats` (no roster
- * endpoint for a companion device), so this lists the observed groups with an
- * enable/disable + routing (realtime / daily digest) control each.
- */
-function WhatsappGroupManager({ workspaceId }: { workspaceId: string }) {
-  const t = useT();
-  const wa = t.studioPage.ingestRules.whatsapp;
-  const [groups, setGroups] = useState<WhatsappGroup[] | null>(null);
-  const [query, setQuery] = useState("");
-
-  const load = useCallback(() => {
-    getWhatsappIngest(workspaceId)
-      .then((s) => setGroups(s.groups))
-      .catch(() => setGroups([]));
-  }, [workspaceId]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  // A personal number can be in hundreds of groups. The API returns them
-  // enabled-and-recently-active first, so capping the initial render shows the
-  // ones that matter; a search finds any other by name.
-  const CAP = 12;
-  const all = groups ?? [];
-  const q = query.trim().toLowerCase();
-  const matches = q
-    ? all.filter((g) => (g.title ?? "").toLowerCase().includes(q))
-    : all;
-  const shown = q ? matches : matches.slice(0, CAP);
-  const more = matches.length - shown.length;
-
-  return (
-    <div className="flex flex-col gap-2 border-t border-border pt-3">
-      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        {wa.groupsTitle}
-      </div>
-      {all.length > CAP && (
-        <div className="relative">
-          <svg
-            aria-hidden
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <path d="m21 21-4.3-4.3" />
-          </svg>
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={wa.groupSearchPlaceholder}
-            className="w-full rounded-md border border-border bg-background py-2 pl-9 pr-3 text-sm placeholder:text-muted-foreground focus:border-primary/40 focus:outline-none focus:ring-2 focus:ring-primary/30"
-          />
-        </div>
-      )}
-      {groups === null ? (
-        <p className="text-xs text-muted-foreground">{wa.working}</p>
-      ) : all.length === 0 ? (
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          {wa.groupsEmpty}
-        </p>
-      ) : shown.length === 0 ? (
-        <p className="text-xs text-muted-foreground">{wa.groupsNoMatch}</p>
-      ) : (
-        <>
-          <ul className="flex flex-col gap-2">
-            {shown.map((g) => (
-              <WhatsappGroupRow
-                key={g.chatJid}
-                group={g}
-                workspaceId={workspaceId}
-                onChange={load}
-              />
-            ))}
-          </ul>
-          {more > 0 && (
-            <p className="text-[11px] text-muted-foreground">
-              {format(wa.groupsMoreHint, { n: more })}
-            </p>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function WhatsappGroupRow({
-  group,
-  workspaceId,
-  onChange,
-}: {
-  group: WhatsappGroup;
-  workspaceId: string;
-  onChange: () => void;
-}) {
-  const t = useT();
-  const wa = t.studioPage.ingestRules.whatsapp;
-  const [busy, setBusy] = useState(false);
-
-  async function setEnabled(enabled: boolean, routing: WhatsappGroupRouting) {
-    setBusy(true);
-    try {
-      if (enabled) await enableWhatsappGroup(workspaceId, group.chatJid, routing);
-      else await disableWhatsappGroup(workspaceId, group.chatJid);
-      onChange();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <li
-      className={
-        "flex items-center gap-2.5 rounded-md border px-3 py-2 transition-colors " +
-        (group.enabled
-          ? "border-emerald-500/40 bg-emerald-500/10"
-          : "border-border bg-card")
-      }
-    >
-      <span
-        aria-hidden
-        className={
-          "size-2 shrink-0 rounded-full " +
-          (group.enabled ? "bg-emerald-500" : "bg-muted-foreground/30")
-        }
-      />
-      <span
-        className={
-          "min-w-0 flex-1 truncate text-xs " +
-          (group.enabled ? "font-semibold" : "font-medium text-muted-foreground")
-        }
-      >
-        {group.title ?? wa.untitledGroup}
-      </span>
-      {/* Routing is digest-only: realtime (per-message extraction) is disabled
-          to cap token cost, so there's no picker — enabled groups always run on
-          the weekday digest. See docs/architecture/channels/whatsapp.md →
-          "Routing (digest-only)". */}
-      {group.enabled && (
-        <span className="shrink-0 text-[10px] text-muted-foreground">
-          {wa.routingScheduled}
-        </span>
-      )}
-      <button
-        type="button"
-        onClick={() => void setEnabled(!group.enabled, "scheduled")}
-        disabled={busy}
-        className={
-          "shrink-0 rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 " +
-          (group.enabled
-            ? "border border-border text-muted-foreground hover:text-destructive"
-            : "bg-primary text-primary-foreground hover:bg-primary/90")
-        }
-      >
-        {busy ? wa.working : group.enabled ? wa.disableAction : wa.enableAction}
-      </button>
-    </li>
-  );
-}
-
-/**
  * WhatsApp replies (bot) config — rendered on the WhatsApp channel card under
  * the group list. Toggles the `chat` capability, sets the send scope (DM-only
  * by default; groups gated), and manages the reply triggers (mention / keyword
@@ -2050,6 +1882,258 @@ function WhatsappGroupRow({
  * Personal-number caveat: replying into groups sends from the user's own
  * number, so groups are opt-in and surfaced with a warning.
  */
+/**
+ * WhatsApp bot access control — who the bot may answer (Telegram-parity).
+ * Everyone / specific numbers (allowlist) / people in my groups. The allowlist
+ * numbers are phone digits, re-normalized server-side. Saves through the
+ * `/whatsapp/bot/access` endpoint via the parent's `run` wrapper.
+ */
+function WhatsappAccessControl({
+  config,
+  busy,
+  onSave,
+}: {
+  config: WhatsappBotConfig;
+  busy: boolean;
+  onSave: (mode: WhatsappBotAccessMode, numbers: string[]) => void;
+}) {
+  const t = useT();
+  const acc = t.studioPage.ingestRules.whatsapp.bot.access;
+  const mode = config.accessMode;
+  // The chip list shows whichever number-mode is active.
+  const numberMode = mode === "blocklist";
+  const numbers = numberMode ? config.blockedNumbers : config.allowedNumbers;
+  const showNumbers = mode === "allowlist" || mode === "blocklist";
+
+  function addNumber(value: string): void {
+    const digits = value.replace(/\D/g, "");
+    if (digits.length < 5 || numbers.includes(digits)) return;
+    onSave(mode, [...numbers, digits]);
+  }
+
+  return (
+    <div className="mt-1 flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm">{acc.label}</span>
+        <Select
+          value={mode}
+          disabled={busy}
+          onValueChange={(v) => {
+            if (v) onSave(v as WhatsappBotAccessMode, numbers);
+          }}
+        >
+          <SelectTrigger size="sm" className="min-w-[13rem] text-sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="allow_all">{acc.everyone}</SelectItem>
+            <SelectItem value="allowlist">{acc.numbers}</SelectItem>
+            <SelectItem value="blocklist">{acc.block}</SelectItem>
+            <SelectItem value="group_members">{acc.groupMembers}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <p className="text-xs italic text-muted-foreground">
+        {mode === "allowlist"
+          ? acc.numbersDesc
+          : mode === "blocklist"
+            ? acc.blockDesc
+            : mode === "group_members"
+              ? acc.groupMembersDesc
+              : acc.everyoneDesc}
+      </p>
+      {showNumbers && (
+        <div className="flex flex-col gap-1.5">
+          {numbers.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {numbers.map((num, i) => (
+                <span
+                  key={`${num}-${i}`}
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-muted px-2 py-1 font-mono text-xs"
+                >
+                  {num}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    aria-label={acc.removeNumber}
+                    onClick={() =>
+                      onSave(
+                        mode,
+                        numbers.filter((_, j) => j !== i),
+                      )
+                    }
+                    className="text-muted-foreground hover:text-destructive disabled:opacity-50"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const input = e.currentTarget.elements.namedItem(
+                "waAccessNumber",
+              ) as HTMLInputElement;
+              addNumber(input.value);
+              input.value = "";
+            }}
+            className="flex items-center gap-2"
+          >
+            <input
+              name="waAccessNumber"
+              type="text"
+              inputMode="numeric"
+              disabled={busy}
+              placeholder={acc.numberPlaceholder}
+              className="w-44 rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
+            />
+            <button
+              type="submit"
+              disabled={busy}
+              className="rounded-md border border-border px-2.5 py-1 text-xs font-medium hover:bg-muted disabled:opacity-50"
+            >
+              {numberMode ? acc.blockNumber : acc.addNumber}
+            </button>
+          </form>
+          <p className="text-xs text-muted-foreground">{acc.numberHint}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Acknowledgment reaction — the emoji reacted to the inbound message when the
+ * bot starts working. Mirrors the Telegram/Slack "Acknowledgment reaction"
+ * control (the WhatsApp adapter supports `sendReaction`).
+ */
+function WhatsappAckReaction({
+  value,
+  busy,
+  onSave,
+}: {
+  value: string;
+  busy: boolean;
+  onSave: (emoji: string) => void;
+}) {
+  const t = useT();
+  const cfg = t.studioPage.channels.config;
+  const hint = t.studioPage.ingestRules.whatsapp.bot.ackHint;
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-sm">{cfg.ackLabel}</span>
+      <p className="text-xs text-muted-foreground">{hint}</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          value={draft}
+          disabled={busy}
+          placeholder="👀"
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => {
+            if (draft !== value) onSave(draft);
+          }}
+          className="w-32 rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
+        />
+        {["👀", "🧠", "👍"].map((emoji) => (
+          <button
+            key={emoji}
+            type="button"
+            disabled={busy}
+            onClick={() => onSave(emoji)}
+            className="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted disabled:opacity-50"
+          >
+            {emoji}
+          </button>
+        ))}
+        {value ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onSave("")}
+            className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+          >
+            {cfg.ackClear}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Per-group reply opt-in — which group chats the bot answers in (consulted when
+ * the send scope is `dm_and_groups`). The WhatsApp analogue of Telegram's
+ * per-chat / per-topic overrides; WhatsApp groups have no topics, so it is a
+ * flat group checklist. Group inventory comes from the seen-group list.
+ */
+function WhatsappGroupOptIn({
+  workspaceId,
+  selected,
+  busy,
+  onSave,
+}: {
+  workspaceId: string;
+  selected: string[];
+  busy: boolean;
+  onSave: (groupOptIn: string[]) => void;
+}) {
+  const t = useT();
+  const wa = t.studioPage.ingestRules.whatsapp;
+  const bot = wa.bot;
+  const [groups, setGroups] = useState<WhatsappGroup[] | null>(null);
+
+  useEffect(() => {
+    getWhatsappIngest(workspaceId)
+      .then((s) => setGroups(s.groups))
+      .catch(() => setGroups([]));
+  }, [workspaceId]);
+
+  function toggle(chatJid: string): void {
+    const next = selected.includes(chatJid)
+      ? selected.filter((j) => j !== chatJid)
+      : [...selected, chatJid];
+    onSave(next);
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-sm">{bot.groupOptInTitle}</span>
+      <p className="text-xs text-muted-foreground">{bot.groupOptInHint}</p>
+      {groups === null ? (
+        <p className="text-xs text-muted-foreground">{wa.working}</p>
+      ) : groups.length === 0 ? (
+        <p className="text-xs text-muted-foreground">{bot.groupOptInEmpty}</p>
+      ) : (
+        <div className="flex flex-col gap-1 rounded-md border border-border p-2">
+          {groups.map((g) => (
+            <label
+              key={g.chatJid}
+              className="flex items-center gap-2 text-xs"
+            >
+              <input
+                type="checkbox"
+                disabled={busy}
+                checked={selected.includes(g.chatJid)}
+                onChange={() => toggle(g.chatJid)}
+              />
+              <span className="truncate">{g.title ?? wa.untitledGroup}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
   const t = useT();
   const bot = t.studioPage.ingestRules.whatsapp.bot;
@@ -2096,64 +2180,85 @@ function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
   const chatEnabled = config?.chatEnabled ?? false;
 
   return (
-    <div className="flex flex-col gap-2 border-t border-border pt-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          {bot.title}
-        </div>
-        <button
-          type="button"
-          disabled={busy || !config?.connected}
-          onClick={() =>
-            void run(() =>
-              chatEnabled
-                ? disableWhatsappBot(workspaceId)
-                : enableWhatsappBot(workspaceId, "dm"),
-            )
-          }
-          className={
-            "shrink-0 rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 " +
-            (chatEnabled
-              ? "border border-border text-muted-foreground hover:text-destructive"
-              : "bg-primary text-primary-foreground hover:bg-primary/90")
-          }
-        >
-          {chatEnabled ? bot.disable : bot.enable}
-        </button>
+    <div className="flex flex-col gap-3 border-t border-border pt-3">
+      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        {t.studioPage.channels.config.title}
       </div>
 
-      {!chatEnabled ? (
-        <p className="text-xs text-muted-foreground">{bot.off}</p>
-      ) : (
-        config && (
-          <>
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">{bot.scopeLabel}</span>
-              <Select
-                value={config.sendScope}
-                disabled={busy}
-                onValueChange={(v) => {
-                  if (v) void run(() => enableWhatsappBot(workspaceId, v as WhatsappBotSendScope));
-                }}
-              >
-                <SelectTrigger size="sm" className="min-w-[13rem] text-sm">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="dm">{bot.scopeDm}</SelectItem>
-                  <SelectItem value="dm_and_groups">{bot.scopeGroups}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {config.sendScope === "dm_and_groups" && (
+      {/* Enable replies — the `chat` capability toggle, styled like the other
+          channels' bot-behavior toggles (ConfigToggle). */}
+      <ConfigToggle
+        label={bot.enableLabel}
+        hint={bot.enableHint}
+        checked={chatEnabled}
+        disabled={busy || !config?.connected}
+        onChange={(v) =>
+          void run(() =>
+            v
+              ? enableWhatsappBot(workspaceId, "dm")
+              : disableWhatsappBot(workspaceId),
+          )
+        }
+      />
+
+      {chatEnabled && config && (
+        <>
+          {/* Acknowledgment reaction (emoji reacted when the bot starts). */}
+          <WhatsappAckReaction
+            value={config.ackReaction}
+            busy={busy}
+            onSave={(emoji) =>
+              run(() => setWhatsappBotBehavior(workspaceId, { ackReaction: emoji }))
+            }
+          />
+
+          {/* Reply scope — label left, control right (Telegram parity). */}
+          <div className="flex items-center justify-between gap-3 text-sm">
+            <span className="text-muted-foreground">{bot.scopeLabel}</span>
+            <Select
+              value={config.sendScope}
+              disabled={busy}
+              onValueChange={(v) => {
+                if (v) void run(() => enableWhatsappBot(workspaceId, v as WhatsappBotSendScope));
+              }}
+            >
+              <SelectTrigger size="sm" className="min-w-[13rem] text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="dm">{bot.scopeDm}</SelectItem>
+                <SelectItem value="dm_and_groups">{bot.scopeGroups}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {config.sendScope === "dm_and_groups" && (
+            <>
               <p className="text-xs text-amber-600 dark:text-amber-400">
                 {bot.groupWarning}
               </p>
-            )}
+              <WhatsappGroupOptIn
+                workspaceId={workspaceId}
+                selected={config.groupOptIn}
+                busy={busy}
+                onSave={(groupOptIn) =>
+                  run(() => setWhatsappBotBehavior(workspaceId, { groupOptIn }))
+                }
+              />
+            </>
+          )}
 
-            <div className="mt-1 text-xs font-medium text-muted-foreground">
-              {bot.triggersTitle}
-            </div>
+          <WhatsappAccessControl
+            config={config}
+            busy={busy}
+            onSave={(mode, numbers) =>
+              run(() => setWhatsappBotAccess(workspaceId, mode, numbers))
+            }
+          />
+
+          {/* Reply triggers (WhatsApp's bot-behavior analogue of Telegram's
+              per-chat overrides). */}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-sm">{bot.triggersTitle}</span>
             {config.triggers.length === 0 ? (
               <p className="text-xs text-muted-foreground">{bot.triggersEmpty}</p>
             ) : (
@@ -2184,7 +2289,7 @@ function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
               </ul>
             )}
 
-            <div className="mt-1 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Select value={newType} onValueChange={(v) => v && setNewType(v)}>
                 <SelectTrigger size="sm" className="min-w-[11rem] text-xs">
                   <SelectValue />
@@ -2229,8 +2334,8 @@ function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
                 {bot.add}
               </button>
             </div>
-          </>
-        )
+          </div>
+        </>
       )}
 
       {error && <p className="text-xs text-destructive">{bot.error}</p>}
@@ -2244,7 +2349,9 @@ function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
  * flips to `revoked` server-side) shows a reconnect prompt instead of stale
  * controls. Re-checks on focus / visibility / a light interval — the old
  * standalone panel did this; the channel card otherwise only loads on mount.
- * When connected, renders the group ingest list + the replies (bot) section.
+ * When connected, renders the replies (bot) config. Group ingestion lives on
+ * the Studio → Events page now (the Channels/Events split — Channels owns the
+ * chat/broadcast surface, Events owns ingestion).
  */
 function WhatsappCardSection({ workspaceId }: { workspaceId: string }) {
   const t = useT();
@@ -2286,10 +2393,5 @@ function WhatsappCardSection({ workspaceId }: { workspaceId: string }) {
     );
   }
 
-  return (
-    <>
-      <WhatsappGroupManager workspaceId={workspaceId} />
-      <WhatsappRepliesSection workspaceId={workspaceId} />
-    </>
-  );
+  return <WhatsappRepliesSection workspaceId={workspaceId} />;
 }

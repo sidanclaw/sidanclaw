@@ -95,8 +95,13 @@ export type ChannelCredentials =
   | ThreadsCredentials
   | TwitterCredentials
 
-/** Access control mode for who can interact with the bot. */
-export type UserAccessMode = 'allow_all' | 'allowlist' | 'blocklist'
+/**
+ * Access control mode for who can interact with the bot.
+ * `group_members` is WhatsApp-only — answer only people who share a group with
+ * the connected number (DMs from strangers are dropped); `allowedUserIds` then
+ * holds phone numbers. `blocklist` is Slack/Telegram/Discord-only.
+ */
+export type UserAccessMode = 'allow_all' | 'allowlist' | 'blocklist' | 'group_members'
 
 /**
  * One entry in `requireMentionOverrides`. Presence in the list flips the
@@ -150,6 +155,12 @@ export type ChannelIntegrationConfig = {
   userAccessMode?: UserAccessMode // default: 'allow_all'
   allowedUserIds?: string[]    // used when userAccessMode = 'allowlist' — @handle or numeric ID
   blockedUserIds?: string[]    // used when userAccessMode = 'blocklist' — @handle or numeric ID
+  /**
+   * WhatsApp BYON bot only — group chat JIDs the bot is allowed to reply in
+   * (the per-group reply opt-in, consulted only when the bot's send scope is
+   * `dm_and_groups`). The WhatsApp analogue of Telegram's per-chat overrides.
+   */
+  whatsappGroupOptIn?: string[]
 }
 
 /** @deprecated Use ChannelIntegrationConfig — kept for backwards compatibility. */

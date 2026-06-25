@@ -24,7 +24,11 @@ export type ChannelClearance = "public" | "internal" | "confidential";
 export type ChannelCapability = "chat" | "broadcast" | "ingest";
 export type ChannelStatus = "active" | "revoked" | "invalid";
 export type ChannelModelAlias = "standard" | "pro" | "max";
-export type UserAccessMode = "allow_all" | "allowlist" | "blocklist";
+export type UserAccessMode =
+  | "allow_all"
+  | "allowlist"
+  | "blocklist"
+  | "group_members";
 
 /** A Telegram chat the bot has seen — feeds the per-chat override picker. */
 export type SeenChat = {
