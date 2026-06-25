@@ -511,7 +511,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const port = parseInt(env.PORT || new URL(env.API_URL).port || '4000')
 
   // ── Middleware: raw-body capture + JSON ──
+  // 15mb ceiling: the WhatsApp connector forwards inbound media inline as
+  // base64 (`/internal/whatsapp/inbound`) up to a 10MB raw cap, which inflates
+  // to ~13.4MB encoded plus JSON envelope. Express's default 100kb limit 413s
+  // any media-bearing message, silently dropping it from ingest. Other routes
+  // post small JSON, so the higher ceiling only matters for that relay.
   app.use(express.json({
+    limit: '15mb',
     verify: (req, _res, buf) => {
       ;(req as express.Request & { rawBody?: string }).rawBody = buf.toString('utf8')
     },
