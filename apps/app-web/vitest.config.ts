@@ -12,4 +12,9 @@ export default defineConfig({
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
+  test: {
+    // Shims `localStorage` for Node 26+ (its experimental built-in is undefined
+    // without --localstorage-file and shadows jsdom's). See vitest.setup.ts.
+    setupFiles: ["./vitest.setup.ts"],
+  },
 });
