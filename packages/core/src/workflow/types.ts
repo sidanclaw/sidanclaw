@@ -578,6 +578,24 @@ export type WorkflowStore = {
   findByIdSystem(workflowId: string): Promise<WorkflowRecord | null>
 }
 
+/**
+ * Lightweight summary of one run a doc page triggered, for the page-header
+ * feedback chip. Keyed on the CHANGED page (`workflow_runs.trigger_page_id` =
+ * `input.event.pageId`). Carries just what the chip renders — never the full
+ * run / step trail — so the page surface stays cheap and never blocks render.
+ * `outcomeSummary` is the distilled `outcome.summary`, present once the run
+ * terminates (see `WorkflowRunOutcome`).
+ */
+export type PageWorkflowRunSummary = {
+  runId: string
+  workflowId: string
+  workflowName: string
+  status: WorkflowRunStatus
+  startedAt: Date
+  finishedAt: Date | null
+  outcomeSummary: string | null
+}
+
 export type WorkflowRunStore = {
   /** Insert a new run row in `pending` state. */
   createRun(params: {
@@ -654,4 +672,17 @@ export type WorkflowRunStore = {
     workflowId: string,
     excludeRunId: string,
   ): Promise<WorkflowRunOutcome | null>
+
+  /**
+   * List the runs a doc page triggered, newest first, for the page-header
+   * feedback chip. Keyed on `workflow_runs.trigger_page_id` (the CHANGED page
+   * = `input.event.pageId`), joined to `workflows` for the name. RLS-gated via
+   * the workspace_member policy on both tables; the partial index
+   * `idx_workflow_runs_trigger_page` (migration 282) covers the access path.
+   */
+  listRunsForPage(
+    userId: string,
+    pageId: string,
+    opts?: { limit?: number },
+  ): Promise<PageWorkflowRunSummary[]>
 }

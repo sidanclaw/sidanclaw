@@ -22,6 +22,7 @@ export {
   type WorkflowModelAlias,
   type WorkflowRunRecord,
   type WorkflowRunOutcome,
+  type PageWorkflowRunSummary,
   RESERVED_OUTCOME_VAR_NAMES,
   type ReservedOutcomeVarName,
   type WorkflowStepRunRecord,

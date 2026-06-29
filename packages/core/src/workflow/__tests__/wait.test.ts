@@ -116,6 +116,7 @@ function makeStores() {
         .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())
         .slice(0, opts?.limit ?? 50)
     },
+    listRunsForPage: async () => [],
     async getLatestOutcomeForWorkflowSystem(workflowId, excludeRunId) {
       const terminal = Array.from(runs.values())
         .filter(
