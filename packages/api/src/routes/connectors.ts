@@ -43,17 +43,24 @@
  * `NEXT_PUBLIC_*_CLIENT_ID` for app-web's client-side authorize redirect. GitHub
  * is PAT-only and needs neither.
  *
- * Out of scope for the open edition (handled by the closed route): custom MCP
- * connectors (`/custom`), Google Drive authorized-files (`/gdrive/*`), and
- * per-assistant tool policy (`/tools`).
+ * Custom MCP connectors (`POST/PATCH/DELETE /custom`, `POST /custom/:id/test`)
+ * are mounted from the shared `customConnectorRoutes` factory in
+ * `./custom-connectors.ts` — the same factory the closed edition mounts, so the
+ * feature has one implementation across both editions.
+ *
+ * Out of scope for the open edition (handled by the closed route): Google Drive
+ * authorized-files (`/gdrive/*`) and per-assistant tool policy (`/tools`).
  *
  * Component tag: [COMP:api/connectors-route].
  */
 
 import { Router } from 'express'
+import { classifyTool, defaultPolicy } from '@sidanclaw/core'
 import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@sidanclaw/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance } from '../db/connector-instance-store.js'
+import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
+import { customConnectorRoutes } from './custom-connectors.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -138,6 +145,11 @@ function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowO
 export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   const { connectorStore, connectorInstanceStore } = opts
   const router = Router()
+
+  // Custom MCP connector CRUD. Mounted FIRST so the literal `/custom` and
+  // `/custom/:id` paths resolve before the `/:provider` catch-all routes below
+  // (otherwise `/custom/:id` would be captured by `DELETE /:provider`).
+  router.use(customConnectorRoutes({ connectorStore }))
 
   /** Group the caller's instances by provider, each list oldest-first. */
   async function instancesByProvider(userId: string): Promise<Map<string, ConnectorInstance[]>> {
@@ -235,24 +247,59 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   })
 
   // ── GET /:provider/tools — the connector's tool catalog ──────
-  // Built-in connectors expose a fixed tool set (OFFICIAL_CONNECTOR_TOOLS). The
-  // Studio "Tools" tab renders this; an empty/absent response is what showed
-  // "No tools found" after connecting. Policy is the registry default — the
-  // per-assistant L2 override store is out of scope for the open route.
-  router.get('/:provider/tools', (req, res) => {
+  // Built-in connectors expose a fixed tool set (OFFICIAL_CONNECTOR_TOOLS).
+  // Custom MCP connectors (provider = a generated UUID, not in the registry)
+  // are discovered LIVE — the same MCP handshake the `/custom/:id/test` probe
+  // runs — so the Studio "Tools" tab shows the same tools the probe counted
+  // instead of "No tools found". Policy is the registry/classification default;
+  // the per-assistant L2 override store is out of scope for the open route.
+  router.get('/:provider/tools', async (req, res) => {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
-    const entry = OFFICIAL_BY_ID.get(req.params.provider)
-    const catalog = OFFICIAL_CONNECTOR_TOOLS[req.params.provider] ?? []
-    res.json({
-      serverName: entry?.name ?? req.params.provider,
-      tools: catalog.map((t) => ({
-        name: t.name,
-        description: t.description,
-        classification: t.classification,
-        policy: t.defaultPolicy,
-      })),
-    })
+    const provider = req.params.provider
+
+    // Built-in: static registry catalog.
+    const catalog = OFFICIAL_CONNECTOR_TOOLS[provider]
+    if (catalog) {
+      const entry = OFFICIAL_BY_ID.get(provider)
+      res.json({
+        serverName: entry?.name ?? provider,
+        tools: catalog.map((t) => ({
+          name: t.name,
+          description: t.description,
+          classification: t.classification,
+          policy: t.defaultPolicy,
+        })),
+      })
+      return
+    }
+
+    // Otherwise it may be a custom MCP connector — discover its tools live.
+    try {
+      const connector = (await connectorStore.list(userId)).find((c) => c.connectorId === provider)
+      if (!connector || !connector.custom || !connector.url) {
+        res.json({ serverName: connector?.name ?? provider, tools: [] })
+        return
+      }
+      const { discoverMcpServer } = await import('../mcp/client.js')
+      const authCreds = await connectorStore.getAuthCredentials(userId, provider)
+      const server = await discoverMcpServer(connector.url, connector.name, buildConnectorAuthHeaders(authCreds))
+      res.json({
+        serverName: server.name,
+        tools: server.tools.map((t) => {
+          const classification = classifyTool(t.name, t.description)
+          return {
+            name: t.name,
+            description: t.description,
+            classification,
+            policy: defaultPolicy(classification),
+          }
+        }),
+      })
+    } catch (err) {
+      console.error('[connectors] custom tool discovery failed:', err)
+      res.status(500).json({ error: 'Failed to discover tools' })
+    }
   })
 
   // ── GET /:provider/config — the connector's JSON config ──────
