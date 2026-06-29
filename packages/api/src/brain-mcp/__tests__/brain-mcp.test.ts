@@ -817,6 +817,9 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
     applyPatch: (...args: unknown[]) => Promise<{ newVersion: number } | null>
     remove: (...args: unknown[]) => Promise<boolean>
     createDraft: (...args: unknown[]) => Promise<{ id: string }>
+    // `createPage`'s parent guard: resolve + workspace-confirm a `parentPageId`.
+    // Default returns a same-workspace page so a supplied parent validates.
+    getById: (...args: unknown[]) => Promise<{ workspaceId: string } | null>
     // Custom page templates (migration 281) — wired only when provided so the
     // existing tests still exercise the built-in-only catalog.
     templateList: (...args: unknown[]) => Promise<unknown[]>
@@ -827,6 +830,10 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
         list: vi.fn(overrides.list ?? (async () => [listRow('Worker Maintenance Log', 'p1')])),
         remove: vi.fn(overrides.remove ?? (async () => true)),
         createDraft: vi.fn(overrides.createDraft ?? (async () => ({ id: 'new-page-1' }))),
+        getById: vi.fn(
+          overrides.getById ??
+            (async () => ({ workspaceId: '33333333-3333-3333-3333-333333333333' })),
+        ),
       } as unknown as BrainDocTools['savedViewStore'],
       docPageStore: {
         getVersionedPage: vi.fn(overrides.getVersionedPage ?? (async () => SAMPLE_PAGE)),
@@ -888,6 +895,56 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
     const createPage = tools.find((t) => t.name === 'createPage')!
     const result = await createPage.handler({ title: '   ' })
     expect(result.isError).toBe(true)
+  })
+
+  it('createPage without a parent files a top-level page (nestParentId null)', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const createPage = tools.find((t) => t.name === 'createPage')!
+    const result = await createPage.handler({ title: 'Top level' })
+    expect(result.isError).toBeFalsy()
+    expect(docTools.savedViewStore.getById).not.toHaveBeenCalled()
+    expect(docTools.savedViewStore.createDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ nestParentId: null }),
+    )
+  })
+
+  it('createPage nests under a valid same-workspace parent', async () => {
+    const parentId = '44444444-4444-4444-4444-444444444444'
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const createPage = tools.find((t) => t.name === 'createPage')!
+    const result = await createPage.handler({ title: 'Child', parentPageId: parentId })
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toContain(parentId)
+    expect(docTools.savedViewStore.getById).toHaveBeenCalledWith(expect.any(String), parentId)
+    expect(docTools.savedViewStore.createDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ nestParentId: parentId }),
+    )
+  })
+
+  it('createPage rejects a parentPageId the principal cannot see', async () => {
+    const docTools = docToolsStub({ getById: async () => null })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const createPage = tools.find((t) => t.name === 'createPage')!
+    const result = await createPage.handler({
+      title: 'Child',
+      parentPageId: '44444444-4444-4444-4444-444444444444',
+    })
+    expect(result.isError).toBe(true)
+    expect(docTools.savedViewStore.createDraft).not.toHaveBeenCalled()
+  })
+
+  it('createPage refuses a parent in another workspace', async () => {
+    const docTools = docToolsStub({ getById: async () => ({ workspaceId: 'other-ws' }) })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const createPage = tools.find((t) => t.name === 'createPage')!
+    const result = await createPage.handler({
+      title: 'Child',
+      parentPageId: '44444444-4444-4444-4444-444444444444',
+    })
+    expect(result.isError).toBe(true)
+    expect(docTools.savedViewStore.createDraft).not.toHaveBeenCalled()
   })
 
   it('readPage by id returns the page as Markdown', async () => {
