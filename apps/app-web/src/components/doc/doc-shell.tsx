@@ -424,6 +424,12 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     transient: boolean;
   } | null>(null);
   const [landingGalleryOpen, setLandingGalleryOpen] = useState(false);
+  // A template chosen on the empty-page landing, handed to the open draft's
+  // editor to seed in place (see `seedPageFromTemplate`). Cleared once the
+  // editor reports the blocks inserted (`onTemplateSeeded`).
+  const [seedTemplate, setSeedTemplate] = useState<
+    { kind: "builtin"; id: string } | { kind: "custom"; id: string } | null
+  >(null);
   const [landingCustomTemplates, setLandingCustomTemplates] = useState<
     CustomPageTemplateSummary[]
   >([]);
@@ -729,10 +735,24 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // Create a brand-new page seeded from a template (the landing "Start from a
   // template" pick). Built-in → instantiate Markdown; custom → fetch blocks +
   // fresh ids. Then navigate to the new page.
+  // "Start from a template" on the empty-page landing. The landing is only
+  // shown over an existing empty draft (`urlViewId` — see `isDraftLanding`), so
+  // we fill THAT draft in place rather than minting a second page: drop the
+  // landing (mounts the live editor on the current draft) and hand the template
+  // to the editor via `seedTemplate`, which inserts its blocks at the top once
+  // it goes live (the same Yjs insert path the "/template" slash item uses).
+  // This is the fix for "a template made a new page and stranded the blank one".
+  // Fallback (no current draft — not reachable from this landing entry point):
+  // mint a new draft seeded through the `/views/draft` `blocks` seam.
   async function seedPageFromTemplate(
     source: { kind: "builtin"; id: string } | { kind: "custom"; id: string },
   ) {
     setLandingGalleryOpen(false);
+    if (urlViewId) {
+      setSeedTemplate(source);
+      handleStartBlankDraft(urlViewId);
+      return;
+    }
     try {
       let blocks;
       if (source.kind === "builtin") {
@@ -1197,6 +1217,8 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                     }
                     onCommentsPresenceChange={setPageHasComments}
                     onNewTemplate={() => void handleNewTemplate()}
+                    seedTemplate={seedTemplate}
+                    onTemplateSeeded={() => setSeedTemplate(null)}
                   />
                 </div>
               </div>
