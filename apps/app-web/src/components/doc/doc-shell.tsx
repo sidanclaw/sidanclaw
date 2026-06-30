@@ -56,6 +56,7 @@ import {
 } from "@/lib/doc-tabs";
 import {
   createDraft,
+  commitPageCreatedEvent,
   derivePageIcon,
   getView,
   deleteView,
@@ -117,6 +118,13 @@ type ShellProps = {
    */
   assistantId?: string;
 };
+
+// Debounce windows for committing a freshly-created draft's deferred `created`
+// page-event (migration 283). A blank page settles fast; a from-template page
+// waits longer because there are more fields to fill before it's "real". A
+// navigate-away / tab-hide flush fires immediately regardless of these.
+const CREATED_COMMIT_BLANK_MS = 5_000;
+const CREATED_COMMIT_TEMPLATE_MS = 15_000;
 
 export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // `assistantId` is forwarded to `<CollabPageEditor>` (the centre pane). The
@@ -424,9 +432,91 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     transient: boolean;
   } | null>(null);
   const [landingGalleryOpen, setLandingGalleryOpen] = useState(false);
+  // A template chosen on the empty-page landing, handed to the open draft's
+  // editor to seed in place (see `seedPageFromTemplate`). Cleared once the
+  // editor reports the blocks inserted (`onTemplateSeeded`).
+  const [seedTemplate, setSeedTemplate] = useState<
+    { kind: "builtin"; id: string } | { kind: "custom"; id: string } | null
+  >(null);
+
+  // ── Deferred `created` page-event commit (migration 283) ──────────────
+  // A freshly-created interactive draft (blank / from-template) holds its
+  // `created` workflow trigger until the user engages (debounced typing) or
+  // leaves (navigates away / hides the tab) — so an empty, just-minted page
+  // never fires automations on its own. Template drafts wait longer (more
+  // fields to fill in). The server flips the pending flag atomically, so the
+  // typing debounce and the leave-flush together fire the workflow exactly once.
+  // Drafts a template was applied to this session → the longer debounce.
+  const templateSeededDraftIdsRef = useRef<Set<string>>(new Set());
+  // viewIds already committed (client-side guard; the server dedupes too).
+  const createdCommittedRef = useRef<Set<string>>(new Set());
+  // The viewId that currently owes a created-commit (null = nothing pending).
+  const pendingCreatedViewIdRef = useRef<string | null>(null);
+  const createdDebounceTimerRef = useRef<number | undefined>(undefined);
+
+  const commitCreatedEvent = useCallback((viewId: string | null) => {
+    if (!viewId || createdCommittedRef.current.has(viewId)) return;
+    createdCommittedRef.current.add(viewId);
+    if (pendingCreatedViewIdRef.current === viewId) {
+      pendingCreatedViewIdRef.current = null;
+    }
+    window.clearTimeout(createdDebounceTimerRef.current);
+    void commitPageCreatedEvent(viewId).catch(() => {
+      // best-effort: a failed commit must never block editing or navigation
+    });
+  }, []);
+
+  // Typing settles → commit (debounced; longer for template drafts). Wired to
+  // the editor's `onContentChange`.
+  const handleDraftContentChange = useCallback(() => {
+    const viewId = pendingCreatedViewIdRef.current;
+    if (!viewId) return;
+    const debounceMs = templateSeededDraftIdsRef.current.has(viewId)
+      ? CREATED_COMMIT_TEMPLATE_MS
+      : CREATED_COMMIT_BLANK_MS;
+    window.clearTimeout(createdDebounceTimerRef.current);
+    createdDebounceTimerRef.current = window.setTimeout(
+      () => commitCreatedEvent(viewId),
+      debounceMs,
+    );
+  }, [commitCreatedEvent]);
+
   const [landingCustomTemplates, setLandingCustomTemplates] = useState<
     CustomPageTemplateSummary[]
   >([]);
+
+  // Track which open page (if any) still owes its deferred `created` event,
+  // re-read from page metadata so a reloaded-but-uncommitted draft re-arms.
+  useEffect(() => {
+    if (
+      pageView?.createdEventPending &&
+      !createdCommittedRef.current.has(pageView.id)
+    ) {
+      pendingCreatedViewIdRef.current = pageView.id;
+    }
+  }, [pageView]);
+
+  // Leave by navigation → flush the page we left, even if untouched.
+  const prevPendingNavRef = useRef(urlViewId);
+  useEffect(() => {
+    const prev = prevPendingNavRef.current;
+    prevPendingNavRef.current = urlViewId;
+    if (prev && prev !== urlViewId && pendingCreatedViewIdRef.current === prev) {
+      commitCreatedEvent(prev);
+    }
+  }, [urlViewId, commitCreatedEvent]);
+
+  // Leave by hiding the tab → flush the current pending draft immediately.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        commitCreatedEvent(pendingCreatedViewIdRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () =>
+      document.removeEventListener("visibilitychange", onVisibility);
+  }, [commitCreatedEvent]);
   const [templateAuthoringId, setTemplateAuthoringId] = useState<string | null>(null);
   // Track viewport width so the reserved comment gutter scales with it. Applied
   // as an INLINE padding (not a Tailwind class) so React Fast-Refresh delivers
@@ -729,10 +819,27 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // Create a brand-new page seeded from a template (the landing "Start from a
   // template" pick). Built-in → instantiate Markdown; custom → fetch blocks +
   // fresh ids. Then navigate to the new page.
+  // "Start from a template" on the empty-page landing. The landing is only
+  // shown over an existing empty draft (`urlViewId` — see `isDraftLanding`), so
+  // we fill THAT draft in place rather than minting a second page: drop the
+  // landing (mounts the live editor on the current draft) and hand the template
+  // to the editor via `seedTemplate`, which inserts its blocks at the top once
+  // it goes live (the same Yjs insert path the "/template" slash item uses).
+  // This is the fix for "a template made a new page and stranded the blank one".
+  // Fallback (no current draft — not reachable from this landing entry point):
+  // mint a new draft seeded through the `/views/draft` `blocks` seam.
   async function seedPageFromTemplate(
     source: { kind: "builtin"; id: string } | { kind: "custom"; id: string },
   ) {
     setLandingGalleryOpen(false);
+    if (urlViewId) {
+      // A from-template draft fills in slower (more fields), so its deferred
+      // `created` event waits the longer debounce (migration 283).
+      templateSeededDraftIdsRef.current.add(urlViewId);
+      setSeedTemplate(source);
+      handleStartBlankDraft(urlViewId);
+      return;
+    }
     try {
       let blocks;
       if (source.kind === "builtin") {
@@ -1197,6 +1304,9 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                     }
                     onCommentsPresenceChange={setPageHasComments}
                     onNewTemplate={() => void handleNewTemplate()}
+                    seedTemplate={seedTemplate}
+                    onTemplateSeeded={() => setSeedTemplate(null)}
+                    onContentChange={handleDraftContentChange}
                   />
                 </div>
               </div>

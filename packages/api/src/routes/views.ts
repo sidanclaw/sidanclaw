@@ -267,6 +267,12 @@ function viewMetadata(view: SavedView) {
     // Per-page "Sync to brain" toggle (migration 001_doc_brain_sync). The doc
     // page-header ⋯ menu reads it to reflect the switch state.
     brainSyncEnabled: view.brainSyncEnabled ?? false,
+    // True while an interactive draft still owes its deferred `created`
+    // page-event (migration 283). The doc client arms the commit watcher when
+    // this is set — debounced typing or a navigate-away flush fires the event
+    // once via POST /views/:id/commit-created. Re-read on reload so a
+    // refreshed-but-uncommitted draft re-arms instead of going stale.
+    createdEventPending: view.createdEventPending ?? false,
     page: view.page,
     createdAt: view.createdAt.toISOString(),
     updatedAt: view.updatedAt.toISOString(),
@@ -1094,8 +1100,26 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       binding,
       page: seededPage ?? emptyPage,
       nestParentId,
+      // Interactive create (the doc-editor blank / from-template flows): defer
+      // the `created` page-event-trigger instead of firing it on this empty,
+      // just-minted draft. The client commits it once the user engages
+      // (debounced typing) or navigates away, via /views/:id/commit-created.
+      // Migration 283 / docs workflow.md → "Deferred created (interactive drafts)".
+      deferCreatedEvent: true,
     })
     res.status(201).json(viewMetadata(created))
+  })
+
+  // POST /views/:id/commit-created — fire the deferred `created` page-event for
+  // an interactive draft. Idempotent + single-fire (the store flips
+  // `created_event_pending` atomically): the doc client calls this after
+  // debounced typing and again on navigate-away, but the workflow runs once.
+  // Returns `{ committed }` — true only for the call that won the flip.
+  router.post('/views/:id/commit-created', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    const committed = await opts.savedViewStore.commitCreatedEvent(userId, req.params.id)
+    res.json({ committed })
   })
 
   // ── Format conversion: import (.docx/.md → page/brain) + export ──────

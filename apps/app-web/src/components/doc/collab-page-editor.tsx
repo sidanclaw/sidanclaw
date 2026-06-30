@@ -157,6 +157,24 @@ export type CollabPageEditorProps = {
    * routes to it. When absent the button is hidden.
    */
   onNewTemplate?: () => void;
+  /**
+   * A template to seed into THIS (empty) draft once the editor goes live. The
+   * empty-page landing's "Start from a template" hands it here instead of
+   * minting a *new* page, so the open blank draft is filled in place (it is
+   * always an existing empty draft — see `doc-shell`'s `isDraftLanding`).
+   * Inserted once, at the top of the page, through the same Yjs insert path the
+   * "/template" slash item uses; the shell clears it via `onTemplateSeeded`.
+   */
+  seedTemplate?: { kind: "builtin" | "custom"; id: string } | null;
+  /** Fired once the `seedTemplate` blocks have been inserted (or skipped). */
+  onTemplateSeeded?: () => void;
+  /**
+   * Fired on every document edit (Tiptap `update`). The shell uses it to drive
+   * the deferred `created` page-event commit (migration 283): debounced typing
+   * fires the event for a freshly-created draft. Cheap + high-frequency — the
+   * handler must debounce.
+   */
+  onContentChange?: () => void;
 };
 
 export function CollabPageEditor({
@@ -170,6 +188,9 @@ export function CollabPageEditor({
   buildSlot,
   onCommentsPresenceChange,
   onNewTemplate,
+  seedTemplate,
+  onTemplateSeeded,
+  onContentChange,
 }: CollabPageEditorProps) {
   const { doc, provider, synced } = collab;
   if (!doc || !provider) {
@@ -194,6 +215,9 @@ export function CollabPageEditor({
       buildSlot={buildSlot}
       onCommentsPresenceChange={onCommentsPresenceChange}
       onNewTemplate={onNewTemplate}
+      seedTemplate={seedTemplate}
+      onTemplateSeeded={onTemplateSeeded}
+      onContentChange={onContentChange}
     />
   );
 }
@@ -211,6 +235,9 @@ function CollabEditorInner({
   buildSlot,
   onCommentsPresenceChange,
   onNewTemplate,
+  seedTemplate,
+  onTemplateSeeded,
+  onContentChange,
 }: {
   doc: Y.Doc;
   provider: HocuspocusProvider;
@@ -224,6 +251,9 @@ function CollabEditorInner({
   buildSlot?: ReactNode;
   onCommentsPresenceChange?: (present: boolean) => void;
   onNewTemplate?: () => void;
+  seedTemplate?: { kind: "builtin" | "custom"; id: string } | null;
+  onTemplateSeeded?: () => void;
+  onContentChange?: () => void;
 }) {
   const t = useT().docPage;
   const ws = useWorkspaceContext();
@@ -632,6 +662,58 @@ function CollabEditorInner({
     },
     [doc, provider, editingExtensions, commentExtension],
   );
+
+  // Seed a template into a fresh, empty draft (the landing's "Start from a
+  // template" → `doc-shell`). Unlike the slash-menu gallery, which inserts at
+  // the caret on demand, this runs once the moment the editor goes live: focus
+  // the top of the empty page and drop the template's blocks there, replacing
+  // the lone empty paragraph (`insertTemplate`'s `lineEmpty` rule). Gated on
+  // `synced` so we never insert before the Yjs doc's initial content has
+  // loaded — otherwise the seed would race (or duplicate) the loaded blocks.
+  // The ref makes it fire exactly once per handed-in template; it resets when
+  // the shell clears `seedTemplate` so a later page can be seeded too.
+  const seededTemplateRef = useRef(false);
+  useEffect(() => {
+    if (!seedTemplate) {
+      seededTemplateRef.current = false;
+      return;
+    }
+    if (!editor || !synced || !canEdit || seededTemplateRef.current) return;
+    seededTemplateRef.current = true;
+    editor.commands.focus("start");
+    const pos = editor.state.selection.from;
+    if (seedTemplate.kind === "builtin") {
+      insertTemplate(editor, pos, seedTemplate.id);
+      onTemplateSeeded?.();
+    } else {
+      void insertCustomTemplate(editor, pos, seedTemplate.id).finally(() => {
+        onTemplateSeeded?.();
+      });
+    }
+  }, [
+    editor,
+    synced,
+    canEdit,
+    seedTemplate,
+    insertTemplate,
+    insertCustomTemplate,
+    onTemplateSeeded,
+  ]);
+
+  // Forward document edits to the shell (drives the deferred `created`
+  // page-event commit — migration 283). Subscribed via a ref-backed handler so
+  // the listener is installed once per editor, not rebuilt when the callback
+  // identity changes.
+  const onContentChangeRef = useRef(onContentChange);
+  onContentChangeRef.current = onContentChange;
+  useEffect(() => {
+    if (!editor) return;
+    const handler = () => onContentChangeRef.current?.();
+    editor.on("update", handler);
+    return () => {
+      editor.off("update", handler);
+    };
+  }, [editor]);
 
   // Inline "Space for AI": push the active generating-block into the widget
   // decoration plugin (a meta-only transaction — never syncs to Yjs). Set on

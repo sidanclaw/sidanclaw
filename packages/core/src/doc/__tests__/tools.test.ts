@@ -88,6 +88,7 @@ function fakeWorkflowRunStore(): WorkflowRunStore {
     updateStepRun: vi.fn(),
     listStepRuns: vi.fn(),
     listRunsForWorkflow: vi.fn().mockResolvedValue([]),
+    listRunsForPage: vi.fn().mockResolvedValue([]),
     getLatestOutcomeForWorkflowSystem: vi.fn().mockResolvedValue(null),
   }
 }
@@ -106,6 +107,7 @@ function fakeSavedViewStore(): SavedViewStore {
     setAutoTitle: vi.fn(),
     createDraft: vi.fn(),
     findIdByAnchorKey: vi.fn().mockResolvedValue(null),
+    commitCreatedEvent: vi.fn().mockResolvedValue(true),
     reparent: vi.fn().mockResolvedValue(true),
     reorderSiblings: vi.fn().mockResolvedValue(undefined),
     pruneExpiredDraftsSystem: vi.fn().mockResolvedValue([]),
@@ -551,6 +553,8 @@ describe('[COMP:doc/tools] patchPage setIcon op', () => {
       USER_ID,
       PAGE_ID,
       expect.objectContaining({ icon: '🌋' }),
+      // Assistant write → 'system' (page self-loop guard, PageWriteActor).
+      'system',
     )
     // The blocks themselves are unchanged — it's a metadata-only patch.
     expect(d.docPageStore.applyPatch).toHaveBeenCalledTimes(1)
@@ -583,6 +587,7 @@ describe('[COMP:doc/tools] patchPage setIcon op', () => {
       USER_ID,
       PAGE_ID,
       expect.objectContaining({ icon: '🌋' }),
+      'system',
     )
     // ...but the setIcon op never reaches the live Y.Doc (no representation).
     expect(gateway.applyOps).toHaveBeenCalledTimes(1)
@@ -605,6 +610,7 @@ describe('[COMP:doc/tools] patchPage setIcon op', () => {
       USER_ID,
       PAGE_ID,
       expect.objectContaining({ icon: null }),
+      'system',
     )
   })
 })

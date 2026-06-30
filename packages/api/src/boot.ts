@@ -56,6 +56,8 @@ import {
   createBrainHealingTools,
   createScheduleWorkflowTool,
   advanceWorkflowRun,
+  createWorkflowEventDispatcher,
+  type WorkflowEventDispatcher,
   createTaskTools,
   createWorkspaceTools,
   type WorkspaceDirectoryStore,
@@ -171,6 +173,8 @@ import {
   createDbWorkflowStore,
   createDbWorkflowRunStore,
   getRunIdForStepRun,
+  findEventTriggeredWorkflowsSystem,
+  getWorkflowCreatorSystem,
 } from './db/workflow-store.js'
 import { buildWorkflowToolRegistry } from './workflow/mcp-bridge.js'
 import { createPendingApprovalsStore } from './db/pending-approvals-store.js'
@@ -194,6 +198,7 @@ import { runIngestPage } from './doc/ingest-page-runner.js'
 import { internalIngestRoutes } from './doc/internal-ingest-route.js'
 import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
+import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanout.js'
 import { createDbPageGrantStore } from './db/page-grant-store.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbWorkspaceGroupStore } from './db/workspace-group-store.js'
@@ -488,7 +493,7 @@ export interface BootContext {
   gdriveFilesStore: GDriveFilesStore | undefined
   filesApi: ReturnType<typeof createFilesApi> | null
   entityKindClassifier: ReturnType<typeof createEntityKindClassifier>
-  workflowEventDispatcher: unknown
+  workflowEventDispatcher: WorkflowEventDispatcher
   voiceTranscription: { enabled: boolean; apiKey: string; model: string | undefined }
   resolvePrimaryAssistantForWorkspace: (workspaceId: string) => Promise<string | null>
   resolveDataRequest: (messageId: string, decision: 'approved' | 'rejected') => Promise<void>
@@ -606,7 +611,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const workflowStore = createDbWorkflowStore()
   const workflowRunStore = createDbWorkflowRunStore()
   const pendingApprovalsStore = createPendingApprovalsStore()
-  const savedViewStore = createDbSavedViewStore()
+  // `onPageLifecycle` feeds page create / update / move into the workflow
+  // event-trigger dispatcher (the `page` event source). `publishPageLifecycle`
+  // is a no-op until the dispatcher is bound via `setPageEventDispatcher`
+  // (closed app boot) — see page-event-fanout.ts.
+  const savedViewStore = createDbSavedViewStore({ onPageLifecycle: publishPageLifecycle })
   const pageTemplateStore = createDbPageTemplateStore()
   const homeDockStore = createDbHomeDockStore()
   const docEntityStore = createDbDocEntityStore()
@@ -1152,6 +1161,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           nestParentId: nestUnder ?? null,
           originPrompt: originPrompt ?? null,
           anchorKey: anchorKey ?? null,
+          // Workflow-authored anchor page — bot-authored page event so a
+          // workflow watching `nestUnder` doesn't re-trigger on its own anchor.
+          writtenBy: 'system',
         })
         await savedViewStore.setState(userId, draft.id, 'saved')
         return { id: draft.id }
@@ -2090,7 +2102,41 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ════════════════════════════════════════════════════════════════
   // Closed routes (platform-injected) mount here, against the same stores.
   // ════════════════════════════════════════════════════════════════
-  const workflowEventDispatcher: unknown = undefined
+
+  // Shared workflow event-trigger dispatcher (the `page` / connector / channel
+  // event source) + its binding to the saved-views store's page-write path.
+  // This lives in bootOpenApi — not the closed app boot — so BOTH editions get
+  // it: the OSS standalone entry (`@sidanclaw/api-open`) and the closed platform
+  // app. The closed app reuses this instance off the BootContext for its Slack
+  // webhook + connector-poll producers (`createApiIngestWorkflowTrigger`); it no
+  // longer constructs or binds its own. `setPageEventDispatcher` wires the
+  // late-bound seam the store published into (page-event-fanout.ts) — without
+  // this bind, `publishPageLifecycle` is a no-op and page events never fire a
+  // workflow (the OSS regression this fixes). Mirrors the webhook receiver:
+  // event runs are attributed to the workflow creator and recorded
+  // `triggerKind='manual'` (the `trigger_kind` enum has no `event` member).
+  const workflowEventDispatcher: WorkflowEventDispatcher = createWorkflowEventDispatcher({
+    findEventTriggeredWorkflows: ({ workspaceId }) =>
+      findEventTriggeredWorkflowsSystem(workspaceId),
+    startWorkflowRun: async ({ workflowId, workspaceId, input }) => {
+      const triggeredBy = await getWorkflowCreatorSystem(workflowId)
+      const run = await workflowRunStore.createRun({
+        workflowId,
+        workspaceId,
+        triggeredBy,
+        triggerKind: 'manual',
+        input,
+      })
+      await advanceWorkflowRun(workflowExecutorDeps, run.id)
+    },
+    onError: (err, errCtx) => {
+      console.warn(
+        `[workflow-event] ${errCtx.workflowId ?? '(finder)'} failed:`,
+        err instanceof Error ? err.message : err,
+      )
+    },
+  })
+  setPageEventDispatcher(workflowEventDispatcher)
 
   // ════════════════════════════════════════════════════════════════
   // Open background workers

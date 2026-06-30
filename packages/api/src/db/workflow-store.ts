@@ -18,6 +18,7 @@
 import type {
   EventSubscription,
   EventTriggeredWorkflow,
+  PageWorkflowRunSummary,
   WorkflowDefinition,
   WorkflowModelAlias,
   WorkflowRecord,
@@ -370,17 +371,50 @@ function rowToStepRun(row: StepRunRow): WorkflowStepRunRecord {
   }
 }
 
+/**
+ * The doc page that CHANGED and fired a `page`-event-triggered run, read from
+ * the run input the dispatcher built (`event-trigger.ts buildInput`):
+ * `input.trigger.sourceType === 'page'` and the changed page at
+ * `input.event.pageId` (the watched page is `input.trigger.pageId` — not this).
+ * Returns null for every other source / a malformed input — the column is
+ * nullable and this is best-effort, never throwing on a surprising shape.
+ */
+export function extractTriggerPageId(
+  input: Record<string, unknown> | undefined,
+): string | null {
+  const trigger = input?.trigger
+  if (!trigger || typeof trigger !== 'object') return null
+  if ((trigger as { sourceType?: unknown }).sourceType !== 'page') return null
+  const event = input?.event
+  if (!event || typeof event !== 'object') return null
+  const pageId = (event as { pageId?: unknown }).pageId
+  return typeof pageId === 'string' && pageId.length > 0 ? pageId : null
+}
+
 export function createDbWorkflowRunStore(): WorkflowRunStore {
   return {
     async createRun({ workflowId, workspaceId, triggeredBy, triggerKind, input }) {
       // System-level write: the route handler authorized the run by
       // resolving the workflow via the user's RLS view; the run record
       // itself is system-owned.
+      //
+      // When a `page` event source started the run, stamp the CHANGED page
+      // (`input.event.pageId`) onto trigger_page_id so that page can later
+      // surface the runs it triggered. The watched page is `input.trigger.
+      // pageId` — deliberately NOT what we key on. Other sources leave it null.
+      const triggerPageId = extractTriggerPageId(input)
       const result = await query<RunRow>(
-        `INSERT INTO workflow_runs (workflow_id, workspace_id, triggered_by, trigger_kind, input)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO workflow_runs (workflow_id, workspace_id, triggered_by, trigger_kind, input, trigger_page_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING ${RUN_SELECT}`,
-        [workflowId, workspaceId, triggeredBy, triggerKind, JSON.stringify(input ?? {})],
+        [
+          workflowId,
+          workspaceId,
+          triggeredBy,
+          triggerKind,
+          JSON.stringify(input ?? {}),
+          triggerPageId,
+        ],
       )
       return rowToRun(result.rows[0])
     },
@@ -506,6 +540,47 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
         [workflowId, excludeRunId],
       )
       return result.rows[0]?.outcome ?? null
+    },
+    async listRunsForPage(userId, pageId, opts) {
+      const limit = Math.min(opts?.limit ?? 20, 100)
+      // RLS-gated on both tables (workspace_member policies). The JOIN to
+      // workflows yields the display name; `outcome.summary` is the distilled
+      // result the chip shows once a run terminates. Newest first.
+      const result = await queryWithRLS<{
+        runId: string
+        workflowId: string
+        workflowName: string
+        status: WorkflowRunStatus
+        startedAt: Date
+        finishedAt: Date | null
+        outcome: WorkflowRunOutcome | null
+      }>(
+        userId,
+        `SELECT r.id            AS "runId",
+                r.workflow_id   AS "workflowId",
+                w.name          AS "workflowName",
+                r.status        AS "status",
+                r.started_at    AS "startedAt",
+                r.finished_at   AS "finishedAt",
+                r.outcome       AS "outcome"
+           FROM workflow_runs r
+           JOIN workflows w ON w.id = r.workflow_id
+          WHERE r.trigger_page_id = $1
+          ORDER BY r.started_at DESC
+          LIMIT $2`,
+        [pageId, limit],
+      )
+      return result.rows.map(
+        (row): PageWorkflowRunSummary => ({
+          runId: row.runId,
+          workflowId: row.workflowId,
+          workflowName: row.workflowName,
+          status: row.status,
+          startedAt: row.startedAt,
+          finishedAt: row.finishedAt,
+          outcomeSummary: row.outcome?.summary ?? null,
+        }),
+      )
     },
   }
 }

@@ -169,6 +169,7 @@ function fakeWorkflowRunStore(): WorkflowRunStore {
         },
       ]
     },
+    listRunsForPage: async () => [],
     async getLatestOutcomeForWorkflowSystem() {
       return null
     },

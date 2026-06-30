@@ -190,12 +190,15 @@ export type BrainFileTools = {
  *
  *   - `savedViewStore` — `list` (title search + `listPages` enumeration) +
  *     `remove` (RLS delete; the `saved_views` FK cascade drops nested child
- *     pages, per migration 210) + `createDraft` (the `createPage` seam).
+ *     pages, per migration 210) + `createDraft` (the `createPage` seam) +
+ *     `getById` (resolve + workspace-confirm a `createPage` `parentPageId`
+ *     before nesting under it — same parent guard the chat `createSubPage`
+ *     tool runs).
  *   - `docPageStore`   — `getVersionedPage` (RLS read → markdown / access
  *     confirm) + `applyPatch` (atomic version CAS + `last_undo` capture).
  */
 export type BrainDocTools = {
-  savedViewStore: Pick<SavedViewStore, 'list' | 'remove' | 'createDraft'>
+  savedViewStore: Pick<SavedViewStore, 'list' | 'remove' | 'createDraft' | 'getById'>
   docPageStore: Pick<DocPageStore, 'getVersionedPage' | 'applyPatch'>
   /**
    * Custom page templates (migration 281). When wired, `listPageTemplates`
@@ -670,9 +673,12 @@ function buildDocPageTools(
     name: 'createPage',
     description:
       'Create a NEW workspace doc page from a `title` and optional Markdown ' +
-      '`content`. Returns the new `pageId` — use `editPage` to add more or ' +
-      '`readPage` to read it back. This is the only way to create a page; ' +
-      "`editPage` only edits existing pages. Scoped to the key's workspace.",
+      '`content`. Pass `parentPageId` (an existing page id, e.g. from ' +
+      '`listPages`) to file the new page NESTED UNDER that parent in the ' +
+      'sidebar tree; omit it for a top-level page. Returns the new `pageId` — ' +
+      'use `editPage` to add more or `readPage` to read it back. This is the ' +
+      'only way to create a page; `editPage` only edits existing pages. ' +
+      "Scoped to the key's workspace.",
     inputSchema: {
       title: z
         .string()
@@ -684,6 +690,14 @@ function buildDocPageTools(
         .max(MAX_EDIT_CHARS)
         .optional()
         .describe('Optional Markdown body. Omit to create an empty page.'),
+      parentPageId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          'Optional id of an existing page to nest the new page under (the ' +
+            'Notion sub-page primitive). Omit for a top-level page.',
+        ),
     },
     async handler(args) {
       const ctx = await resolveCtx()
@@ -691,6 +705,26 @@ function buildDocPageTools(
       const title = typeof args.title === 'string' ? args.title.trim() : ''
       if (!title) return text('Provide a `title` for the new page.', true)
       const content = typeof args.content === 'string' ? args.content : ''
+
+      // Resolve + workspace-confirm the parent before nesting under it (same
+      // guard the chat `createSubPage` tool runs). `getById` is RLS-scoped to
+      // the resolved principal, so a null read means "no access / not found";
+      // the explicit workspace check additionally refuses a parent in another
+      // workspace the principal happens to belong to — the brain key binds to
+      // exactly one workspace, so a cross-workspace nest would mint an orphan.
+      const parentPageId =
+        typeof args.parentPageId === 'string' ? args.parentPageId : undefined
+      if (parentPageId) {
+        const parent = await savedViewStore.getById(ctx.userId, parentPageId)
+        if (!parent || parent.workspaceId !== workspaceId) {
+          return text(
+            `Parent page not found: ${parentPageId}. It may have been deleted, ` +
+              'or it may live in another workspace. Omit `parentPageId` to ' +
+              'create a top-level page.',
+            true,
+          )
+        }
+      }
 
       // Build the initial block list from the Markdown body (same expansion
       // the chat path + `editPage` apply). An empty body still needs one
@@ -710,6 +744,8 @@ function buildDocPageTools(
         const draft = await savedViewStore.createDraft({
           userId: ctx.userId,
           workspaceId,
+          // External-agent (brain-MCP) page write — bot-authored page event.
+          writtenBy: 'system',
           name: title,
           nameOrigin: 'user',
           icon: null,
@@ -717,9 +753,13 @@ function buildDocPageTools(
           viewType: 'table',
           binding,
           page: { blocks },
+          nestParentId: parentPageId ?? null,
         })
+        const nestedNote = parentPageId
+          ? ` nested under ${parentPageId}`
+          : ''
         return text(
-          `Created page "${title}" (pageId: ${draft.id}). Use editPage to add more, or readPage to read it back.`,
+          `Created page "${title}" (pageId: ${draft.id})${nestedNote}. Use editPage to add more, or readPage to read it back.`,
         )
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -834,6 +874,8 @@ function buildDocPageTools(
         const draft = await savedViewStore.createDraft({
           userId: ctx.userId,
           workspaceId,
+          // External-agent (brain-MCP) page write — bot-authored page event.
+          writtenBy: 'system',
           name: resolved.title,
           nameOrigin: 'user',
           icon: resolved.icon,

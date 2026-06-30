@@ -22,6 +22,7 @@ export {
   type WorkflowModelAlias,
   type WorkflowRunRecord,
   type WorkflowRunOutcome,
+  type PageWorkflowRunSummary,
   RESERVED_OUTCOME_VAR_NAMES,
   type ReservedOutcomeVarName,
   type WorkflowStepRunRecord,
@@ -89,6 +90,15 @@ export {
   type WorkflowEventDispatcherDeps,
   type WorkflowEventDispatcher,
 } from './event-trigger.js'
+
+export {
+  PAGE_LIFECYCLE_ACTIONS,
+  PAGE_EVENT_ROOT,
+  pageLifecycleToDispatchEvent,
+  createPageLifecycleTrigger,
+  type PageLifecycleAction,
+  type PageLifecycleEvent,
+} from './page-event-trigger.js'
 
 export {
   CRON_TURN_FRAMING,

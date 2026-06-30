@@ -211,8 +211,8 @@ export type WorkflowDefinition = {
 // ── Event trigger ───────────────────────────────────────────────────────
 
 /**
- * One event source an `event`-trigger workflow listens on. Connectors and
- * channels are both first-class:
+ * One event source an `event`-trigger workflow listens on. Connectors,
+ * channels, and the workspace's own doc pages are all first-class:
  *
  *  - `connector` — a `connector_instance` row (GitHub, Fathom, Gmail,
  *    Calendar — anything with an ingest poller). Its events reach the
@@ -220,8 +220,17 @@ export type WorkflowDefinition = {
  *  - `channel` — a `channel_integrations` row (Slack, Telegram, WhatsApp —
  *    a BYO bot). Its events reach the dispatcher straight from the channel
  *    webhook, with no `connector_instance` substrate in between.
+ *  - `page` — an *internal* source: one watched doc page. It fires when a
+ *    page is **created or moved directly under** the watched page (the watched
+ *    page is the new parent), or when the watched page **itself is updated**.
+ *    Its events reach the dispatcher from the saved-views store write path
+ *    (`page-event-fanout.ts` → `pageLifecycleToDispatchEvent`), not a poller or
+ *    webhook. The lifecycle action (`created` | `updated` | `moved`) is the
+ *    event sub-channel — `match.inChannels: ['created']` narrows a subscription
+ *    to one action, exactly as `inChannels` narrows a GitHub repo or Slack
+ *    channel. See docs/architecture/features/workflow.md → "Page event source".
  *
- * A workflow can wire either kind, or several of both, into one trigger.
+ * A workflow can wire any kind, or several of any, into one trigger.
  */
 export type EventSourceRef =
   | {
@@ -237,6 +246,23 @@ export type EventSourceRef =
       channelIntegrationId: string
       /** Denormalized channel type — 'slack' | 'telegram' | 'whatsapp'. */
       channel: string
+    }
+  | {
+      type: 'page'
+      /**
+       * The watched page (`saved_views.id`). Two event shapes fire it, both
+       * relative to this page:
+       *   - a page is **created or moved directly under** it — the watched
+       *     page is the new `nest_parent_id` (action `created` / `moved`);
+       *   - the watched page **itself is updated** (action `updated`).
+       * This is the source's identity — the `connectorInstanceId` /
+       * `channelIntegrationId` analog that `sourceMatches` compares exactly.
+       * Workspace-root pages (`nest_parent_id IS NULL`) carry the
+       * `PAGE_EVENT_ROOT` sentinel, so "created/moved at the workspace root" is
+       * not targetable by a uuid subscription; a root page's own `updated`
+       * event still is (it carries the page's own uuid).
+       */
+      pageId: string
     }
 
 /**
@@ -308,12 +334,13 @@ export type WorkflowTrigger =
   | {
       /**
        * Fired when an event arrives on any subscribed source — connector
-       * instance or channel integration — whose optional `match` filter
-       * passes. The generic `createWorkflowEventDispatcher`
+       * instance, channel integration, or doc-page subtree — whose optional
+       * `match` filter passes. The generic `createWorkflowEventDispatcher`
        * (`workflow/event-trigger.ts`) dispatches; connector events reach it
        * through the ingest engine's `onEvent` seam, channel events straight
-       * from the channel webhook. Independent of the ingest rule's `alert`
-       * flag. See docs/plans/company-brain/workflow-builder.md §Event trigger.
+       * from the channel webhook, page events from the saved-views store write
+       * path. Independent of the ingest rule's `alert` flag. See
+       * docs/plans/company-brain/workflow-builder.md §Event trigger.
        */
       kind: 'event'
       event: {
@@ -551,6 +578,24 @@ export type WorkflowStore = {
   findByIdSystem(workflowId: string): Promise<WorkflowRecord | null>
 }
 
+/**
+ * Lightweight summary of one run a doc page triggered, for the page-header
+ * feedback chip. Keyed on the CHANGED page (`workflow_runs.trigger_page_id` =
+ * `input.event.pageId`). Carries just what the chip renders — never the full
+ * run / step trail — so the page surface stays cheap and never blocks render.
+ * `outcomeSummary` is the distilled `outcome.summary`, present once the run
+ * terminates (see `WorkflowRunOutcome`).
+ */
+export type PageWorkflowRunSummary = {
+  runId: string
+  workflowId: string
+  workflowName: string
+  status: WorkflowRunStatus
+  startedAt: Date
+  finishedAt: Date | null
+  outcomeSummary: string | null
+}
+
 export type WorkflowRunStore = {
   /** Insert a new run row in `pending` state. */
   createRun(params: {
@@ -627,4 +672,17 @@ export type WorkflowRunStore = {
     workflowId: string,
     excludeRunId: string,
   ): Promise<WorkflowRunOutcome | null>
+
+  /**
+   * List the runs a doc page triggered, newest first, for the page-header
+   * feedback chip. Keyed on `workflow_runs.trigger_page_id` (the CHANGED page
+   * = `input.event.pageId`), joined to `workflows` for the name. RLS-gated via
+   * the workspace_member policy on both tables; the partial index
+   * `idx_workflow_runs_trigger_page` (migration 282) covers the access path.
+   */
+  listRunsForPage(
+    userId: string,
+    pageId: string,
+    opts?: { limit?: number },
+  ): Promise<PageWorkflowRunSummary[]>
 }

@@ -645,5 +645,37 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     })
   })
 
+  // ── GET /pages/:pageId/workflow-runs — runs a doc page triggered ──────
+  // The back-reference for the page → workflow event trigger: the page that
+  // CHANGED (workflow_runs.trigger_page_id) lists the runs it fired so the
+  // page-header chip can show status + outcome and link to each run. A
+  // distinct path (not /workflows/...) so it can't be captured by the
+  // `/workflows/:id` route. RLS in the store is the membership proof.
+  router.get('/pages/:pageId/workflow-runs', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+
+    const pageId = z.string().uuid().safeParse(req.params.pageId)
+    if (!pageId.success) return badRequest(res, 'Invalid pageId')
+
+    const limit = Math.min(
+      Math.max(parseInt(typeof req.query.limit === 'string' ? req.query.limit : '20', 10) || 20, 1),
+      100,
+    )
+
+    const runs = await opts.runStore.listRunsForPage(userId, pageId.data, { limit })
+    res.json({
+      runs: runs.map((r) => ({
+        runId: r.runId,
+        workflowId: r.workflowId,
+        workflowName: r.workflowName,
+        status: r.status,
+        startedAt: r.startedAt.toISOString(),
+        finishedAt: r.finishedAt?.toISOString() ?? null,
+        outcomeSummary: r.outcomeSummary,
+      })),
+    })
+  })
+
   return router
 }

@@ -33,6 +33,7 @@ function fakeSavedViewStore(): Mocked<SavedViewStore> {
     setAutoTitle: vi.fn(),
     createDraft: vi.fn(),
     findIdByAnchorKey: vi.fn(),
+    commitCreatedEvent: vi.fn(),
     reparent: vi.fn(),
     reorderSiblings: vi.fn(),
     pruneExpiredDraftsSystem: vi.fn(),
@@ -79,6 +80,7 @@ function fakeWorkflowRunStore(): Mocked<WorkflowRunStore> {
     updateStepRun: vi.fn(),
     listStepRuns: vi.fn(),
     listRunsForWorkflow: vi.fn().mockResolvedValue([]),
+    listRunsForPage: vi.fn().mockResolvedValue([]),
     getLatestOutcomeForWorkflowSystem: vi.fn().mockResolvedValue(null),
   }
 }
@@ -348,6 +350,7 @@ describe('[COMP:api/views-routes] saved-views CRUD', () => {
       brainSyncEnabled: false,
       brainLastIngestHash: null,
       brainLastIngestAt: null,
+      createdEventPending: false,
       autoPruneAt: null,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -394,6 +397,7 @@ describe('[COMP:api/views-routes] saved-views CRUD', () => {
       brainSyncEnabled: false,
       brainLastIngestHash: null,
       brainLastIngestAt: null,
+      createdEventPending: false,
       autoPruneAt: null,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -434,6 +438,7 @@ describe('[COMP:api/views-routes] saved-views icon', () => {
       brainSyncEnabled: false,
       brainLastIngestHash: null,
       brainLastIngestAt: null,
+      createdEventPending: false,
       autoPruneAt: null,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -470,6 +475,7 @@ describe('[COMP:api/views-routes] saved-views icon', () => {
       brainSyncEnabled: false,
       brainLastIngestHash: null,
       brainLastIngestAt: null,
+      createdEventPending: false,
       autoPruneAt: null,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -1004,6 +1010,7 @@ function savedViewFixture(overrides: Partial<SavedView> = {}): SavedView {
     brainSyncEnabled: false,
     brainLastIngestHash: null,
     brainLastIngestAt: null,
+    createdEventPending: false,
     autoPruneAt: new Date('2026-06-25T00:00:00Z'),
     createdAt: new Date('2026-05-26T00:00:00Z'),
     updatedAt: new Date('2026-05-26T00:00:00Z'),
@@ -1220,6 +1227,32 @@ describe('[COMP:api/views-routes] create draft', () => {
         page: { blocks: [] },
       }),
     )
+  })
+
+  it('POST /workspaces/:wid/views/draft defers the created event (interactive create, mig 283)', async () => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    stores.savedViewStore.createDraft.mockResolvedValueOnce(savedViewFixture())
+    await request(app).post(`/api/workspaces/${WORKSPACE_ID}/views/draft`).send({})
+    expect(stores.savedViewStore.createDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ deferCreatedEvent: true }),
+    )
+  })
+
+  it('POST /views/:id/commit-created fires the deferred created event and returns the flip result', async () => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    stores.savedViewStore.commitCreatedEvent.mockResolvedValueOnce(true)
+    const res = await request(app).post(`/api/views/sv-page-1/commit-created`).send({})
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ committed: true })
+    expect(stores.savedViewStore.commitCreatedEvent).toHaveBeenCalledWith(USER_ID, 'sv-page-1')
+  })
+
+  it('POST /views/:id/commit-created reports committed=false when the row already fired', async () => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    stores.savedViewStore.commitCreatedEvent.mockResolvedValueOnce(false)
+    const res = await request(app).post(`/api/views/sv-page-1/commit-created`).send({})
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ committed: false })
   })
 
   it('POST /workspaces/:wid/views/draft accepts a custom binding', async () => {
