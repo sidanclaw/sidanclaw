@@ -166,8 +166,6 @@ export type CrmStore = {
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) stamped on the fresh entity + specialization pair. Default '{}'. */
     compartments?: string[]
-    /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
-    source?: 'user' | 'extracted'
   }): Promise<CompanyRecord>
 
   getCompanyById(ctx: AccessContext, id: string): Promise<CompanyRecord | null>
@@ -190,8 +188,6 @@ export type CrmStore = {
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) stamped on the fresh entity + specialization pair. Default '{}'. */
     compartments?: string[]
-    /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
-    source?: 'user' | 'extracted'
   }): Promise<ContactRecord>
 
   getContactById(ctx: AccessContext, id: string): Promise<ContactRecord | null>
@@ -214,8 +210,6 @@ export type CrmStore = {
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) stamped on the fresh entity + specialization pair. Default '{}'. */
     compartments?: string[]
-    /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
-    source?: 'user' | 'extracted'
   }): Promise<DealRecord>
 
   getDealById(ctx: AccessContext, id: string): Promise<DealRecord | null>

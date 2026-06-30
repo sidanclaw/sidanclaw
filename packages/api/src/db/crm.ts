@@ -103,14 +103,6 @@ export async function createCompany(
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) for the fresh entity + company pair. Default '{}'. */
     compartments?: string[]
-    /**
-     * Fresh-insert `source` for the entity + companies pair. Default `'user'`
-     * (interactive chat / API writes). The structural-synthesis engine passes
-     * `'extracted'` so synthesis-captured companies surface in Brain Reviews
-     * (`?includeExtracted=true`). Only the fresh-insert path honours it — the
-     * dedupe/merge path preserves the existing row's source.
-     */
-    source?: 'user' | 'extracted'
   },
 ): Promise<CompanyRecord> {
   // WU-4.5 — the `userId` arg is both RLS actor and row author for
@@ -154,9 +146,9 @@ export async function createCompany(
     const entityResult = await client.query<{ id: string }>(
       `INSERT INTO entities
          (kind, display_name, canonical_id, workspace_id, user_id, created_by_user_id, source, sensitivity, compartments)
-       VALUES ('company', $1, $2, $3, $4, $4, $7, $5, $6)
+       VALUES ('company', $1, $2, $3, $4, $4, 'user', $5, $6)
        RETURNING id`,
-      [params.name, params.domain ?? null, params.workspaceId, userId, params.sensitivity ?? 'internal', params.compartments ?? [], params.source ?? 'user'],
+      [params.name, params.domain ?? null, params.workspaceId, userId, params.sensitivity ?? 'internal', params.compartments ?? []],
     )
     const entityId = entityResult.rows[0].id
 
@@ -164,8 +156,8 @@ export async function createCompany(
     // Migration 128 added the column; the entity write already carries
     // it, but the companies row was previously landing with NULL.
     const result = await client.query<CompanyRow>(
-      `INSERT INTO companies (workspace_id, name, domain, tags, external_ref, entity_id, created_by_user_id, sensitivity, compartments, source)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO companies (workspace_id, name, domain, tags, external_ref, entity_id, created_by_user_id, sensitivity, compartments)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING ${COMPANY_FULL_SELECT}`,
       [
         params.workspaceId,
@@ -177,7 +169,6 @@ export async function createCompany(
         userId,
         params.sensitivity ?? 'internal',
         params.compartments ?? [],
-        params.source ?? 'user',
       ],
     )
 
@@ -494,8 +485,6 @@ export async function createContact(
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) for the fresh entity + contact pair. Default '{}'. */
     compartments?: string[]
-    /** See createCompany — fresh-insert source; default 'user'; synthesis passes 'extracted'. */
-    source?: 'user' | 'extracted'
   },
   entityLinks?: EntityLinksStore,
 ): Promise<ContactRecord> {
@@ -554,9 +543,9 @@ export async function createContact(
     const entityResult = await client.query<{ id: string }>(
       `INSERT INTO entities
          (kind, display_name, canonical_id, workspace_id, user_id, created_by_user_id, source, sensitivity, compartments)
-       VALUES ('person', $1, $2, $3, $4, $4, $7, $5, $6)
+       VALUES ('person', $1, $2, $3, $4, $4, 'user', $5, $6)
        RETURNING id`,
-      [params.name, params.email ?? null, params.workspaceId, userId, params.sensitivity ?? 'internal', params.compartments ?? [], params.source ?? 'user'],
+      [params.name, params.email ?? null, params.workspaceId, userId, params.sensitivity ?? 'internal', params.compartments ?? []],
     )
     const entityId = entityResult.rows[0].id
     contactEntityId = entityId
@@ -564,8 +553,8 @@ export async function createContact(
     // WU-4.5 — stamp `created_by_user_id` on the contacts row; see
     // createCompany for the matching note.
     const result = await client.query<ContactRow>(
-      `INSERT INTO contacts (workspace_id, name, email, phone, company_id, tags, external_ref, entity_id, created_by_user_id, sensitivity, compartments, source)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO contacts (workspace_id, name, email, phone, company_id, tags, external_ref, entity_id, created_by_user_id, sensitivity, compartments)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING ${CONTACT_FULL_SELECT}`,
       [
         params.workspaceId,
@@ -579,7 +568,6 @@ export async function createContact(
         userId,
         params.sensitivity ?? 'internal',
         params.compartments ?? [],
-        params.source ?? 'user',
       ],
     )
 
@@ -946,8 +934,6 @@ export async function createDeal(
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) for the fresh entity + deal pair. Default '{}'. */
     compartments?: string[]
-    /** See createCompany — fresh-insert source; default 'user'; synthesis passes 'extracted'. */
-    source?: 'user' | 'extracted'
   },
   entityLinks?: EntityLinksStore,
 ): Promise<DealRecord> {
@@ -978,9 +964,9 @@ export async function createDeal(
     const entityResult = await client.query<{ id: string }>(
       `INSERT INTO entities
          (kind, display_name, workspace_id, user_id, created_by_user_id, source, sensitivity, compartments)
-       VALUES ('deal', $1, $2, $3, $3, $6, $4, $5)
+       VALUES ('deal', $1, $2, $3, $3, 'user', $4, $5)
        RETURNING id`,
-      [displayName, params.workspaceId, userId, params.sensitivity ?? 'internal', params.compartments ?? [], params.source ?? 'user'],
+      [displayName, params.workspaceId, userId, params.sensitivity ?? 'internal', params.compartments ?? []],
     )
     const entityId = entityResult.rows[0].id
     dealEntityId = entityId
@@ -988,8 +974,8 @@ export async function createDeal(
     // WU-4.5 — stamp `created_by_user_id` on the deals row; see
     // createCompany for the matching note.
     const result = await client.query<DealRow>(
-      `INSERT INTO deals (workspace_id, contact_id, company_id, stage, amount, close_date, external_ref, entity_id, created_by_user_id, sensitivity, compartments, source)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO deals (workspace_id, contact_id, company_id, stage, amount, close_date, external_ref, entity_id, created_by_user_id, sensitivity, compartments)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING ${DEAL_FULL_SELECT}`,
       [
         params.workspaceId,
@@ -1003,7 +989,6 @@ export async function createDeal(
         userId,
         params.sensitivity ?? 'internal',
         params.compartments ?? [],
-        params.source ?? 'user',
       ],
     )
 

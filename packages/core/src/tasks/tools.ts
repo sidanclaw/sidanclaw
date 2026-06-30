@@ -54,13 +54,6 @@ export type TaskToolOptions = {
    * inject at API boot. Tasks link as `sourceKind: 'task'` to entities.
    */
   entityLinks?: EntityLinksStore
-  /**
-   * `source` stamped on tasks this tool creates. Default behavior (absent)
-   * is unchanged — the store writes its default `'user'`. The structural-
-   * synthesis engine builds these tools with `writeSource: 'extracted'` so
-   * synthesis-captured tasks surface in Brain Reviews (`?includeExtracted=true`).
-   */
-  writeSource?: 'user' | 'extracted'
 }
 
 const STATUS_VALUES = [...TASK_STATUSES] as [TaskRecordStatus, ...TaskRecordStatus[]]
@@ -208,7 +201,6 @@ export function createTaskTools(
             context.compartmentAccumulator?.compartments,
             context.assistantDefaultCompartments,
           ),
-          source: opts?.writeSource,
           dependsOn: input.depends_on,
         })
         opts?.onEvent?.({ type: 'task_created', taskId: task.id }, eventCtx(context))

@@ -27,6 +27,7 @@ export type RecordingResult = {
   utteranceCount: number;
   segmentsInserted: number;
   truncated: boolean;
+  salesCall: { isSalesCall: boolean; score: number };
   surchargeCredits: number;
   surcharged: boolean;
 };
@@ -94,22 +95,9 @@ export async function estimateRecording(recordingId: string): Promise<RecordingE
   return res.json();
 }
 
-/**
- * Transcribe + segment + ingest + charge-on-success. `blueprintSlug` (optional)
- * selects the synthesis blueprint the engine fills from the transcript (a
- * workspace blueprint template id) to author a brief page. Omit it (the default)
- * and the recording is ingested into the brain only, with no page.
- * See structural-synthesis.md -> "The first source".
- */
-export async function processRecording(
-  recordingId: string,
-  blueprintSlug?: string,
-): Promise<RecordingResult> {
-  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/process`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(blueprintSlug ? { blueprintSlug } : {}),
-  });
+/** Transcribe + segment + ingest + charge-on-success. */
+export async function processRecording(recordingId: string): Promise<RecordingResult> {
+  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/process`, { method: "POST" });
   if (!res.ok) throw await asError(res, "Transcription failed");
   return res.json();
 }

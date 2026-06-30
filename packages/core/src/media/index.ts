@@ -10,3 +10,4 @@ export {
   type RecordingTranscriptionResult,
   type TranscribeRecordingOptions,
 } from './transcribe-recording.js'
+export { detectSalesCall, type SalesCallDetection } from './detect-sales-call.js'

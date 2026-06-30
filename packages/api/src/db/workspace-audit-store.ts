@@ -23,8 +23,6 @@ export type WorkspaceAuditEventType =
   | 'workspace.renamed'
   | 'workspace.purpose_updated'
   | 'workspace.icon_changed'
-  // Default recording blueprint set/cleared (migration 291)
-  | 'workspace.settings_changed'
   | 'member.added'
   | 'member.removed'
   | 'member.role_changed'

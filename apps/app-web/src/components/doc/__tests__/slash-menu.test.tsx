@@ -38,11 +38,11 @@ const dict = en as unknown as Dictionary;
 // ── Catalogue ──────────────────────────────────────────────────────────
 
 describe("[COMP:app-web/slash-menu] Catalogue", () => {
-  it("ships 26 items total (Notion-identical catalogue + simple Table + Diagram + Template + Extraction slot)", () => {
-    expect(SLASH_MENU_ITEMS).toHaveLength(26);
+  it("ships 25 items total (Notion-identical catalogue + simple Table + Diagram + Template)", () => {
+    expect(SLASH_MENU_ITEMS).toHaveLength(25);
   });
 
-  it("groups items into Basic / Media / Database (17 / 5 / 4)", () => {
+  it("groups items into Basic / Media / Database (17 / 5 / 3)", () => {
     const byCategory = SLASH_MENU_ITEMS.reduce<Record<SlashMenuCategory, number>>(
       (acc, item) => {
         acc[item.category] = (acc[item.category] ?? 0) + 1;
@@ -52,11 +52,10 @@ describe("[COMP:app-web/slash-menu] Catalogue", () => {
     );
 
     // Basic gains the native simple Table + the Template gallery item; Database
-    // holds 4 (Table view = the bound `data` block, Chart, Diagram, Extraction
-    // slot = the blueprint "/extract" authoring directive).
+    // keeps 3 (Table view = the bound `data` block, Chart, Diagram).
     expect(byCategory.basic).toBe(17);
     expect(byCategory.media).toBe(5);
-    expect(byCategory.database).toBe(4);
+    expect(byCategory.database).toBe(3);
     // Embeds is intentionally empty in v1; Phase 4 populates it.
     expect(byCategory.embed).toBe(0);
   });

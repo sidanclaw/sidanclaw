@@ -155,17 +155,6 @@ const assistantCallStepSchema = z.object({
   modelAlias: z.enum(['standard', 'pro', 'max']).optional(),
   researchMode: z.boolean().optional(),
   maxTurns: z.number().int().min(1).max(60).nullable().optional(),
-  /**
-   * Optional blueprint to FILL on a research step (structural-synthesis P4). When
-   * set together with a page anchor on a `researchMode`/`deep` step, the executor
-   * runs the research fan-out as the gather, then fills this blueprint into the
-   * anchored page via `synthesizeFromSource` (the structured authoring half)
-   * instead of free-form authoring. The value is a blueprint slug: a built-in
-   * skill id, a workspace skill slug, or a page-template id. Absent → the step
-   * authors freely. See docs/architecture/brain/structural-synthesis.md →
-   * "The three fill modes" (Research).
-   */
-  blueprintId: z.string().min(1).max(128).optional(),
 })
 
 // ── tool_call ───────────────────────────────────────────────────────────
@@ -369,8 +358,6 @@ export const STEP_TYPE_VALUES = WORKFLOW_STEP_TYPES
  * - `webhook` — the receiver at `/api/workflow-webhooks/:slug` is enabled
  *   for this workflow. The slug + HMAC secret live in dedicated columns
  *   (`webhook_slug`, `webhook_secret`) so they can be rotated independently.
- *   An optional `match.condition` (JSONLogic over the parsed payload) lets the
- *   receiver fire on only specific events and ACK the rest with 200.
  * - `event` — fired when an event arrives on any subscribed source whose
  *   optional `match` filter passes. Sources are connector instances and/or
  *   channel integrations — both first-class. `createWorkflowEventDispatcher`
@@ -462,22 +449,7 @@ export const WorkflowTriggerSchema = z.discriminatedUnion('kind', [
       )
       .optional(),
   }),
-  z.object({
-    kind: z.literal('webhook'),
-    /**
-     * Optional server-side event filter. When present, the receiver
-     * (`/api/workflow-webhooks/:slug`) evaluates `match.condition` — the same
-     * vendored JSONLogic the `branch` step uses (`condition.ts`) — against
-     * `{ input: <parsed payload> }`. A falsy result ACKs 200 WITHOUT starting a
-     * run (the delivery is acknowledged, just not acted on); a truthy or absent
-     * filter fires the workflow. Lets one webhook slug react to only specific
-     * events (e.g. `{ "==": [{ "var": "input.type" }, "deal.won"] }`) without a
-     * leading `branch` step. Mirrors the `event` trigger's `match`, but
-     * JSONLogic-shaped because a webhook payload is arbitrary JSON rather than a
-     * normalized event.
-     */
-    match: z.object({ condition: jsonLogicSchema }).strict().optional(),
-  }),
+  z.object({ kind: z.literal('webhook') }),
   z.object({
     kind: z.literal('event'),
     event: z.object({

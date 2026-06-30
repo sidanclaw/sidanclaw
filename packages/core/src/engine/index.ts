@@ -29,9 +29,3 @@ export {
   KEEP_RECENT_DOC_RESULTS,
   ELIDED_DOC_RESULT_PLACEHOLDER,
 } from './doc-history.js'
-export type {
-  EngineHooks,
-  ToolUseHookContext,
-  PreToolUseDirective,
-  PostToolUseHookContext,
-} from './hooks.js'

@@ -230,7 +230,6 @@ export async function findOrCreateUser(params: {
          (assistant_id, capability, granted_by_user_id, reason)
        VALUES ($1, 'tasks', $2, '§17 default-on at primary creation'),
               ($1, 'crm',   $2, '§17 default-on at primary creation'),
-              ($1, 'goals', $2, 'goals default-on at primary creation'),
               ($1, 'views', $2, 'doc-skill parity — default-on at primary creation'),
               ($1, 'files', $2, 'doc-skill parity — default-on at primary creation')`,
       [assistant.rows[0].id, user.id],

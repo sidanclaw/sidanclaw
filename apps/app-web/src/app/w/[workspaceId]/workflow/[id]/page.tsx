@@ -44,12 +44,7 @@ import {
   type WorkflowTrigger,
 } from "@/lib/api/workflow";
 import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
-import {
-  listCustomPageTemplates,
-  listViews,
-  type ViewListRow,
-} from "@/lib/api/views";
-import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import { listViews, type ViewListRow } from "@/lib/api/views";
 import { WorkflowBoard } from "@/components/workflow/workflow-board";
 import { StepEditor } from "@/components/workflow/step-editor";
 import { TriggerEditor } from "@/components/workflow/trigger-editor";
@@ -73,7 +68,6 @@ export default function WorkflowDetailPage({
   const [assistants, setAssistants] = useState<StudioAssistantSummary[]>([]);
   const [destinations, setDestinations] = useState<ChannelDestination[]>([]);
   const [pages, setPages] = useState<ViewListRow[]>([]);
-  const [blueprints, setBlueprints] = useState<CustomPageTemplateSummary[]>([]);
   const [runs, setRuns] = useState<WorkflowRunSummary[] | null>(null);
   const [editing, setEditing] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -142,26 +136,6 @@ export default function WorkflowDetailPage({
       } catch {
         // Roster is a UX nicety — the picker degrades to raw ids.
         if (!cancelled) setPages([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [activeId]);
-
-  // Load the workspace blueprints once — backs the per-step blueprint picker
-  // (a built-in slug or a workspace blueprint template id). The list API
-  // returns every page template; the picker filters to those with a spec.
-  useEffect(() => {
-    if (!activeId) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const list = await listCustomPageTemplates(activeId);
-        if (!cancelled) setBlueprints(list);
-      } catch {
-        // The picker degrades to just the built-ins — non-fatal.
-        if (!cancelled) setBlueprints([]);
       }
     })();
     return () => {
@@ -636,7 +610,6 @@ export default function WorkflowDetailPage({
                 assistants={assistants}
                 destinations={destinations}
                 pages={pages}
-                blueprints={blueprints}
                 steps={draft.definition.steps}
                 onChange={(next) => updateStep(selectedStepIdx, next)}
                 onMoveUp={() => moveStep(selectedStepIdx, -1)}

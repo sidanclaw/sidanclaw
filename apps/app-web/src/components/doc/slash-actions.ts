@@ -19,7 +19,6 @@ export type EmbedKind =
   | 'data'
   | 'chart'
   | 'diagram'
-  | 'extraction_slot'
 
 export type SlashAction =
   | { command: 'setParagraph' }
@@ -63,7 +62,6 @@ export const ALL_SLASH_KINDS: readonly SlashMenuBlockKind[] = [
   'data',
   'chart',
   'diagram',
-  'extraction_slot',
   'child_page',
   'link_to_page',
   'template',
@@ -101,7 +99,6 @@ export function slashActionFor(kind: SlashMenuBlockKind): SlashAction {
     case 'data':
     case 'chart':
     case 'diagram':
-    case 'extraction_slot':
       return { command: 'insertEmbed', block: kind }
     case 'child_page':
       return { command: 'createChildPage' }

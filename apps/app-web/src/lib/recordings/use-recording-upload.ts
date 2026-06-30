@@ -28,7 +28,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
   const [result, setResult] = useState<RecordingResult | null>(null);
 
   const run = useCallback(
-    async (file: File, blueprintSlug?: string) => {
+    async (file: File) => {
       setResult(null);
       setMessage("");
       try {
@@ -54,10 +54,16 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         }
 
         setStatus("processing");
-        const res = await processRecording(recordingId, blueprintSlug);
+        const res = await processRecording(recordingId);
         setResult(res);
         setStatus("done");
-        setMessage(res.truncated ? t.recordings.partialDone : t.recordings.done);
+        setMessage(
+          res.truncated
+            ? t.recordings.partialDone
+            : res.salesCall.isSalesCall
+              ? t.recordings.salesDetected
+              : t.recordings.done,
+        );
       } catch (e) {
         setStatus("error");
         const code = e instanceof RecordingApiError ? e.code : undefined;
