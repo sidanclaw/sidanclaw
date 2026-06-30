@@ -107,6 +107,7 @@ function fakeSavedViewStore(): SavedViewStore {
     setAutoTitle: vi.fn(),
     createDraft: vi.fn(),
     findIdByAnchorKey: vi.fn().mockResolvedValue(null),
+    commitCreatedEvent: vi.fn().mockResolvedValue(true),
     reparent: vi.fn().mockResolvedValue(true),
     reorderSiblings: vi.fn().mockResolvedValue(undefined),
     pruneExpiredDraftsSystem: vi.fn().mockResolvedValue([]),

@@ -58,6 +58,7 @@ const FULL_SELECT = `
   brain_sync_enabled   AS "brainSyncEnabled",
   brain_last_ingest_hash AS "brainLastIngestHash",
   brain_last_ingest_at AS "brainLastIngestAt",
+  created_event_pending AS "createdEventPending",
   created_at     AS "createdAt",
   updated_at     AS "updatedAt"
 `
@@ -99,6 +100,7 @@ type FullRow = {
   brainSyncEnabled: boolean
   brainLastIngestHash: string | null
   brainLastIngestAt: Date | null
+  createdEventPending: boolean
   createdAt: Date
   updatedAt: Date
 }
@@ -141,6 +143,7 @@ function rowToFull(row: FullRow): SavedView {
     brainSyncEnabled: row.brainSyncEnabled,
     brainLastIngestHash: row.brainLastIngestHash,
     brainLastIngestAt: row.brainLastIngestAt,
+    createdEventPending: row.createdEventPending,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -468,7 +471,7 @@ export function createDbSavedViewStore(
       return result.rows.length > 0
     },
 
-    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy }) {
+    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy, deferCreatedEvent }) {
       const days = autoPruneDays ?? DEFAULT_DRAFT_TTL_DAYS
       const autoPruneAt = addDays(new Date(), days)
       // Snapshot the genesis prompt (migration 231). Trim + cap so a pasted
@@ -497,12 +500,16 @@ export function createDbSavedViewStore(
         // row-uniqueness only — it does NOT make this find-or-create atomic;
         // the boot `createAnchorPage` adapter converges on a 23505 race by
         // re-reading the winner. See findIdByAnchorKey below.
+        // `created_event_pending` ($14) defers the `created` page-event for
+        // interactive drafts (migration 283): true → the `created` emit below
+        // is skipped and the client fires it later via `commitCreatedEvent`.
+        // Programmatic creates pass false (default) and emit immediately.
         `INSERT INTO saved_views
-           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key)
+           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key, created_event_pending)
          VALUES ($1, $2, $3, $4, NULL, $10, $5, $6, $7, $8, 'draft', $9,
            (SELECT COALESCE(MAX(position) + 1, 0) FROM saved_views
               WHERE nest_parent_id IS NOT DISTINCT FROM $9 AND workspace_id = $1),
-           $11, $12, $13)
+           $11, $12, $13, $14)
          RETURNING ${FULL_SELECT}`,
         [
           workspaceId,
@@ -518,9 +525,46 @@ export function createDbSavedViewStore(
           originPromptValue,
           autoPruneAt,
           anchorKey ?? null,
+          deferCreatedEvent === true,
         ],
       )
       const view = rowToFull(result.rows[0])
+      // Deferred (interactive) drafts hold their `created` event until the
+      // client commits it (debounced typing / navigate-away) via
+      // `commitCreatedEvent`; every other create fires it now.
+      if (!deferCreatedEvent) {
+        emitLifecycle({
+          workspaceId: view.workspaceId,
+          pageId: view.id,
+          parentId: view.nestParentId ?? null,
+          title: view.name,
+          actorId: userId,
+          action: 'created',
+          isSystem: writtenBy === 'system',
+        })
+      }
+      return view
+    },
+
+    async commitCreatedEvent(userId, id) {
+      // Atomic single-fire: only the call that flips `created_event_pending`
+      // from true → false emits. Concurrent commits (typing debounce vs the
+      // navigate-away flush, a double-click, a reload re-arming) see 0 rows and
+      // no-op, so the workflow fires exactly once. RLS-scoped by `userId`.
+      const result = await queryWithRLS<FullRow>(
+        userId,
+        `UPDATE saved_views
+            SET created_event_pending = false
+          WHERE id = $1 AND created_event_pending = true
+          RETURNING ${FULL_SELECT}`,
+        [id],
+      )
+      const row = result.rows[0]
+      if (!row) return false
+      const view = rowToFull(row)
+      // A human committing through the doc editor — always a `user` write (the
+      // deferral path is interactive-only), so it fires for a default
+      // `fromBots: false` subscription.
       emitLifecycle({
         workspaceId: view.workspaceId,
         pageId: view.id,
@@ -528,9 +572,9 @@ export function createDbSavedViewStore(
         title: view.name,
         actorId: userId,
         action: 'created',
-        isSystem: writtenBy === 'system',
+        isSystem: false,
       })
-      return view
+      return true
     },
 
     async findIdByAnchorKey(userId, workspaceId, anchorKey) {
