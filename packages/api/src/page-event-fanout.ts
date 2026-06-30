@@ -1,13 +1,17 @@
 /**
  * Late-bound page-lifecycle → workflow-event seam.
  *
- * The saved-views store is built inside `bootOpenApi` (open), but the shared
- * `WorkflowEventDispatcher` is constructed *after* that — by the closed app
- * (`apps/api/src/index.ts`) once the run store + executor deps exist. This
- * module bridges the ordering: the store publishes every page create / update
- * / move here, and whoever owns the dispatcher binds it once via
- * `setPageEventDispatcher`. Until then (and in open builds that never build a
- * dispatcher) `publishPageLifecycle` is a no-op.
+ * The saved-views store is built early inside `bootOpenApi` (open), but the
+ * shared `WorkflowEventDispatcher` is constructed *later* in the same boot —
+ * once the run store + executor deps exist. This module bridges the ordering:
+ * the store publishes every page create / update / move here, and `bootOpenApi`
+ * binds the dispatcher once via `setPageEventDispatcher`. Until then (or if a
+ * build never binds one) `publishPageLifecycle` is a no-op.
+ *
+ * The bind lives in `bootOpenApi` — not the closed app boot — so BOTH editions
+ * get page-event triggers: the OSS standalone entry (`@sidanclaw/api-open`) and
+ * the closed platform app (`@sidanclaw/api-server`), which reuses the same
+ * dispatcher off the `BootContext`.
  *
  * Same shape as `page-share-fanout.ts` — a module-local holder the boot path
  * wires, keeping the store free of a construction-time dispatcher dependency.
@@ -28,7 +32,7 @@ let sink: ((event: PageLifecycleEvent) => Promise<void>) | null = null
 
 /**
  * Bind (or unbind, with `null`) the workflow event dispatcher the page write
- * path feeds. Idempotent — the last writer wins. Called once at app boot,
+ * path feeds. Idempotent — the last writer wins. Called once by `bootOpenApi`
  * after the dispatcher is constructed.
  */
 export function setPageEventDispatcher(
