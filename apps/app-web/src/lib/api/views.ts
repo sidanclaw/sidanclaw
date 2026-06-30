@@ -477,6 +477,14 @@ export type ViewMetadata = {
    * `setViewBrainSync`. Default false.
    */
   brainSyncEnabled: boolean;
+  /**
+   * True while an interactively-created draft (the doc-editor blank /
+   * from-template flows) still owes its deferred `created` page-event-trigger
+   * (migration 283). The shell arms the commit watcher when this is set:
+   * debounced typing, or a flush on navigating away, fires the event once via
+   * `commitPageCreatedEvent`. Always false for committed / programmatic pages.
+   */
+  createdEventPending: boolean;
   page: Page | null;
   createdAt: string;
   updatedAt: string;
@@ -909,6 +917,25 @@ export async function createDraft(params: {
     },
   );
   return json<ViewMetadata>(res);
+}
+
+/**
+ * Fire the deferred `created` page-event for an interactively-created draft
+ * (migration 283). Safe to call more than once — the server flips the pending
+ * flag atomically, so the typing-debounce call and the navigate-away flush
+ * together fire the workflow exactly once. Returns whether THIS call won the
+ * flip (`committed`). Best-effort at the call sites: a failure must never block
+ * a page edit or navigation.
+ */
+export async function commitPageCreatedEvent(
+  viewId: string,
+): Promise<{ committed: boolean }> {
+  const res = await authFetch(`${API_URL}/api/views/${viewId}/commit-created`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  return json<{ committed: boolean }>(res);
 }
 
 // ── Reparent / reorder ────────────────────────────────────────────────

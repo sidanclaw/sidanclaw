@@ -168,6 +168,13 @@ export type CollabPageEditorProps = {
   seedTemplate?: { kind: "builtin" | "custom"; id: string } | null;
   /** Fired once the `seedTemplate` blocks have been inserted (or skipped). */
   onTemplateSeeded?: () => void;
+  /**
+   * Fired on every document edit (Tiptap `update`). The shell uses it to drive
+   * the deferred `created` page-event commit (migration 283): debounced typing
+   * fires the event for a freshly-created draft. Cheap + high-frequency — the
+   * handler must debounce.
+   */
+  onContentChange?: () => void;
 };
 
 export function CollabPageEditor({
@@ -183,6 +190,7 @@ export function CollabPageEditor({
   onNewTemplate,
   seedTemplate,
   onTemplateSeeded,
+  onContentChange,
 }: CollabPageEditorProps) {
   const { doc, provider, synced } = collab;
   if (!doc || !provider) {
@@ -209,6 +217,7 @@ export function CollabPageEditor({
       onNewTemplate={onNewTemplate}
       seedTemplate={seedTemplate}
       onTemplateSeeded={onTemplateSeeded}
+      onContentChange={onContentChange}
     />
   );
 }
@@ -228,6 +237,7 @@ function CollabEditorInner({
   onNewTemplate,
   seedTemplate,
   onTemplateSeeded,
+  onContentChange,
 }: {
   doc: Y.Doc;
   provider: HocuspocusProvider;
@@ -243,6 +253,7 @@ function CollabEditorInner({
   onNewTemplate?: () => void;
   seedTemplate?: { kind: "builtin" | "custom"; id: string } | null;
   onTemplateSeeded?: () => void;
+  onContentChange?: () => void;
 }) {
   const t = useT().docPage;
   const ws = useWorkspaceContext();
@@ -688,6 +699,21 @@ function CollabEditorInner({
     insertCustomTemplate,
     onTemplateSeeded,
   ]);
+
+  // Forward document edits to the shell (drives the deferred `created`
+  // page-event commit — migration 283). Subscribed via a ref-backed handler so
+  // the listener is installed once per editor, not rebuilt when the callback
+  // identity changes.
+  const onContentChangeRef = useRef(onContentChange);
+  onContentChangeRef.current = onContentChange;
+  useEffect(() => {
+    if (!editor) return;
+    const handler = () => onContentChangeRef.current?.();
+    editor.on("update", handler);
+    return () => {
+      editor.off("update", handler);
+    };
+  }, [editor]);
 
   // Inline "Space for AI": push the active generating-block into the widget
   // decoration plugin (a meta-only transaction — never syncs to Yjs). Set on
