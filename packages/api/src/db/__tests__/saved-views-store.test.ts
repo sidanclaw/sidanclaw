@@ -118,10 +118,12 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
     const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
     expect(sql).toContain("'draft'")
     expect(params[0]).toBe(WORKSPACE_ID)
-    // auto_prune_at is now the second-to-last param ($12); anchor_key ($13,
-    // null on this non-workflow path) is the trailing one (mig 279).
-    expect(params[params.length - 1]).toBeNull()
-    const when = params[params.length - 2] as Date
+    // Trailing params (mig 279 + 283): auto_prune_at ($12), anchor_key ($13,
+    // null on this non-workflow path), created_event_pending ($14, false on
+    // this direct store call — only the interactive /views/draft route defers).
+    expect(params[params.length - 1]).toBe(false)
+    expect(params[params.length - 2]).toBeNull()
+    const when = params[params.length - 3] as Date
     expect(when.getTime() - now.getTime()).toBe(30 * 24 * 60 * 60 * 1000)
     vi.useRealTimers()
   })
@@ -158,8 +160,8 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
       autoPruneDays: 1,
     })
     const [, , params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    // anchor_key ($13) is the trailing param now; auto_prune_at is $12.
-    const when = params[params.length - 2] as Date
+    // Trailing params: auto_prune_at ($12), anchor_key ($13), created_event_pending ($14).
+    const when = params[params.length - 3] as Date
     expect(when.getTime() - now.getTime()).toBe(24 * 60 * 60 * 1000)
     vi.useRealTimers()
   })
@@ -184,7 +186,8 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
     })
     const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
     expect(sql).toContain('anchor_key')
-    expect(params[params.length - 1]).toBe('wf-1:s1')
+    // anchor_key is $13 — now second-to-last, ahead of created_event_pending ($14).
+    expect(params[params.length - 2]).toBe('wf-1:s1')
   })
 
   it('findIdByAnchorKey resolves a page id by (workspace, anchor_key), RLS-scoped (mig 279)', async () => {
@@ -405,5 +408,120 @@ describe('[COMP:api/saved-views-store] list filters', () => {
     await store.list({ userId: USER_ID, workspaceId: WORKSPACE_ID, state: 'draft' })
     const [, , params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
     expect(params).toContain('draft')
+  })
+})
+
+describe('[COMP:api/saved-views-store] page-lifecycle emit (writtenBy → isSystem)', () => {
+  const ROW = {
+    id: VIEW_ID,
+    workspaceId: WORKSPACE_ID,
+    createdBy: USER_ID,
+    name: 'Spec',
+    nameOrigin: 'user',
+    description: null,
+    icon: null,
+    entity: 'tasks',
+    viewType: 'table',
+    binding: { entity: 'tasks', viewType: 'table' },
+    page: { blocks: [] },
+    state: 'draft',
+    nestParentId: null,
+    position: 0,
+    autoPruneAt: new Date('2026-06-25T00:00:00Z'),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }
+
+  const draftArgs = {
+    userId: USER_ID,
+    workspaceId: WORKSPACE_ID,
+    name: 'Spec',
+    entity: 'tasks' as const,
+    viewType: 'table' as const,
+    binding: { entity: 'tasks' as const, viewType: 'table' as const },
+    page: { blocks: [] },
+  }
+
+  it('defaults to a human write (isSystem=false) when writtenBy is omitted', async () => {
+    const onPageLifecycle = vi.fn()
+    const s = createDbSavedViewStore({ onPageLifecycle })
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [ROW], rowCount: 1 } as never)
+    await s.createDraft(draftArgs)
+    expect(onPageLifecycle).toHaveBeenCalledTimes(1)
+    expect(onPageLifecycle.mock.calls[0][0]).toMatchObject({
+      action: 'created',
+      isSystem: false,
+    })
+  })
+
+  it("marks isSystem=true when writtenBy: 'system' (the page self-loop guard)", async () => {
+    const onPageLifecycle = vi.fn()
+    const s = createDbSavedViewStore({ onPageLifecycle })
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [ROW], rowCount: 1 } as never)
+    await s.createDraft({ ...draftArgs, writtenBy: 'system' })
+    expect(onPageLifecycle.mock.calls[0][0]).toMatchObject({
+      action: 'created',
+      isSystem: true,
+    })
+  })
+
+  it("update threads writtenBy: 'system' to the emitted event", async () => {
+    const onPageLifecycle = vi.fn()
+    const s = createDbSavedViewStore({ onPageLifecycle })
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [ROW], rowCount: 1 } as never)
+    await s.update(USER_ID, VIEW_ID, { name: 'Renamed' }, 'system')
+    expect(onPageLifecycle.mock.calls[0][0]).toMatchObject({
+      action: 'updated',
+      isSystem: true,
+    })
+  })
+
+  // ── Deferred `created` (interactive drafts) — migration 283 ──────────
+
+  it('deferCreatedEvent skips the immediate emit and marks the row pending', async () => {
+    const onPageLifecycle = vi.fn()
+    const s = createDbSavedViewStore({ onPageLifecycle })
+    mockQueryWithRLS.mockResolvedValueOnce({
+      rows: [{ ...ROW, createdEventPending: true }],
+      rowCount: 1,
+    } as never)
+    await s.createDraft({ ...draftArgs, deferCreatedEvent: true })
+    // No `created` fires at creation — the client commits it later.
+    expect(onPageLifecycle).not.toHaveBeenCalled()
+    // The defer flag rides the trailing INSERT param ($14 = true).
+    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    expect(sql).toContain('created_event_pending')
+    expect(params[params.length - 1]).toBe(true)
+  })
+
+  it('commitCreatedEvent emits `created` once when it wins the flip', async () => {
+    const onPageLifecycle = vi.fn()
+    const s = createDbSavedViewStore({ onPageLifecycle })
+    mockQueryWithRLS.mockResolvedValueOnce({
+      rows: [{ ...ROW, nestParentId: 'parent-1' }],
+      rowCount: 1,
+    } as never)
+    const fired = await s.commitCreatedEvent(USER_ID, VIEW_ID)
+    expect(fired).toBe(true)
+    // Guarded UPDATE: only flips a still-pending row.
+    const [, sql] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    expect(sql).toContain('created_event_pending = false')
+    expect(sql).toContain('created_event_pending = true')
+    expect(onPageLifecycle).toHaveBeenCalledTimes(1)
+    expect(onPageLifecycle.mock.calls[0][0]).toMatchObject({
+      action: 'created',
+      parentId: 'parent-1',
+      // Interactive-only path → always a human write, fires default subscriptions.
+      isSystem: false,
+    })
+  })
+
+  it('commitCreatedEvent is a no-op when the row is already committed / hidden', async () => {
+    const onPageLifecycle = vi.fn()
+    const s = createDbSavedViewStore({ onPageLifecycle })
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    const fired = await s.commitCreatedEvent(USER_ID, VIEW_ID)
+    expect(fired).toBe(false)
+    expect(onPageLifecycle).not.toHaveBeenCalled()
   })
 })

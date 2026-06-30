@@ -33,6 +33,7 @@ const runStore = {
   createRun: vi.fn(),
   listStepRuns: vi.fn(),
   listRunsForWorkflow: vi.fn(),
+  listRunsForPage: vi.fn(),
   getRunById: vi.fn(),
 }
 const workspaceStore = { getRole: vi.fn() }
@@ -221,5 +222,56 @@ describe('[COMP:api/workflows-route] schedule trigger → backing scheduled_jobs
     const res = await request(app('u-1', { jobStore, resolvePrimary })).delete('/api/workflows/wf-1')
     expect(res.status).toBe(204)
     expect(jobStore.delete).toHaveBeenCalledWith('job-1')
+  })
+})
+
+describe('[COMP:api/workflows-route] GET /pages/:pageId/workflow-runs', () => {
+  const PAGE = '22222222-2222-2222-2222-222222222222'
+
+  it('rejects an unauthenticated request with 401', async () => {
+    expect(
+      (await request(app()).get(`/api/pages/${PAGE}/workflow-runs`)).status,
+    ).toBe(401)
+  })
+
+  it('rejects a non-uuid pageId with 400', async () => {
+    const res = await request(app('u-1')).get('/api/pages/not-a-uuid/workflow-runs')
+    expect(res.status).toBe(400)
+    expect(runStore.listRunsForPage).not.toHaveBeenCalled()
+  })
+
+  it('returns the lightweight run shape for a member', async () => {
+    runStore.listRunsForPage.mockResolvedValueOnce([
+      {
+        runId: 'run-1',
+        workflowId: 'wf-1',
+        workflowName: 'Triage inbox',
+        status: 'completed',
+        startedAt: new Date('2026-06-29T00:00:00Z'),
+        finishedAt: new Date('2026-06-29T00:01:00Z'),
+        outcomeSummary: 'Filed under Q3.',
+      },
+    ])
+
+    const res = await request(app('u-1')).get(`/api/pages/${PAGE}/workflow-runs`)
+    expect(res.status).toBe(200)
+    expect(runStore.listRunsForPage).toHaveBeenCalledWith('u-1', PAGE, { limit: 20 })
+    expect(res.body.runs).toEqual([
+      {
+        runId: 'run-1',
+        workflowId: 'wf-1',
+        workflowName: 'Triage inbox',
+        status: 'completed',
+        startedAt: '2026-06-29T00:00:00.000Z',
+        finishedAt: '2026-06-29T00:01:00.000Z',
+        outcomeSummary: 'Filed under Q3.',
+      },
+    ])
+  })
+
+  it('passes a clamped limit through to the store', async () => {
+    runStore.listRunsForPage.mockResolvedValueOnce([])
+    await request(app('u-1')).get(`/api/pages/${PAGE}/workflow-runs?limit=999`)
+    expect(runStore.listRunsForPage).toHaveBeenCalledWith('u-1', PAGE, { limit: 100 })
   })
 })

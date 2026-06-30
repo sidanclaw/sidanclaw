@@ -53,10 +53,23 @@ export type OAuthCredentials = {
  * `credentials_type` column; the runtime always switches on the decrypted
  * blob's `type`, never the column.
  */
+/**
+ * A customer GCS service-account key, kept opaque on purpose: only
+ * `client_email` is named (for display); the signing secret rides along in
+ * the rest of the object and is never destructured or logged. The whole
+ * object is handed straight to the GCS client.
+ */
+export type GcsCredentialKey = {
+  client_email: string
+  project_id?: string
+  [k: string]: unknown
+}
+
 export type ConnectorCredentials =
   | { type: 'oauth'; client_id: string; client_secret: string }
   | { type: 'bearer'; token: string }
   | { type: 'custom_header'; header: string; value: string }
+  | { type: 'gcs'; serviceAccountKey: GcsCredentialKey; bucket: string; projectId?: string }
   | { type: 'none' }
 
 /** Normalize a decrypted credentials blob into the typed union. */
@@ -71,6 +84,23 @@ export function normalizeStoredCredentials(raw: unknown): ConnectorCredentials |
       return typeof obj.header === 'string' && typeof obj.value === 'string'
         ? { type: 'custom_header', header: obj.header, value: obj.value }
         : null
+    case 'gcs': {
+      const key = obj.serviceAccountKey
+      const bucket = obj.bucket
+      if (
+        key && typeof key === 'object' &&
+        typeof (key as Record<string, unknown>).client_email === 'string' &&
+        typeof bucket === 'string'
+      ) {
+        return {
+          type: 'gcs',
+          serviceAccountKey: key as GcsCredentialKey,
+          bucket,
+          ...(typeof obj.projectId === 'string' ? { projectId: obj.projectId } : {}),
+        }
+      }
+      return null
+    }
     case 'none':
       return { type: 'none' }
     case 'oauth':
@@ -101,6 +131,12 @@ export type McpConnector = {
   custom: boolean
   connected: boolean
   credentialsType: ConnectorAuthType
+  /**
+   * Non-secret, client-writable JSON config (gdrive authorized files, gcal
+   * config, the `custom_header` name mirror, and `preflightHeaders` — see
+   * `docs/architecture/engine/tool-hooks.md`). Never holds credentials.
+   */
+  config?: Record<string, unknown>
   createdAt: Date
   updatedAt: Date
 }
@@ -162,6 +198,7 @@ const PUBLIC_COLS = `
   label AS name,
   url, custom, connected,
   credentials_type AS "credentialsType",
+  config,
   created_at AS "createdAt",
   updated_at AS "updatedAt"
 ` as const

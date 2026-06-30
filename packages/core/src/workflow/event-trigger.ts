@@ -11,9 +11,12 @@
  *   - connectors → `ingest/workflow-trigger.ts` (the ingest engine `onEvent`
  *     seam — GitHub, Fathom, Gmail, Calendar);
  *   - channels   → the channel webhook (`packages/api/.../routes/slack.ts`).
+ *   - pages      → `workflow/page-event-trigger.ts` (the saved-views store
+ *     write path — a doc page created / updated / moved under a watched
+ *     parent).
  * Each producer normalizes its native event into a `DispatchEvent`; the
- * dispatcher never knows whether an event came from a poller or a webhook.
- * Connectors and channels are equal first-class event sources.
+ * dispatcher never knows whether an event came from a poller, a webhook, or a
+ * page write. Connectors, channels, and pages are equal first-class sources.
  *
  * Design — ports over imports. `packages/core` stays pg-free; the API
  * package fulfils `findEventTriggeredWorkflows` (a workspace-scoped read of
@@ -51,7 +54,11 @@ export type DispatchEvent = {
   text: string | null
   /** Event actor id — matched by `EventMatch.fromActors`. */
   actorId: string | null
-  /** Sub-channel within the source (Slack channel, GitHub repo) — `inChannels`. */
+  /**
+   * Sub-channel within the source (Slack channel, GitHub repo) — matched by
+   * `EventMatch.inChannels`. For a `page` source this carries the lifecycle
+   * action (`created` | `updated` | `moved`).
+   */
   channelId: string | null
   /** Entities the event mentions — matched by `EventMatch.mentions`. */
   mentions: string[]
@@ -101,13 +108,18 @@ export type WorkflowEventInput = {
   trigger: {
     /** Which kind of source fired the run. */
     sourceType: EventSourceRef['type']
-    /** Provider / channel type — 'github' | 'fathom' | 'slack' | … */
+    /** Provider / channel type — 'github' | 'fathom' | 'slack' | 'page' | … */
     provider: string
     /** Set when `sourceType='connector'`. */
     connectorInstanceId?: string
     /** Set when `sourceType='channel'`. */
     channelIntegrationId?: string
-    /** Sub-channel (Slack channel id, GitHub repo), or null. */
+    /** Set when `sourceType='page'` — the watched page id. */
+    pageId?: string
+    /**
+     * Sub-channel (Slack channel id, GitHub repo), or null. For a `page`
+     * source this is the lifecycle action (`created` | `updated` | `moved`).
+     */
     channelId: string | null
     /** Event actor id, or null. */
     actorId: string | null
@@ -116,19 +128,83 @@ export type WorkflowEventInput = {
   event: Record<string, unknown>
 }
 
+// ── Second subscriber type: goals parked on `until:event` ─────────────────
+//
+// The acting-loop driver (`packages/api/src/goals/driver.ts`) can park a goal
+// on `until:event` — the iteration declared it is waiting on a specific event
+// rather than polling. Such a goal is a SECOND first-class subscriber on the
+// same event stream as workflows: the dispatcher matches the workspace's
+// event-waiting goals against each event with the SAME `matchesEvent` and
+// resumes the first hit (schedules a goal-tick). This is strictly additive —
+// the workflow fan-out is untouched and runs whether or not the goal deps are
+// wired.
+//
+// NOTE: the finder's data source — a DURABLE record of "goal G parked on
+// subscription S" — is the gating follow-up (a `goals` migration + goals-store
+// finder/writer + a `GoalResume` that carries the `EventSubscription`). Until
+// that lands the deps below stay unwired and a parked goal falls back to the
+// driver's safety-net poll. The seam is kept here, matched + isolated exactly
+// like the workflow path, so wiring it is a pure addition. See
+// docs/plans/task-goal-seeker.md.
+
+/**
+ * A goal parked on `until:event`. The finder returns goals in the workspace
+ * whose acting loop declared it is waiting on one or more event subscriptions
+ * (`sources`, OR-combined — mirrors `EventTriggeredWorkflow.sources`).
+ */
+export type EventWaitingGoal = {
+  goalId: string
+  workspaceId: string
+  /** The subscriptions this goal parked on; any one matching resumes it. */
+  sources: EventSubscription[]
+}
+
+/**
+ * Resolve a workspace → its event-waiting goals. The optional second-subscriber
+ * analog of `EventTriggeredWorkflowFinder`. Absent → no goal fan-out (default).
+ */
+export type EventWaitingGoalFinder = (params: {
+  workspaceId: string
+}) => Promise<EventWaitingGoal[]>
+
+/**
+ * Resume one event-waiting goal — the concrete impl schedules a goal-tick
+ * carrying the event, exactly as the driver's re-arm does. The optional
+ * second-subscriber analog of `WorkflowRunStarter`. Resolves once the resume
+ * is *scheduled* (the tick fires asynchronously).
+ */
+export type EventWaitingGoalResumer = (params: {
+  goalId: string
+  workspaceId: string
+  event: DispatchEvent
+}) => Promise<void>
+
 /** Context handed to `onError` so the sink can attribute a failure. */
 export type WorkflowEventDispatchError = {
   workspaceId: string
   /** Set when a specific workflow's start failed; absent for a finder failure. */
   workflowId?: string
+  /** Set when a specific goal's resume failed (the goal-subscriber path). */
+  goalId?: string
 }
 
 export type WorkflowEventDispatcherDeps = {
   findEventTriggeredWorkflows: EventTriggeredWorkflowFinder
   startWorkflowRun: WorkflowRunStarter
   /**
-   * Failure sink. The dispatcher never throws; every failure (the finder, or
-   * a per-workflow start) is reported here. Defaults to a no-op.
+   * OPTIONAL second subscriber type: goals parked on `until:event`. Wire BOTH
+   * to enable the goal fan-out; if either is absent the dispatcher behaves
+   * byte-for-byte as workflow-only (the default — see the `EventWaitingGoal`
+   * note above for the gating follow-up). The goal fan-out runs INDEPENDENTLY
+   * of the workflow path: a workspace with no event workflows still resumes a
+   * matching goal, and a failure on either side never suppresses the other.
+   */
+  findEventWaitingGoals?: EventWaitingGoalFinder
+  resumeEventWaitingGoal?: EventWaitingGoalResumer
+  /**
+   * Failure sink. The dispatcher never throws; every failure (the workflow
+   * finder, a per-workflow start, the goal finder, or a per-goal resume) is
+   * reported here. Defaults to a no-op.
    */
   onError?: (err: unknown, ctx: WorkflowEventDispatchError) => void
 }
@@ -148,6 +224,9 @@ function sourceMatches(event: EventSourceRef, ref: EventSourceRef): boolean {
   }
   if (event.type === 'channel' && ref.type === 'channel') {
     return event.channelIntegrationId === ref.channelIntegrationId
+  }
+  if (event.type === 'page' && ref.type === 'page') {
+    return event.pageId === ref.pageId
   }
   return false
 }
@@ -194,22 +273,34 @@ export function matchesEvent(
 
 /** Build the `workflow_runs.input` payload for an event-triggered run. */
 function buildInput(event: DispatchEvent): WorkflowEventInput {
-  const trigger: WorkflowEventInput['trigger'] =
-    event.source.type === 'connector'
-      ? {
-          sourceType: 'connector',
-          provider: event.source.provider,
-          connectorInstanceId: event.source.connectorInstanceId,
-          channelId: event.channelId,
-          actorId: event.actorId,
-        }
-      : {
-          sourceType: 'channel',
-          provider: event.source.channel,
-          channelIntegrationId: event.source.channelIntegrationId,
-          channelId: event.channelId,
-          actorId: event.actorId,
-        }
+  const src = event.source
+  let trigger: WorkflowEventInput['trigger']
+  if (src.type === 'connector') {
+    trigger = {
+      sourceType: 'connector',
+      provider: src.provider,
+      connectorInstanceId: src.connectorInstanceId,
+      channelId: event.channelId,
+      actorId: event.actorId,
+    }
+  } else if (src.type === 'channel') {
+    trigger = {
+      sourceType: 'channel',
+      provider: src.channel,
+      channelIntegrationId: src.channelIntegrationId,
+      channelId: event.channelId,
+      actorId: event.actorId,
+    }
+  } else {
+    trigger = {
+      sourceType: 'page',
+      provider: 'page',
+      pageId: src.pageId,
+      // For a page source `channelId` is the lifecycle action.
+      channelId: event.channelId,
+      actorId: event.actorId,
+    }
+  }
   return { trigger, event: event.payload }
 }
 
@@ -221,38 +312,79 @@ function buildInput(event: DispatchEvent): WorkflowEventInput {
 export function createWorkflowEventDispatcher(
   deps: WorkflowEventDispatcherDeps,
 ): WorkflowEventDispatcher {
-  return {
-    async dispatch(event) {
-      let workflows: EventTriggeredWorkflow[]
+  // ── Subscriber 1: event-triggered workflows. The original behavior, kept
+  //    byte-for-byte — its early returns scope to this helper, never to the
+  //    whole dispatch (so they cannot suppress the goal subscriber below). ──
+  async function dispatchToWorkflows(event: DispatchEvent): Promise<void> {
+    let workflows: EventTriggeredWorkflow[]
+    try {
+      workflows = await deps.findEventTriggeredWorkflows({
+        workspaceId: event.workspaceId,
+      })
+    } catch (err) {
+      deps.onError?.(err, { workspaceId: event.workspaceId })
+      return
+    }
+    if (workflows.length === 0) return
+
+    const input = buildInput(event)
+
+    for (const wf of workflows) {
+      // A workflow fires at most once per event, even when several of its
+      // subscriptions match.
+      if (!wf.sources.some((sub) => matchesEvent(event, sub))) continue
       try {
-        workflows = await deps.findEventTriggeredWorkflows({
-          workspaceId: event.workspaceId,
+        await deps.startWorkflowRun({
+          workflowId: wf.workflowId,
+          workspaceId: wf.workspaceId,
+          input,
         })
       } catch (err) {
-        deps.onError?.(err, { workspaceId: event.workspaceId })
-        return
+        deps.onError?.(err, {
+          workspaceId: wf.workspaceId,
+          workflowId: wf.workflowId,
+        })
       }
-      if (workflows.length === 0) return
+    }
+  }
 
-      const input = buildInput(event)
+  // ── Subscriber 2 (optional, additive): goals parked on `until:event`. A
+  //    no-op unless BOTH goal deps are wired, so default dispatch is identical
+  //    to workflow-only behavior. Independent of subscriber 1 — runs even when
+  //    the workspace has no event workflows, and is isolated per-goal exactly
+  //    as the workflow start is isolated per-workflow. ──
+  async function dispatchToGoals(event: DispatchEvent): Promise<void> {
+    const findGoals = deps.findEventWaitingGoals
+    const resumeGoal = deps.resumeEventWaitingGoal
+    if (!findGoals || !resumeGoal) return
 
-      for (const wf of workflows) {
-        // A workflow fires at most once per event, even when several of its
-        // subscriptions match.
-        if (!wf.sources.some((sub) => matchesEvent(event, sub))) continue
-        try {
-          await deps.startWorkflowRun({
-            workflowId: wf.workflowId,
-            workspaceId: wf.workspaceId,
-            input,
-          })
-        } catch (err) {
-          deps.onError?.(err, {
-            workspaceId: wf.workspaceId,
-            workflowId: wf.workflowId,
-          })
-        }
+    let goals: EventWaitingGoal[]
+    try {
+      goals = await findGoals({ workspaceId: event.workspaceId })
+    } catch (err) {
+      deps.onError?.(err, { workspaceId: event.workspaceId })
+      return
+    }
+
+    for (const g of goals) {
+      // A goal resumes at most once per event, even when several of the
+      // subscriptions it parked on match.
+      if (!g.sources.some((sub) => matchesEvent(event, sub))) continue
+      try {
+        await resumeGoal({ goalId: g.goalId, workspaceId: g.workspaceId, event })
+      } catch (err) {
+        deps.onError?.(err, { workspaceId: g.workspaceId, goalId: g.goalId })
       }
+    }
+  }
+
+  return {
+    async dispatch(event) {
+      // Two independent subscriber fan-outs over one event. Workflows first
+      // (unchanged), then the optional goal subscriber. Neither suppresses the
+      // other; each isolates its own failures to `onError`.
+      await dispatchToWorkflows(event)
+      await dispatchToGoals(event)
     },
   }
 }

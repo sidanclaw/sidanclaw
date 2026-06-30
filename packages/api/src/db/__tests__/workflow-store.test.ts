@@ -20,6 +20,7 @@ vi.mock('../client.js', () => ({
 import {
   createDbWorkflowStore,
   createDbWorkflowRunStore,
+  extractTriggerPageId,
   findEventTriggeredWorkflowsSystem,
   getWorkflowCreatorSystem,
 } from '../workflow-store.js'
@@ -182,6 +183,36 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
     expect(mockQuery.mock.calls[0][0]).toContain('INSERT INTO workflow_runs')
   })
 
+  it('createRun stamps trigger_page_id from a page-source run input (mig 282)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [runRow()], rowCount: 1 } as never)
+    await runs.createRun({
+      workflowId: 'wf-1',
+      workspaceId: 'ws-1',
+      triggeredBy: null,
+      triggerKind: 'manual',
+      input: {
+        trigger: { sourceType: 'page', pageId: 'watched-page', channelId: 'created', actorId: 'u-1' },
+        event: { pageId: 'changed-page', action: 'created' },
+      },
+    } as Parameters<typeof runs.createRun>[0])
+    const [sql, values] = mockQuery.mock.calls[0]
+    expect(sql).toContain('trigger_page_id')
+    // The CHANGED page (input.event.pageId), not the watched page.
+    expect((values as unknown[])[5]).toBe('changed-page')
+  })
+
+  it('createRun leaves trigger_page_id null for a non-page run input', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [runRow()], rowCount: 1 } as never)
+    await runs.createRun({
+      workflowId: 'wf-1',
+      workspaceId: 'ws-1',
+      triggeredBy: 'u-1',
+      triggerKind: 'manual',
+      input: { trigger: { sourceType: 'channel' }, event: { pageId: 'x' } },
+    } as Parameters<typeof runs.createRun>[0])
+    expect((mockQuery.mock.calls[0][1] as unknown[])[5]).toBeNull()
+  })
+
   it('getRunById is RLS-scoped while getRunSystem bypasses RLS', async () => {
     mockRls.mockResolvedValueOnce({ rows: [runRow()], rowCount: 1 } as never)
     expect((await runs.getRunById('u-1', 'run-1'))?.id).toBe('run-1')
@@ -234,6 +265,40 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
     const [, sql, values] = mockRls.mock.calls[0]
     expect(sql).toContain('status = ANY($2::text[])')
     expect(values).toEqual(['wf-1', ['running', 'failed'], 200])
+  })
+
+  it('listRunsForPage joins workflows, clamps the limit, and maps outcome.summary (mig 282)', async () => {
+    mockRls.mockResolvedValueOnce({
+      rows: [
+        {
+          runId: 'run-1',
+          workflowId: 'wf-1',
+          workflowName: 'Triage',
+          status: 'completed',
+          startedAt: new Date('2026-06-29T00:00:00Z'),
+          finishedAt: new Date('2026-06-29T00:01:00Z'),
+          outcome: { summary: 'done', status: 'completed' },
+        },
+        {
+          runId: 'run-2',
+          workflowId: 'wf-2',
+          workflowName: 'Notify',
+          status: 'running',
+          startedAt: new Date('2026-06-29T00:02:00Z'),
+          finishedAt: null,
+          outcome: null,
+        },
+      ],
+      rowCount: 2,
+    } as never)
+    const out = await runs.listRunsForPage('u-1', 'page-1', { limit: 9999 })
+    const [, sql, values] = mockRls.mock.calls[0]
+    expect(sql).toContain('JOIN workflows w ON w.id = r.workflow_id')
+    expect(sql).toContain('WHERE r.trigger_page_id = $1')
+    expect(sql).toContain('ORDER BY r.started_at DESC')
+    expect(values).toEqual(['page-1', 100])
+    expect(out[0].outcomeSummary).toBe('done')
+    expect(out[1].outcomeSummary).toBeNull()
   })
 
   it('updateRun writes the JSON-encoded outcome when supplied (mig 279)', async () => {
@@ -298,5 +363,22 @@ describe('[COMP:api/workflow-store] event-trigger helpers', () => {
     expect(await getWorkflowCreatorSystem('wf-1')).toBe('u-9')
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     expect(await getWorkflowCreatorSystem('ghost')).toBe(null)
+  })
+})
+
+describe('[COMP:api/workflow-store] extractTriggerPageId', () => {
+  it('returns the changed page for a page-source input', () => {
+    expect(
+      extractTriggerPageId({
+        trigger: { sourceType: 'page', pageId: 'watched' },
+        event: { pageId: 'changed' },
+      }),
+    ).toBe('changed')
+  })
+
+  it('returns null for a non-page source, a missing event page, or undefined input', () => {
+    expect(extractTriggerPageId({ trigger: { sourceType: 'connector' }, event: { pageId: 'x' } })).toBeNull()
+    expect(extractTriggerPageId({ trigger: { sourceType: 'page' }, event: {} })).toBeNull()
+    expect(extractTriggerPageId(undefined)).toBeNull()
   })
 })

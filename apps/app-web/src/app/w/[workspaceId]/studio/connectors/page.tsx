@@ -54,6 +54,9 @@ import { DrivePicker, type PickedFile } from "@/components/drive-picker";
 import { ConnectorToolList, type ToolPolicy } from "@/components/connectors/connector-tool-list";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { AddConnectorMenu } from "@/components/connectors/add-connector-menu";
+import { PreflightHeadersSection } from "@/components/connectors/preflight-headers-section";
+import { readPreflightHeaders } from "@/lib/connector-preflight-headers";
+import { ActorIdentityToggle } from "@/components/connectors/actor-identity-toggle";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { isSharedWorkspace } from "@/lib/workspace-permissions";
 import { groupConnectors } from "@/lib/connector-groups";
@@ -143,6 +146,18 @@ type Connector = {
   authType?: ConnectorAuthType;
   /** Custom-header connectors only — the non-secret header name. */
   authHeaderName?: string;
+  /**
+   * Read-only workspace-shared row — a connector available to you in this
+   * workspace that you do NOT own (a teammate exposed it, or a legacy
+   * team-native instance). No manage/connect/remove affordances; credentials
+   * never leave the server. Set by the backend's "Available in this workspace"
+   * list.
+   */
+  readonly?: boolean;
+  /** Read-only rows only — how it reaches you: 'granted' | 'team_native'. */
+  source?: "granted" | "team_native";
+  /** Read-only granted rows only — display name of the member who shared it. */
+  sharedBy?: string | null;
 };
 
 /** Current scope revision for each OAuth connector. Bump when scopes change. */
@@ -617,6 +632,14 @@ function ConnectorsList() {
   const [patInput, setPatInput] = useState("");
   const [showPatInput, setShowPatInput] = useState<string | null>(null);
 
+  // Bring-your-own GCS storage form state (the `gcs` connector). Unlike PAT,
+  // it needs a service-account key + bucket and validates on the server.
+  const [showGcsForm, setShowGcsForm] = useState<string | null>(null);
+  const [gcsKey, setGcsKey] = useState("");
+  const [gcsBucket, setGcsBucket] = useState("");
+  const [gcsProjectId, setGcsProjectId] = useState("");
+  const [gcsError, setGcsError] = useState<string | null>(null);
+
   // "Add another account" state — provider slug whose add-another form is open,
   // plus the nickname + secret for the new instance.
   const [addAnotherFor, setAddAnotherFor] = useState<string | null>(null);
@@ -640,10 +663,24 @@ function ConnectorsList() {
 
   // ── Fetch ────────────────────────────────────────────────────
   const fetchConnectors = useCallback(() => {
-    authFetch(`${API_URL}/api/connectors`)
+    // Pass the active workspace so the API includes workspace-scoped connectors
+    // (e.g. the BYO `gcs` storage binding) in the list, not just personal ones.
+    const listUrl = workspaceId
+      ? `${API_URL}/api/connectors?workspaceId=${encodeURIComponent(workspaceId)}`
+      : `${API_URL}/api/connectors`;
+    authFetch(listUrl)
       .then((r) => (r.ok ? r.json() : null))
       .then((data: { connectors?: Connector[] } | null) => {
-        if (data?.connectors) setConnectors(data.connectors);
+        if (!data?.connectors) return;
+        let rows = data.connectors;
+        // BYO `gcs` storage is workspace-scoped, so it surfaces BOTH as an
+        // official "Connect" placeholder and as the workspace binding instance.
+        // Collapse to the single manageable instance row (which carries the
+        // connected state + Remove affordance) whenever a binding exists.
+        if (rows.some((r) => r.id === "gcs" && r.connectorInstanceId)) {
+          rows = rows.filter((r) => !(r.id === "gcs" && !r.connectorInstanceId));
+        }
+        setConnectors(rows);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -662,7 +699,7 @@ function ConnectorsList() {
         })
         .catch(() => {});
     }
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     fetchConnectors();
@@ -838,6 +875,15 @@ function ConnectorsList() {
       return;
     }
 
+    // GCS bring-your-own storage — show the SA-key + bucket form (validated
+    // server-side) instead of the generic mark-connected POST.
+    if (id === "gcs") {
+      setShowGcsForm(rid);
+      setGcsError(null);
+      setConnecting(null);
+      return;
+    }
+
     // Notion OAuth — separate flow (different auth URL, no scopes). The
     // workspaceId is threaded through `state` so the server callback can
     // redirect back to this workspace-scoped route.
@@ -1005,6 +1051,46 @@ function ConnectorsList() {
     setConnecting(null);
   }
 
+  // Connect the workspace's own GCS bucket. The server validates the key with
+  // a write/read/delete probe before persisting, so a bad key surfaces here.
+  async function handleSaveGcs(c: Connector) {
+    if (!gcsKey.trim() || !gcsBucket.trim()) return;
+    const rid = rowId(c);
+    setConnecting(rid);
+    setGcsError(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/gcs/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          serviceAccountKey: gcsKey.trim(),
+          bucket: gcsBucket.trim(),
+          projectId: gcsProjectId.trim() || undefined,
+        }),
+      });
+      if (res.ok) {
+        setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: true } : x)));
+        setSelected(rid);
+        setShowGcsForm(null);
+        setGcsKey(""); setGcsBucket(""); setGcsProjectId("");
+        fetchConnectors();
+        setJustConnectedId(c.id);
+      } else {
+        const data = (await res.json().catch(() => ({}))) as { code?: string };
+        setGcsError(
+          data.code === "permission_denied" ? tc.gcs.errPermission
+          : data.code === "bucket_unreachable" ? tc.gcs.errBucket
+          : data.code === "invalid_key" ? tc.gcs.errKey
+          : tc.gcs.errGeneric,
+        );
+      }
+    } catch {
+      setGcsError(tc.gcs.errGeneric);
+    }
+    setConnecting(null);
+  }
+
   async function handlePolicyChange(connectorId: string, serverName: string, toolName: string, policy: "allow" | "ask" | "block") {
     setToolsMap((prev) => {
       const entry = prev[connectorId];
@@ -1130,6 +1216,21 @@ function ConnectorsList() {
   }
 
   async function handleRemove(c: Connector) {
+    // GCS uses the workspace-scoped disconnect (wipes the stored key; new
+    // writes revert to the default bucket).
+    if (c.id === "gcs") {
+      setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: false } : x)));
+      setSelected(null);
+      try {
+        await authFetch(`${API_URL}/api/connectors/gcs/disconnect`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspaceId }),
+        });
+      } catch {}
+      fetchConnectors();
+      return;
+    }
     setConnectors((prev) => prev.filter((x) => !isSameRow(x, c)));
     setSelected(null);
     const url = c.connectorInstanceId
@@ -1204,11 +1305,13 @@ function ConnectorsList() {
       ? [
           { id: "shared", label: tc.groupShared, rows: grouped.shared },
           { id: "personal", label: tc.groupPersonal, rows: grouped.personal },
+          { id: "workspace", label: tc.groupWorkspaceShared, rows: grouped.workspace },
           { id: "available", label: tc.groupAvailable, rows: grouped.available },
           { id: "builtin", label: tc.groupBuiltin, rows: grouped.builtin },
         ]
       : [
           { id: "personal", label: tc.groupConnected, rows: grouped.personal },
+          { id: "workspace", label: tc.groupWorkspaceShared, rows: grouped.workspace },
           { id: "available", label: tc.groupAvailable, rows: grouped.available },
           { id: "builtin", label: tc.groupBuiltin, rows: grouped.builtin },
         ]
@@ -1409,6 +1512,41 @@ function ConnectorsList() {
             </div>
           ) : (() => {
             const rid = rowId(sel);
+            // Read-only workspace-shared connector — a teammate's or a legacy
+            // team-native instance the member can use but not manage. A
+            // self-contained panel: identity + attribution + status, no
+            // connect / rename / remove / share affordances and no credentials.
+            if (sel.readonly) {
+              return (
+                <div key={rid} className="space-y-4">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+                      <ConnectorIcon connectorId={sel.id} iconUrl={sel.icon_url} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <h2 className="truncate text-[15px] font-semibold tracking-tight">
+                        {sel.label ?? sel.name}
+                      </h2>
+                      <p className="text-[12px] text-muted-foreground">
+                        {sel.source === "granted"
+                          ? sel.sharedBy
+                            ? tc.workspaceSharedByMember.replace("{name}", sel.sharedBy)
+                            : tc.workspaceSharedByTeammate
+                          : tc.workspaceSharedTeamNative}
+                      </p>
+                    </div>
+                    {sel.connected && (
+                      <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                        {tc.connected}
+                      </span>
+                    )}
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
+                    {tc.workspaceSharedReadonlyNote}
+                  </div>
+                </div>
+              );
+            }
             const transport = getTransportLabel(sel.url);
             const instanceId = sel.connectorInstanceId;
             // Built-in primitive — always-on pill, no connect/disconnect/
@@ -1687,6 +1825,54 @@ function ConnectorsList() {
                   </div>
                 )}
 
+                {/* GCS bring-your-own storage form — SA key + bucket, validated
+                    server-side before the binding is saved. */}
+                {showGcsForm === rid && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{tc.gcs.formHelp}</p>
+                    <textarea
+                      placeholder={tc.gcs.keyPlaceholder}
+                      value={gcsKey}
+                      onChange={(e) => setGcsKey(e.target.value)}
+                      rows={4}
+                      className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      autoFocus
+                    />
+                    <input
+                      type="text"
+                      placeholder={tc.gcs.bucketPlaceholder}
+                      value={gcsBucket}
+                      onChange={(e) => setGcsBucket(e.target.value)}
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <input
+                      type="text"
+                      placeholder={tc.gcs.projectIdPlaceholder}
+                      value={gcsProjectId}
+                      onChange={(e) => setGcsProjectId(e.target.value)}
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <p className="text-[11px] text-muted-foreground">{tc.gcs.leastPriv}</p>
+                    <p className="text-[11px] text-muted-foreground">{tc.gcs.regionNote}</p>
+                    {gcsError && <p className="text-xs text-destructive">{gcsError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => { setShowGcsForm(null); setGcsKey(""); setGcsBucket(""); setGcsProjectId(""); setGcsError(null); }}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                      >
+                        {tc.cancel}
+                      </button>
+                      <button
+                        onClick={() => handleSaveGcs(sel)}
+                        disabled={!gcsKey.trim() || !gcsBucket.trim() || connecting === rid}
+                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                      >
+                        {connecting === rid ? tc.gcs.validatingBtn : tc.gcs.connectBtn}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* "Add another GitHub account" — nickname + PAT, creates a NEW
                     instance. Anchored to the primary row. */}
                 {addAnotherFor === sel.id && sel.isPrimary && (
@@ -1814,7 +2000,7 @@ function ConnectorsList() {
                       </button>
                       {(sel.custom || CONFIGURABLE_CONNECTORS.has(sel.id)) && (
                         <button
-                          onClick={() => { setExpandTab("settings"); if (CONFIGURABLE_CONNECTORS.has(sel.id) && !configMap[sel.id]) loadConfig(sel.id); }}
+                          onClick={() => { setExpandTab("settings"); if ((CONFIGURABLE_CONNECTORS.has(sel.id) || sel.custom) && !configMap[sel.id]) loadConfig(sel.id); }}
                           className={`text-xs font-medium px-3 py-1.5 border-b-2 transition-colors ${expandTab === "settings" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}
                         >
                           {tc.tabSettings}
@@ -1901,6 +2087,21 @@ function ConnectorsList() {
                             {tc.saveBtn}
                           </button>
                         </div>
+                        {configMap[sel.id] !== undefined && (
+                          <PreflightHeadersSection
+                            key={sel.id}
+                            initial={readPreflightHeaders(configMap[sel.id])}
+                            onSave={(rows) => saveConfig(sel.id, { preflightHeaders: rows })}
+                          />
+                        )}
+                        {configMap[sel.id] !== undefined && (
+                          <ActorIdentityToggle
+                            key={`actor-${sel.id}`}
+                            initial={configMap[sel.id]?.sendActorIdentity === true}
+                            hasAuth={!!sel.authType && sel.authType !== "none"}
+                            onSave={(enabled) => saveConfig(sel.id, { sendActorIdentity: enabled })}
+                          />
+                        )}
                       </div>
                     )}
 

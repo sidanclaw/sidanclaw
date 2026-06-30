@@ -67,6 +67,7 @@ function fakeWorkflowRunStore(): WorkflowRunStore {
     updateStepRun: vi.fn(),
     listStepRuns: vi.fn(),
     listRunsForWorkflow: vi.fn().mockResolvedValue([]),
+    listRunsForPage: vi.fn().mockResolvedValue([]),
     getLatestOutcomeForWorkflowSystem: vi.fn().mockResolvedValue(null),
   }
 }
@@ -98,6 +99,7 @@ function makeSavedView(over: Partial<SavedView>): SavedView {
     brainSyncEnabled: false,
     brainLastIngestHash: null,
     brainLastIngestAt: null,
+    createdEventPending: false,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...over,
@@ -123,6 +125,7 @@ function fakeSavedViewStore(opts: { parentExists?: boolean } = {}): SavedViewSto
       makeSavedView({ id: 'sv-child', name, entity, viewType, binding, page, nestParentId: nestParentId ?? null }),
     ),
     findIdByAnchorKey: vi.fn().mockResolvedValue(null),
+    commitCreatedEvent: vi.fn().mockResolvedValue(true),
     reparent: vi.fn().mockResolvedValue(true),
     reorderSiblings: vi.fn().mockResolvedValue(undefined),
     pruneExpiredDraftsSystem: vi.fn().mockResolvedValue([]),

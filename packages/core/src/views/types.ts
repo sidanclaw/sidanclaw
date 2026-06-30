@@ -354,6 +354,16 @@ export type SavedView = {
    * cooldown half of the storm guard.
    */
   brainLastIngestAt: Date | null
+  /**
+   * True while an interactively-created draft (doc-editor blank / from-template
+   * flows, via `POST /views/draft`) is waiting to fire its `created` page-event
+   * trigger. The store skips the immediate emit for these drafts; the client
+   * commits the event after debounced typing or on navigating away
+   * (`commitCreatedEvent`), which flips this back to false and emits `created`
+   * exactly once. Always false for programmatic creates (they emit immediately)
+   * and for any committed / older row. Migration 283.
+   */
+  createdEventPending: boolean
   createdAt: Date
   updatedAt: Date
 }
@@ -462,7 +472,35 @@ export type CreateDraftInput = {
    * Omitted / null on every non-workflow path.
    */
   anchorKey?: string | null
+  /** See {@link PageWriteActor}. Defaults to `'user'`. */
+  writtenBy?: PageWriteActor
+  /**
+   * Defer the `created` page-event-trigger instead of emitting it at creation
+   * (migration 283). Set by the interactive `POST /views/draft` route so the
+   * doc-editor "blank page" / "from template" flows don't fire a workflow on an
+   * empty just-minted page. The row is marked `created_event_pending`; the
+   * client later fires it once via `commitCreatedEvent` (debounced typing, or a
+   * flush on navigating away). Omitted / false on programmatic paths
+   * (brain-MCP, workflow anchor), which keep emitting `created` immediately.
+   */
+  deferCreatedEvent?: boolean
 }
+
+/**
+ * Who produced a page write, for the workflow `page` event source's self-loop
+ * guard (the page analog of a channel's bot-author flag). A write reaches the
+ * dispatcher as `isBot = writtenBy === 'system'`, and a `page`-source
+ * subscription only fires on a `'system'` write when it set `match.fromBots`.
+ *
+ *  - `'user'` (default) — a human edit through the doc-editor REST routes.
+ *  - `'system'` — any automated / assistant write: a workflow step's page
+ *    anchor (`createAnchorPage`), the assistant doc tools (`createSubPage` /
+ *    `patchPage` / `renderPage`), or an external agent via brain-MCP. This is
+ *    what stops a workflow that writes a page under a page it watches from
+ *    re-triggering itself. See docs/architecture/features/workflow.md → "Page
+ *    event source".
+ */
+export type PageWriteActor = 'user' | 'system'
 
 // ── Store interface ───────────────────────────────────────────────────
 
@@ -473,6 +511,8 @@ export type SavedViewStore = {
     name: string
     description?: string | null
     binding: BindingConfig
+    /** See {@link PageWriteActor}. Defaults to `'user'`. */
+    writtenBy?: PageWriteActor
   }): Promise<SavedView>
 
   /**
@@ -487,6 +527,8 @@ export type SavedViewStore = {
     userId: string,
     id: string,
     fields: SavedViewUpdateFields,
+    /** See {@link PageWriteActor}. Defaults to `'user'`. */
+    writtenBy?: PageWriteActor,
   ): Promise<SavedView | null>
 
   /**
@@ -526,6 +568,17 @@ export type SavedViewStore = {
    * the chat tool, or `emptyPage` from the route layer).
    */
   createDraft(params: CreateDraftInput): Promise<SavedView>
+
+  /**
+   * Fire the deferred `created` page-event for an interactively-created draft
+   * (one created with `deferCreatedEvent`). Atomically clears
+   * `created_event_pending` and emits the `created` lifecycle event **only if
+   * this call won the flip** — so concurrent commits (the typing debounce vs the
+   * navigate-away flush, a double-click, a reload) fire the workflow exactly
+   * once. A no-op (returns `false`) for an already-committed row, a row that was
+   * never deferred, or one hidden by RLS. Migration 283.
+   */
+  commitCreatedEvent(userId: string, id: string): Promise<boolean>
 
   /**
    * Resolve a page id by its stable cross-run `anchor_key` (migration 279),
@@ -585,6 +638,8 @@ export type SavedViewStore = {
     id: string,
     newNestParentId: string | null,
     position: number,
+    /** See {@link PageWriteActor}. Defaults to `'user'`. */
+    writtenBy?: PageWriteActor,
   ): Promise<boolean>
 
   /**

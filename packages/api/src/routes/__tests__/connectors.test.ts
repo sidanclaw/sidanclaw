@@ -10,6 +10,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+
+const mockDiscover = vi.fn()
+vi.mock('../../mcp/client.js', () => ({
+  discoverMcpServer: (...a: unknown[]) => mockDiscover(...a),
+}))
+
 import { connectorRoutes } from '../connectors.js'
 import type { ConnectorStore } from '../../db/connector-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance } from '../../db/connector-instance-store.js'
@@ -45,6 +51,8 @@ function makeApp(userId?: string) {
   const m = {
     setConnected: vi.fn(),
     deleteConnector: vi.fn(),
+    listConnectors: vi.fn().mockResolvedValue([]),
+    getAuthCredentials: vi.fn().mockResolvedValue(null),
     listForUser: vi.fn().mockResolvedValue([]),
     listByUser: vi.fn().mockResolvedValue([]),
     createUserInstance: vi.fn().mockResolvedValue(instance()),
@@ -56,6 +64,8 @@ function makeApp(userId?: string) {
   const connectorStore = {
     setConnected: m.setConnected,
     delete: m.deleteConnector,
+    list: m.listConnectors,
+    getAuthCredentials: m.getAuthCredentials,
     getConfig: m.getConfig,
     setConfig: m.setConfig,
   } as unknown as ConnectorStore
@@ -156,6 +166,46 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
       classification: expect.any(String),
       policy: expect.stringMatching(/allow|ask|block/),
     })
+  })
+
+  it('GET /:provider/tools live-discovers a custom connector\'s tools', async () => {
+    // A custom connector (provider = UUID, not in OFFICIAL_CONNECTOR_TOOLS) is
+    // discovered live, so the Tools tab matches the settings-tab probe instead
+    // of "No tools found".
+    const { app, listConnectors, getAuthCredentials } = makeApp('u1')
+    const CX = 'cx-uuid-1'
+    listConnectors.mockResolvedValue([
+      { connectorId: CX, name: 'My MCP', custom: true, url: 'https://mcp.example/sse', connected: true, credentialsType: 'bearer' },
+    ])
+    getAuthCredentials.mockResolvedValue({ type: 'bearer', token: 't1' })
+    mockDiscover.mockResolvedValue({
+      name: 'My MCP',
+      url: 'https://mcp.example/sse',
+      tools: [{ name: 'alpha', description: 'A' }, { name: 'beta', description: 'B' }],
+    })
+    const res = await request(app).get(`/api/connectors/${CX}/tools`)
+    expect(res.status).toBe(200)
+    expect(res.body.serverName).toBe('My MCP')
+    expect(res.body.tools).toHaveLength(2)
+    expect(res.body.tools[0]).toMatchObject({
+      name: 'alpha',
+      classification: expect.any(String),
+      policy: expect.stringMatching(/allow|ask|block/),
+    })
+    // Discovery carries the connector's configured auth headers.
+    expect(mockDiscover).toHaveBeenCalledWith('https://mcp.example/sse', 'My MCP', { Authorization: 'Bearer t1' })
+  })
+
+  it('GET /:provider/tools 500s when custom discovery fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { app, listConnectors } = makeApp('u1')
+    const CX = 'cx-uuid-2'
+    listConnectors.mockResolvedValue([
+      { connectorId: CX, name: 'Broken', custom: true, url: 'https://x', connected: false, credentialsType: 'none' },
+    ])
+    mockDiscover.mockRejectedValue(new Error('unreachable'))
+    const res = await request(app).get(`/api/connectors/${CX}/tools`)
+    expect(res.status).toBe(500)
   })
 
   it('GET /:provider/tools is empty for a provider with no catalog entry', async () => {
