@@ -46,9 +46,12 @@ import {
   createCompositeCommitmentResolver,
   createGeminiEmbedder,
   calculateCost,
+  createGoalClarityAssessor,
+  createGoalVerifier,
   collectStream,
   createInterAssistantTools,
   createReportBugTool,
+  createConfirmRecordingProcessingTool,
   createReviewDataRequestTool,
   createWorkflowTools,
   createWorkflowBrainTools,
@@ -57,6 +60,9 @@ import {
   createScheduleWorkflowTool,
   advanceWorkflowRun,
   createTaskTools,
+  createGoalTools,
+  buildOneStepReminderWorkflow,
+  type GoalRecord,
   createWorkspaceTools,
   type WorkspaceDirectoryStore,
   type WorkspaceMemberInfo,
@@ -79,6 +85,7 @@ import {
   type PendingClassificationStore,
   type GDriveFilesStore,
   type EntityRecord,
+  type EngineHooks,
 } from '@sidanclaw/core'
 
 // ── OPEN package imports (@sidanclaw/api) ──────────────────────────
@@ -119,6 +126,12 @@ import { createWorkspaceStore, getWorkspaceMembershipWithClearanceSystem } from 
 import { createWorkspaceAuditStore } from './db/workspace-audit-store.js'
 import { createConnectionStore } from './db/connection-store.js'
 import { createPendingMessageStore } from './db/pending-message-store.js'
+import {
+  getPendingRecordingConfirmation,
+  deletePendingRecordingConfirmation,
+  buildChannelSessionKey,
+} from './db/pending-recording-confirmations-store.js'
+import { enqueueRecordingJob } from './db/recording-jobs-store.js'
 import { createChatConfirmationStore } from './db/chat-confirmation-store.js'
 import { createDeferredConfirmationStore } from './db/deferred-confirmation-store.js'
 import { createSnapshotStore } from './db/snapshot-store.js'
@@ -162,6 +175,13 @@ import { createDbMemoryStore } from './db/memory-store.js'
 import { createMemoryToEntityPromotionStore } from './db/memory-to-entity-promotion-store.js'
 import { createMemoryRecallEventsStore } from './db/memory-recall-events-store.js'
 import { createDbTaskStore } from './db/tasks-store.js'
+import { createDbGoalStore } from './db/goals-store.js'
+import { createGoalRollupRunner } from './goals/rollup-runner.js'
+import { createGoalDriver, type GoalLoopState } from './goals/driver.js'
+import { createGoalWorkTools } from './goals/work-tools.js'
+import { type GoalDeliver } from './goals/writeback.js'
+import { tryClaimGoalForTick } from './db/goals.js'
+import { goalsRoutes } from './routes/goals.js'
 import { createDbCrmStore } from './db/crm-store.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { createGcsFilesClient } from './files/gcs-client.js'
@@ -171,6 +191,7 @@ import {
   createDbWorkflowStore,
   createDbWorkflowRunStore,
   getRunIdForStepRun,
+  getPrimaryAssistantForWorkspace,
 } from './db/workflow-store.js'
 import { buildWorkflowToolRegistry } from './workflow/mcp-bridge.js'
 import { createPendingApprovalsStore } from './db/pending-approvals-store.js'
@@ -186,6 +207,7 @@ import { approvalsRoutes } from './routes/approvals.js'
 import { workflowsRoutes } from './routes/workflows.js'
 import { workflowWebhookRoutes } from './routes/workflow-webhooks.js'
 import { createWorkflowChannelDelivery } from './workflow/channel-delivery.js'
+import { createWorkflowDependencyPreflight } from './workflow/dependency-preflight.js'
 import { createDeliveryTargetResolver } from './scheduling/delivery-target.js'
 import { viewsRoutes } from './routes/views.js'
 import { publicShareRoutes } from './routes/public-share.js'
@@ -194,6 +216,8 @@ import { runIngestPage } from './doc/ingest-page-runner.js'
 import { internalIngestRoutes } from './doc/internal-ingest-route.js'
 import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
+import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
+import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
 import { createDbPageGrantStore } from './db/page-grant-store.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbWorkspaceGroupStore } from './db/workspace-group-store.js'
@@ -350,6 +374,16 @@ export interface OpenApiPorts {
   resolveExtraSystemPrompt?: (session: { mode: string | null; channelType: string }) => string | null
   resolveAppSoul?: ResolveAppSoul
 
+  // ── Tool-use hooks (remote MCP preflight) — open default: unset ──
+  /**
+   * Pre/post interception around remote MCP tool calls. `preToolUse` can
+   * inject/overwrite outbound headers, rewrite args, or block; `postToolUse`
+   * observes. The platform supplies the config-driven impl; open build
+   * leaves it unset (no interception). See
+   * `docs/architecture/engine/tool-hooks.md`.
+   */
+  engineHooks?: EngineHooks
+
   // ── Connector-action audit — open default: unset (un-audited) ──
   buildConnectorActionAudit?: BuildConnectorActionAudit
 
@@ -422,6 +456,34 @@ export interface OpenApiPorts {
 
   // ── Extension hook: the platform mounts its closed routes/workers ──
   mountExtraRoutes?: (app: Express, ctx: BootContext) => void | Promise<void>
+
+  /**
+   * Extension hook for PUBLIC (unauthenticated / optionalAuth) closed routes
+   * that must register BEFORE the bare `app.use('/api', requireAuth(...), …)`
+   * guards below (workflow / approvals / views / doc-* …). `mountExtraRoutes`
+   * runs LAST, so a public `/api/*` route mounted there is shadowed by those
+   * guards — Express runs path-prefix middleware in registration order, so the
+   * first bare `/api` `requireAuth` 401s the request before the later router is
+   * reached. The Telegram Mini App verify endpoint (`/api/telegram/mini-app/
+   * verify`) regressed exactly this way at the open-core cutover. This hook
+   * runs early — before any bare `/api` guard — so such routes win the match.
+   *
+   * Receives only the stores already built at that early point (see
+   * `PublicExtraRouteDeps`); full `BootContext` is not assembled yet.
+   */
+  mountPublicExtraRoutes?: (app: Express, deps: PublicExtraRouteDeps) => void | Promise<void>
+}
+
+/**
+ * Stores available to `mountPublicExtraRoutes` at its early call site. Kept
+ * deliberately narrow: only the handful built before the bare `/api` guards.
+ * Add a field here when a new public closed route needs a store the open boot
+ * already created by that point.
+ */
+export interface PublicExtraRouteDeps {
+  linkedAccountStore: ReturnType<typeof createDbLinkedAccountStore>
+  integrationStore: ReturnType<typeof createDbChannelIntegrationStore> | null
+  workspaceStore: ReturnType<typeof createWorkspaceStore>
 }
 
 export interface BootOpenApiOptions {
@@ -444,6 +506,13 @@ export interface BootContext {
   env: OpenApiEnv
   runWorkers: boolean
   port: number
+  /**
+   * Tool-use interception port (remote MCP only), surfaced so closed routes
+   * mounted via `mountExtraRoutes` (the channel webhooks → `processChannelMessage`)
+   * can forward it into their own `injectMcpTools` call. Open default = unset.
+   * See `docs/architecture/engine/tool-hooks.md`.
+   */
+  engineHooks?: EngineHooks
   // Stores closed routes reuse (same instances).
   workspaceStore: ReturnType<typeof createWorkspaceStore>
   workspaceAuditStore: ReturnType<typeof createWorkspaceAuditStore>
@@ -465,6 +534,8 @@ export interface BootContext {
   capabilityStore: ReturnType<typeof createDbCapabilityStore>
   apiKeyStore: ReturnType<typeof createDbApiKeyStore>
   usageStore: UsageStore | undefined
+  /** Structural-synthesis callback for the recording path (blueprint → brief page). */
+  recordingSynthesize?: RecordingSynthesizeFn
   workspaceStoreRefForRouter: ReturnType<typeof workspaceRoutes>
   workflowStore: ReturnType<typeof createDbWorkflowStore>
   workflowRunStore: ReturnType<typeof createDbWorkflowRunStore>
@@ -600,7 +671,49 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const memoryStore = createDbMemoryStore()
   const brainCandidateStore = ports.brainCandidateStore
   const memoryRecallEventsStore = createMemoryRecallEventsStore()
-  const taskStore = createDbTaskStore()
+  const goalStore = createDbGoalStore()
+  // Terminal delivery for a goal (done | blocked) — the workspace primary
+  // assistant messages the creator (sanitized by deliverToChannel). Shared by
+  // the structural rollup AND the acting-loop driver (no silent termination,
+  // goals.md §7).
+  const deliverGoalTerminal: GoalDeliver = async (goal, terminal, reason) => {
+    if (!goal.createdByUserId) return
+    const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
+    if (!assistantId) return
+    const text =
+      terminal === 'done'
+        ? `Goal done: ${goal.outcome}`
+        : reason === 'unconfirmed_needs_clarification'
+          ? `I tried to work a task but its goal isn't confirmed yet: "${goal.outcome}". Confirm the goal and I'll proceed.`
+          : `Goal blocked${reason ? ` (${reason})` : ''}: ${goal.outcome}`
+    await deliverToChannel({ assistantId, userId: goal.createdByUserId, text, channelType: 'web' })
+  }
+  // Structural goal-seeker rollup: when a sub-task closes, complete any
+  // task-hosted goal whose `subtasks` done_when is now met (no acting loop, no
+  // metering).
+  const goalRollup = createGoalRollupRunner({
+    goalStore,
+    deliverGoalDone: (goal) => deliverGoalTerminal(goal, 'done', null),
+  })
+  const taskStore = createDbTaskStore({
+    onTaskTerminal: goalRollup.onTaskTerminal,
+    // Task autopilot: a top-level task auto-drafts a curated, UNCONFIRMED goal
+    // bound to it (done when the task is done). The creator confirms it (chat /
+    // board) to arm it; it never acts until then. See task-goal-autopilot.md.
+    onTaskCreate: (task, userId) => {
+      void goalStore
+        .create({
+          workspaceId: task.workspaceId,
+          host: { type: 'task', id: task.id },
+          outcome: `Complete: ${task.title}`,
+          doneWhen: { kind: 'query', query: { description: 'task complete', predicate: { hostTaskDone: true } } },
+          means: {},
+          confirmed: false, // draft
+          createdByUserId: userId,
+        })
+        .catch((err) => console.error('[goals] task auto-draft failed:', err))
+    },
+  })
   const crmStore = createDbCrmStore()
   const workspaceFilesStore = createDbWorkspaceFilesStore()
   const workflowStore = createDbWorkflowStore()
@@ -870,6 +983,30 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       provider,
       model: 'gemini-flash',
       tools: new Map([...tools].filter(([_, t]) => t.isReadOnly)),
+      // Record worker LLM COGS — the WorkerManager metering gap. COGS-only
+      // (source 'included', no userMessageId → not credit-bearing), mirroring
+      // workflow `assistant_call` turns. Guarded on usageStore: absent in OSS →
+      // workers record nothing, which is also the acting-loop metering signal.
+      // Fire-and-forget like every usageStore call.
+      onUsage: usageStore
+        ? (u) => {
+            usageStore
+              .recordUsage({
+                userId: u.userId,
+                assistantId: u.assistantId,
+                sessionId: u.sessionId,
+                model: u.model,
+                inputTokens: u.usage.inputTokens,
+                outputTokens: u.usage.outputTokens,
+                cacheReadTokens: u.usage.cacheReadTokens,
+                cacheWriteTokens: u.usage.cacheWriteTokens,
+                actualCostUsd: calculateCost(u.model, u.usage),
+                source: 'included',
+                triggerKey: 'worker_run',
+              })
+              .catch((err) => console.error('[workers] usage tracking failed:', err))
+          }
+        : undefined,
     })
     const { spawnWorker, sendWorkerMessage, stopWorker } = createWorkerTools(workerManager)
     tools.set('spawnWorker', spawnWorker)
@@ -905,6 +1042,29 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     })
     tools.set('reportBug', reportBugTool)
 
+    // Channel recording pre-flight confirm (channel-recording-preflight-confirm
+    // §5). The agent-native commit for a BIG recording held at intake: the user
+    // replies, the model calls this to enqueue (or cancel) via the existing
+    // recording-jobs queue. A base engine tool, NOT an MCP connector tool.
+    tools.set(
+      'confirmRecordingProcessing',
+      createConfirmRecordingProcessingTool({
+        buildChannelSessionKey,
+        getPending: async (recordingId) => {
+          const row = await getPendingRecordingConfirmation(recordingId)
+          return row
+            ? {
+                recordingId: row.recordingId,
+                channelSessionKey: row.channelSessionKey,
+                defaultBlueprintSlug: row.defaultBlueprintSlug,
+              }
+            : null
+        },
+        deletePending: deletePendingRecordingConfirmation,
+        enqueueRecordingJob,
+      }),
+    )
+
     // Closed capability-gated tools (triage / product-sentiment / analytics-query).
     // Open omits them; the platform injects via buildClosedTools.
     if (ports.buildClosedTools) {
@@ -924,6 +1084,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})
   const brainEpisodeIngestor: BrainEpisodeIngestor | undefined = builtIngestors?.brainEpisodeIngestor
+
+  // Structural-synthesis P4 — the RESEARCH fill. A research-tier `assistant_call`
+  // step with a `blueprintId` + page anchor fills the blueprint into the anchored
+  // page from the research gather. Built only when a model key is present (no key
+  // → no synthesis; the step degrades to free-form authoring). Same stores as the
+  // recording/generate synthesizers.
+  const researchSynthesize = env.GEMINI_API_KEY
+    ? createResearchSynthesizer({
+        provider,
+        model: 'gemini-flash',
+        savedViewStore,
+        docPageStore: createDbDocPageStore(),
+        crmStore,
+        taskStore,
+        workflowRunStore,
+        workspaceDirectory: workspaceDirectoryStore,
+        usageStore,
+        pageTemplateStore,
+        computeCostUsd: (model, usage) => calculateCost(model, usage),
+      })
+    : undefined
 
   const calleeExecutor = createCalleeExecutor({
     provider,
@@ -948,10 +1129,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     waConnectorSecret: env.WA_CONNECTOR_SECRET,
     injectExtraTools: ports.injectExtraTools,
     resolveAppSoul: ports.resolveAppSoul,
+    engineHooks: ports.engineHooks,
     savedViewStore,
     // Enables real parallel research-worker fan-out (with worker_runs rows) on
     // research-flagged no-page workflow steps. See workflow.md → "research fan-out".
     workerRunsStore,
+    // Structural-synthesis P4 — fills a blueprint into the anchored page from the
+    // research gather on a research step carrying a `blueprintId`.
+    researchSynthesize,
   })
 
   const { createAssistantModesStore } = await import('./db/assistant-modes-store.js')
@@ -1005,6 +1190,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         pageAnchorId: request.pageAnchorId,
         callerChannelType: request.caller.channelType,
         workflowId: request.workflowId,
+        blueprintId: request.blueprintId,
       })
       return { text }
     },
@@ -1188,6 +1374,114 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   workflowExecutorDeps.requestApproval = makeRequestApproval(approvalBridgeDeps)
 
+  // ── Goal-seeker acting loop (R1) ──
+  // The stateless driver: one tick = one bounded workflow run + a `done_when`
+  // self-verification + a re-arm. Port-injected over the executor (dispatch),
+  // the usageStore (R3 spend read + the §4.13 metering barrier), and the
+  // jobStore (re-arm via a one-shot `scheduled_jobs` tick). The per-iteration
+  // run session is `workflow_run_<runId>`, so spend = getSessionCostUsd of it.
+  // See goals/driver.ts + docs/plans/task-goal-seeker.md §10/§11.
+  const goalDriver = createGoalDriver({
+    goalStore,
+    tryClaim: tryClaimGoalForTick,
+    sessionCostUsd: (sessionId) =>
+      usageStore ? usageStore.getSessionCostUsd(sessionId) : Promise.resolve(0),
+    meteringAvailable: () => Boolean(usageStore),
+    // workspaceBudgetOk (the hosted per-iteration credit-cap check) is a
+    // follow-up; the per-goal maxSpend + the metering barrier are the v1 guards.
+    dispatchRun: async ({ goal, runId }) => {
+      let activeRunId = runId
+      if (activeRunId) {
+        const existing = await workflowRunStore.getRunSystem(activeRunId)
+        const isTerminal =
+          existing?.status === 'completed' || existing?.status === 'failed' || existing?.status === 'timeout'
+        if (!existing || isTerminal) activeRunId = null // terminal/missing → start fresh
+      }
+      if (!activeRunId) {
+        const wfId = goal.means.workflowId
+        if (!wfId) throw new Error(`acting goal ${goal.id} has no means.workflowId`)
+        // Pass the host task + goal as run input so a "complete this task"
+        // workflow can reference {{input.taskTitle}} / {{input.goalOutcome}}, and
+        // a `verify` goal's agent can call markGoalComplete with {{input.goalId}}.
+        const runInput: Record<string, unknown> = { goalOutcome: goal.outcome, goalId: goal.id }
+        if (goal.host?.type === 'task') {
+          const t = await query<{ title: string }>(
+            `SELECT title FROM tasks WHERE id = $1 AND valid_to IS NULL`,
+            [goal.host.id],
+          )
+          if (t.rows[0]?.title) runInput.taskTitle = t.rows[0].title
+        }
+        const run = await workflowRunStore.createRun({
+          workflowId: wfId,
+          workspaceId: goal.workspaceId,
+          triggeredBy: goal.createdByUserId,
+          triggerKind: 'manual',
+          input: runInput,
+        })
+        activeRunId = run.id
+      }
+      const outcome = await advanceWorkflowRun(workflowExecutorDeps, activeRunId)
+      const terminal = outcome.kind === 'completed' || outcome.kind === 'failed'
+      return { runId: activeRunId, terminal, completed: outcome.kind === 'completed' }
+    },
+    deliver: deliverGoalTerminal,
+    scheduleGoalTick: async (goal, fireAt, state) => {
+      const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
+      if (!assistantId) return
+      await jobStore.create({
+        assistantId,
+        userId: goal.createdByUserId ?? assistantId,
+        schedule: { type: 'once', datetime: fireAt.toISOString().slice(0, 19) },
+        timezone: 'UTC',
+        mode: 'local',
+        instructions: JSON.stringify({ kind: 'goal_tick', goalId: goal.id, state }),
+        channelType: 'workflow',
+        channelId: goal.id,
+        nextRunAt: fireAt,
+      })
+    },
+    now: () => new Date(),
+  })
+
+  // The simple default "complete this task" workflow (autopilot §5): a one-step
+  // assistant_call over the host task + goal outcome — the means a spun-up goal
+  // runs each iteration. A fresh workflow row per goal (no template store); the
+  // task title + outcome arrive as run input ({{input.*}}).
+  const createCompletionWorkflow = async (goal: GoalRecord, userId: string): Promise<string> => {
+    const assistantId = (await getPrimaryAssistantForWorkspace(goal.workspaceId)) ?? userId
+    // A `verify` goal (§12) has no objective predicate: the agent works the
+    // outcome and signals completion via markGoalComplete, gated by the
+    // adversarial verifier. A task goal keeps the close-the-task path
+    // (hostTaskDone) unchanged.
+    const isVerify = (goal.doneWhen as { kind?: string }).kind === 'verify'
+    const instructions = isVerify
+      ? 'Work toward this goal: {{input.goalOutcome}}. Use your tools to do the real work across iterations. ' +
+        'When — and only when — the outcome is genuinely achieved, call markGoalComplete with goal_id "{{input.goalId}}" ' +
+        'and a concrete "because" stating what you did that satisfies it (an independent verifier will check the claim). ' +
+        'If it cannot be finished yet, say what is blocking it and keep working next iteration.'
+      : 'Complete this task: {{input.taskTitle}}. Goal: {{input.goalOutcome}}. Use your tools to do the work, ' +
+        'then close the task (mark it done) when it is complete. If it cannot be finished yet, say what is blocking it.'
+    return buildOneStepReminderWorkflow(workflowStore, {
+      userId,
+      workspaceId: goal.workspaceId,
+      assistantId,
+      name: isVerify ? 'Work a goal to done' : 'Complete a task',
+      instructions,
+    })
+  }
+
+  // Authoring-time external-dependency preflight (fix A / B): delivery-target
+  // reachability + connector token probe. Shared by the chat-tool authoring
+  // path and the REST builder path so both reject a misconfigured workflow at
+  // create time instead of failing on every fire.
+  const workflowDependencyPreflight = createWorkflowDependencyPreflight({
+    integrationStore: integrationStore ?? undefined,
+    defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN,
+    waConnectorUrl: env.WA_CONNECTOR_URL,
+    waConnectorSecret: env.WA_CONNECTOR_SECRET,
+    connectorStore,
+  })
+
   const {
     proposeWorkflow, createWorkflow: createWorkflowTool, updateWorkflow,
     getWorkflow, runWorkflow, listWorkflows, getWorkflowRun,
@@ -1195,6 +1489,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowStore,
     runStore: workflowRunStore,
     executorDeps: workflowExecutorDeps,
+    validateDeliveryTarget: workflowDependencyPreflight.validateDeliveryTarget,
+    preflightConnectorTool: workflowDependencyPreflight.preflightConnectorTool,
     resolvePageAnchor: async (userId, pageId) => {
       const view = await savedViewStore.getById(userId, pageId)
       return view ? { workspaceId: view.workspaceId, state: view.state, name: view.name } : null
@@ -1445,6 +1741,46 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('closeTask', taskTools.closeTask)
   allTools.set('reopenTask', taskTools.reopenTask)
 
+  // ── Goal-seeker kickoff tools (default-on 'goals' capability) ──
+  const goalTools = createGoalTools(goalStore, {
+    onEvent: (evt, ctx) => {
+      const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
+      if (evt.type === 'goal_created') {
+        analytics.logEvent({ ...base, eventName: 'goal_created', metadata: { goal_id: sanitizeAnalytics(evt.goalId) } })
+        // Arm the acting loop for a goal that declares a workflow means; a
+        // no-means monitor / structural goal is left to the rollup. Fire-and-
+        // forget — a kickoff failure must never fail the setGoal tool call.
+        void goalDriver.kickoffGoal(evt.goalId).catch((err) =>
+          console.error('[goals] acting-loop kickoff failed:', err),
+        )
+      } else if (evt.type === 'goal_listed') {
+        analytics.logEvent({ ...base, eventName: 'goal_listed', metadata: { result_count: evt.resultCount, hit: evt.resultCount > 0 } })
+      }
+    },
+  })
+  allTools.set('setGoal', goalTools.setGoal)
+  allTools.set('listGoals', goalTools.listGoals)
+
+  // Confirmation clarity gate (§12) — assesses whether a goal's definition of
+  // done is clear enough to work autonomously; an unclear goal is blocked at
+  // confirm with a clarifying question. Cheap Flash classifier; fail-open.
+  const goalClarityAssessor = createGoalClarityAssessor({ provider, model: 'gemini-flash' })
+  // Agentic completion verifier (§12 Phase 3) — adversarially judges a
+  // markGoalComplete claim against the goal's outcome before it closes.
+  const goalVerifier = createGoalVerifier({ provider, model: 'gemini-flash' })
+
+  // Task-autopilot spin-up tools (confirm a draft goal; work a task to done) +
+  // the agentic completion signal (markGoalComplete).
+  const goalWorkTools = createGoalWorkTools({
+    createCompletionWorkflow,
+    kickoffGoal: goalDriver.kickoffGoal,
+    assessClarity: goalClarityAssessor,
+    verify: goalVerifier,
+  })
+  allTools.set('confirmGoal', goalWorkTools.confirmGoal)
+  allTools.set('workTask', goalWorkTools.workTask)
+  allTools.set('markGoalComplete', goalWorkTools.markGoalComplete)
+
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
 
   const crmTools = createCrmTools(crmStore, {
@@ -1586,6 +1922,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       enablementStore: workspaceSkillEnablementStore,
       mcpSettingsStore,
       connectorInstanceStore,
+      connectorGrantStore,
       resolveApprover: resolveAgentApprover,
     },
   })
@@ -1608,6 +1945,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     injectExtraTools: ports.injectExtraTools,
     resolveExtraSystemPrompt: ports.resolveExtraSystemPrompt,
     resolveAppSoul: ports.resolveAppSoul,
+    engineHooks: ports.engineHooks,
     llmProviderSettingsStore: llmProviderSettingsStore ?? undefined,
     buildWorkspaceProvider: llmProviderSettingsStore
       ? (apiKey: string) => wrapProvider(createGeminiProvider(apiKey))
@@ -1682,6 +2020,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     gdriveFilesStore,
     assistantConnectorGrantsStore,
+    engineHooks: ports.engineHooks,
   }))
 
   app.use('/api/v1', assistantMcpRoutes({
@@ -1944,6 +2283,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     gcs: filesBlobClient,
   }))
 
+  // PUBLIC closed routes mount HERE — before the bare `/api` requireAuth guards
+  // below. Mounting them via `mountExtraRoutes` (which runs last) lets the first
+  // bare guard 401 them first. See OpenApiPorts.mountPublicExtraRoutes.
+  if (ports.mountPublicExtraRoutes) {
+    await ports.mountPublicExtraRoutes(app, { linkedAccountStore, integrationStore, workspaceStore })
+  }
+
+  // Workflow webhook receiver — PUBLIC + self-authenticating (per-workflow HMAC,
+  // not the user JWT). It MUST mount here, before the bare `app.use('/api',
+  // requireAuth(...))` guards below: Express runs path-prefix middleware in
+  // registration order, so a later-registered public `/api` route is 401'd by
+  // the first bare guard before its handler ever runs (the same footgun the
+  // comment above describes — it shadowed this exact route until 2026-06-30).
+  // External senders POST with `X-Workflow-Signature`, never a Bearer token.
+  // See docs/architecture/features/workflow.md §Webhook trigger.
+  app.use('/api', workflowWebhookRoutes({
+    workflowStore,
+    runStore: workflowRunStore,
+    runDeps: workflowExecutorDeps,
+  }))
+
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,
     workspaceStore,
@@ -1963,6 +2323,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     stagedWriteDeps: { rawWrites: agentToolset.rawWrites },
   }))
 
+  // Goals board — read-only observability over the goal-seeker primitive.
+  app.use(
+    '/api/goals',
+    requireAuth(env.JWT_SECRET),
+    goalsRoutes({
+      goalStore,
+      workspaceStore,
+      createCompletionWorkflow,
+      kickoffGoal: goalDriver.kickoffGoal,
+      assessClarity: goalClarityAssessor,
+    }),
+  )
+
   app.use('/api', requireAuth(env.JWT_SECRET), workflowsRoutes({
     workflowStore,
     runStore: workflowRunStore,
@@ -1972,6 +2345,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     listTriggerJobs: (workflowId) => jobStore.listTriggerJobsForWorkflowSystem(workflowId),
     jobStore,
     resolvePrimary: workflowExecutorDeps.resolvePrimary,
+    validateDeliveryTarget: workflowDependencyPreflight.validateDeliveryTarget,
+    preflightConnectorTool: workflowDependencyPreflight.preflightConnectorTool,
     emitAudit: async (event) => {
       await workspaceAuditStore.append({
         workspaceId: event.workspaceId,
@@ -1981,12 +2356,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         details: { name: event.name },
       })
     },
-  }))
-
-  app.use('/api', workflowWebhookRoutes({
-    workflowStore,
-    runStore: workflowRunStore,
-    runDeps: workflowExecutorDeps,
   }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), viewsRoutes({
@@ -2099,6 +2468,21 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     jobStore,
     analytics,
     runWorkflowFromJob: async (job) => {
+      // Goal-tick (acting loop, R1): the job carries no workflowId/stepRunId —
+      // the goal's own means.workflowId is what each iteration runs. The
+      // poll-worker's once-job handling deletes this row after we return, and
+      // the tick's own re-arm writes the next one-shot (or terminates).
+      let goalTick: { goalId: string; state?: GoalLoopState } | null = null
+      try {
+        const p = JSON.parse(job.instructions) as { kind?: string; goalId?: string; state?: GoalLoopState }
+        if (p.kind === 'goal_tick' && p.goalId) goalTick = { goalId: p.goalId, state: p.state }
+      } catch {
+        /* not JSON / not a goal tick — fall through to the workflow paths */
+      }
+      if (goalTick) {
+        await goalDriver.tickGoal(goalTick.goalId, goalTick.state)
+        return `goal tick: ${goalTick.goalId}`
+      }
       if (!job.workflowId) return 'no workflow_id on job'
       if (job.workflowStepRunId) {
         const runId = await getRunIdForStepRun(job.workflowStepRunId)
@@ -2566,6 +2950,28 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }, 24 * 60 * 60 * 1000)
   }
 
+  // Structural-synthesis callback for the recording path (blueprint → brief page
+  // + guided capture). Built here where the doc/CRM/task/directory stores live;
+  // the closed recording factory only holds the reference. Undefined without a
+  // Gemini key (the searchRecording vector arm needs the embedder). See
+  // docs/architecture/brain/structural-synthesis.md → "The first source".
+  const recordingSynthesize: RecordingSynthesizeFn | undefined = env.GEMINI_API_KEY
+    ? createRecordingSynthesizer({
+        provider,
+        model: 'gemini-flash',
+        savedViewStore,
+        docPageStore: createDbDocPageStore(),
+        crmStore,
+        taskStore,
+        workflowRunStore,
+        workspaceDirectory: workspaceDirectoryStore,
+        embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
+        usageStore,
+        pageTemplateStore,
+        computeCostUsd: (model, usage) => calculateCost(model, usage),
+      })
+    : undefined
+
   // ════════════════════════════════════════════════════════════════
   // BootContext
   // ════════════════════════════════════════════════════════════════
@@ -2577,6 +2983,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     env,
     runWorkers,
     port,
+    engineHooks: ports.engineHooks,
     workspaceStore,
     workspaceAuditStore,
     memoryStore,
@@ -2585,6 +2992,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     episodesStore,
     crmStore,
     taskStore,
+    recordingSynthesize,
     connectorStore,
     connectorInstanceStore,
     mcpSettingsStore,
