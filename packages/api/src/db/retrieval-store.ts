@@ -778,9 +778,9 @@ async function searchContactsScope(
 ): Promise<ScoredRow[]> {
   const values: unknown[] = []
   const visibility = visibilityPredicate(actor, opts.asOf, values)
+  // No tagsColumn: entity tags live in `attributes`, not a column.
   const filters = applyFlatFilters(opts.filters, values, {
     sinceColumn: 'valid_from',
-    tagsColumn: 'tags',
     sourceColumn: 'source',
     sensitivityColumn: 'sensitivity',
   })
@@ -801,11 +801,17 @@ async function searchContactsScope(
     }
   >(
     actor.userId,
-    `SELECT id AS row_id, name, email, sensitivity, valid_from,
+    // Post CRM→entity unification: contacts are `entities` of kind=person;
+    // typed fields live in `attributes`. Self entity excluded.
+    `SELECT id AS row_id, display_name AS name,
+            COALESCE(attributes->>'email', canonical_id) AS email,
+            sensitivity, valid_from,
             source, verified_by_user_id, retracted_at
-       FROM contacts
+       FROM entities
       WHERE ${visibility}${filters}
-        AND (name ILIKE $${likeIdx} OR email ILIKE $${likeIdx} OR phone ILIKE $${likeIdx})
+        AND kind = 'person'
+        AND NOT COALESCE((attributes->>'self')::boolean, false)
+        AND (display_name ILIKE $${likeIdx} OR attributes->>'email' ILIKE $${likeIdx} OR attributes->>'phone' ILIKE $${likeIdx})
       ORDER BY valid_from DESC, id DESC
       LIMIT $${limIdx} OFFSET $${offIdx}`,
     values,
@@ -834,9 +840,9 @@ async function searchCompaniesScope(
 ): Promise<ScoredRow[]> {
   const values: unknown[] = []
   const visibility = visibilityPredicate(actor, opts.asOf, values)
+  // No tagsColumn: entity tags live in `attributes`, not a column.
   const filters = applyFlatFilters(opts.filters, values, {
     sinceColumn: 'valid_from',
-    tagsColumn: 'tags',
     sourceColumn: 'source',
     sensitivityColumn: 'sensitivity',
   })
@@ -857,11 +863,15 @@ async function searchCompaniesScope(
     }
   >(
     actor.userId,
-    `SELECT id AS row_id, name, domain, sensitivity, valid_from,
+    // Companies are `entities` of kind=company; domain in attributes.
+    `SELECT id AS row_id, display_name AS name,
+            COALESCE(attributes->>'domain', canonical_id) AS domain,
+            sensitivity, valid_from,
             source, verified_by_user_id, retracted_at
-       FROM companies
+       FROM entities
       WHERE ${visibility}${filters}
-        AND (name ILIKE $${likeIdx} OR domain ILIKE $${likeIdx})
+        AND kind = 'company'
+        AND (display_name ILIKE $${likeIdx} OR attributes->>'domain' ILIKE $${likeIdx})
       ORDER BY valid_from DESC, id DESC
       LIMIT $${limIdx} OFFSET $${offIdx}`,
     values,
@@ -914,10 +924,13 @@ async function searchDealsScope(
     }
   >(
     actor.userId,
-    `SELECT id AS row_id, stage, sensitivity, valid_from,
+    // Deals are `entities` of kind=deal; stage in attributes.
+    `SELECT id AS row_id, COALESCE(attributes->>'stage', 'lead') AS stage,
+            sensitivity, valid_from,
             source, verified_by_user_id, retracted_at
-       FROM deals
+       FROM entities
       WHERE ${visibility}${filters}
+        AND kind = 'deal'
       ORDER BY valid_from DESC, id DESC
       LIMIT $${limIdx} OFFSET $${offIdx}`,
     values,

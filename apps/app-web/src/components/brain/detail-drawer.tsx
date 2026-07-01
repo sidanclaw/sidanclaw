@@ -64,7 +64,6 @@ import {
   reclassifyEntityKind,
   promoteEntityToCrm,
   type PromoteToCrmParams,
-  fetchCrmCompanion,
   addEntityAlias,
   removeEntityAlias,
 } from "@/lib/api/brain-inbox";
@@ -331,32 +330,30 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
 
     async function loadDetail() {
       if (!displayRow) return;
-      let routedKind = displayRow.kind;
-      let routedId = displayRow.id;
+      const routedKind = displayRow.kind;
+      const routedId = displayRow.id;
 
-      // CRM-entity-kind redirect (graph click → list-equivalent fetch).
+      // Post CRM→entity unification the entity IS the record — there is no
+      // separate specialization row to resolve. A graph click on a
+      // person/company/deal node maps its kind to the plural primitive,
+      // keeping the SAME id (the id is the entity id), so it renders
+      // identically to the list view. This removal of the companion
+      // redirect is what fixes the self-entity "PERSON vs PEOPLE"
+      // inconsistency (every entity now renders one consistent label).
       if (isCrmEntityKind) {
-        const companion = await fetchCrmCompanion(workspaceId, displayRow.id);
-        if (cancelled) return;
-        if (companion) {
-          routedKind =
-            companion.primitive === "company"
-              ? "companies"
-              : companion.primitive === "contact"
-                ? "people"
-                : "deals";
-          routedId = companion.id;
-          // Swap displayRow so downstream `isEntityKind`, edit handlers,
-          // and the resync-on-detail-change effect all see the redirected
-          // row. Same shape as the list view would have passed.
-          setDisplayRow({
-            id: routedId,
-            kind: routedKind as BrainRow["kind"],
-            name: displayRow.name,
-            sensitivity: displayRow.sensitivity,
-          });
-          return; // The setDisplayRow above re-triggers this effect; let it run again.
-        }
+        const routedKind =
+          displayRow.kind === "company"
+            ? "companies"
+            : displayRow.kind === "person"
+              ? "people"
+              : "deals";
+        setDisplayRow({
+          id: displayRow.id,
+          kind: routedKind as BrainRow["kind"],
+          name: displayRow.name,
+          sensitivity: displayRow.sensitivity,
+        });
+        return; // re-triggers this effect with the plural primitive kind.
       }
 
       const inboxPrim = brainKindToInboxPrimitive(routedKind);

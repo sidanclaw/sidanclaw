@@ -221,19 +221,10 @@ export async function adjustBrainRow(
  * Returns `null` when the entity is non-CRM or is missing a companion
  * row (data-integrity edge case — the UI falls back to entity view).
  */
-export async function fetchCrmCompanion(
-  workspaceId: string,
-  entityId: string,
-): Promise<{ primitive: "company" | "contact" | "deal"; id: string } | null> {
-  const res = await authFetch(
-    `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}/entity/${encodeURIComponent(entityId)}/crm-companion`,
-  );
-  if (!res.ok) return null;
-  const body = (await res.json().catch(() => ({}))) as {
-    companion?: { primitive: "company" | "contact" | "deal"; id: string } | null;
-  };
-  return body.companion ?? null;
-}
+// (Removed) fetchCrmCompanion + the /crm-companion route. Post CRM→entity
+// unification a person/company/deal IS the entity, so the detail drawer
+// maps the entity kind to its plural primitive and fetches the entity
+// directly (see detail-drawer.tsx) — no companion lookup.
 
 /** Add an alias to an entity. Returns the updated alias list on
  *  success. Returns `{ conflict: true, conflictingEntityId }` when the
