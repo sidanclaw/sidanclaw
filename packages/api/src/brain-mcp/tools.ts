@@ -60,6 +60,8 @@ import {
   instantiatePageTemplate,
   pageTemplateIds,
   withFreshBlockIds,
+  PAGE_TEMPLATE_CATEGORIES,
+  pageTemplateCategorySchema,
 } from '@sidanclaw/core'
 import type {
   BindingConfig,
@@ -202,11 +204,13 @@ export type BrainDocTools = {
   docPageStore: Pick<DocPageStore, 'getVersionedPage' | 'applyPatch'>
   /**
    * Custom page templates (migration 281). When wired, `listPageTemplates`
-   * also surfaces the workspace's custom templates and `createPageFromTemplate`
-   * resolves a custom template id (a uuid) to its stored blocks. Optional — a
-   * deploy without the store still serves the built-in catalog.
+   * also surfaces the workspace's custom templates, `createPageFromTemplate`
+   * resolves a custom template id (a uuid) to its stored blocks, and
+   * `createPageTemplate` persists a new workspace template. Optional — a
+   * deploy without the store still serves the built-in catalog (read +
+   * instantiate), but `createPageTemplate` (no built-in fallback) is omitted.
    */
-  pageTemplateStore?: Pick<PageTemplateStore, 'list' | 'getById'>
+  pageTemplateStore?: Pick<PageTemplateStore, 'list' | 'getById' | 'create'>
 }
 
 /** Cap on `readPage` title-search matches surfaced to the agent. */
@@ -378,6 +382,12 @@ function capPageMarkdown(md: string): string {
  *                    create path reuses the same `createDraft` seam as
  *                    `createPage`, seeding the page with the template's blocks
  *                    + icon. See docs/architecture/features/doc-templates.md.
+ *   - `createPageTemplate` (write) → persists a NEW workspace custom template
+ *                    (`pageTemplateStore.create`, migration 281) from a Markdown
+ *                    body parsed with the same `markdownToBlocks` +
+ *                    `normalizeMarkdownBlocks` path. Present only when the
+ *                    optional `pageTemplateStore` is wired (no built-in
+ *                    fallback). See doc-templates.md → "Custom templates".
  *
  * Spec pointer (file is OSS, not present in this repo):
  * docs/architecture/integrations/mcp.md → brain MCP page tools.
@@ -394,6 +404,7 @@ function buildDocPageTools(
   createPage: BrainTool
   listPageTemplates: BrainTool
   createPageFromTemplate: BrainTool
+  createPageTemplate: BrainTool
 } {
   const { savedViewStore, docPageStore, pageTemplateStore } = docTools
 
@@ -895,6 +906,111 @@ function buildDocPageTools(
     },
   }
 
+  // ── createPageTemplate ────────────────────────────────────────
+  //
+  // A write tool that persists a NEW workspace CUSTOM template (migration 281).
+  // The inverse of `createPageFromTemplate`: instead of instantiating a template
+  // into a page, it snapshots a Markdown body into a reusable, workspace-shared
+  // template row. The body is parsed with the SAME `markdownToBlocks` +
+  // `normalizeMarkdownBlocks` path `createPage` runs, so a template authored
+  // over MCP carries the identical canonical block list a hand-authored one
+  // would — and `createPageFromTemplate` (which re-mints block ids via
+  // `withFreshBlockIds`) can instantiate it straight away. Strictly needs the
+  // optional `pageTemplateStore` — there is no built-in catalog to fall back to
+  // (the code catalog is read-only), so the tool is registered only when the
+  // store is wired; the in-handler guard is defensive.
+  const createPageTemplate: BrainTool = {
+    name: 'createPageTemplate',
+    description:
+      'Create a NEW reusable workspace page template from Markdown. The template ' +
+      'is saved to the workspace gallery (shared with every member) and can then ' +
+      'be instantiated into pages with `createPageFromTemplate`; its id also ' +
+      'appears in `listPageTemplates` (labelled custom). Provide a `name`, a ' +
+      `\`category\` (one of: ${PAGE_TEMPLATE_CATEGORIES.join(', ')}), and the ` +
+      'template body as Markdown `content` (headings, lists, checklists, tables, ' +
+      'callouts — the same Markdown `createPage` accepts). Optional `description` ' +
+      "and `icon` (an emoji). Returns the new templateId. Scoped to the key's " +
+      'workspace.',
+    inputSchema: {
+      name: z
+        .string()
+        .min(1)
+        .max(256)
+        .describe('Display name for the template (shown in the gallery).'),
+      category: pageTemplateCategorySchema.describe(
+        `Gallery category: one of ${PAGE_TEMPLATE_CATEGORIES.join(', ')}.`,
+      ),
+      content: z
+        .string()
+        .min(1)
+        .max(MAX_EDIT_CHARS)
+        .describe('Markdown body — the page skeleton this template seeds.'),
+      description: z
+        .string()
+        .max(2000)
+        .optional()
+        .describe('Optional one-line description shown in the gallery.'),
+      icon: z
+        .string()
+        .max(16)
+        .optional()
+        .describe("Optional emoji glyph; seeds the template's (and seeded page's) icon."),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      // Strictly needs the custom-template store — there is no built-in fallback
+      // (unlike listPageTemplates / createPageFromTemplate, which serve the code
+      // catalog). A deploy without the store never registers this tool; guard
+      // defensively in case it is reached anyway.
+      if (!pageTemplateStore?.create) {
+        return text('Custom page templates are not enabled on this deployment.', true)
+      }
+      const name = typeof args.name === 'string' ? args.name.trim() : ''
+      if (!name) return text('Provide a `name` for the template.', true)
+      const category = pageTemplateCategorySchema.safeParse(args.category)
+      if (!category.success) {
+        return text(
+          `Provide a valid \`category\` (one of: ${PAGE_TEMPLATE_CATEGORIES.join(', ')}).`,
+          true,
+        )
+      }
+      const content = typeof args.content === 'string' ? args.content : ''
+      const description =
+        typeof args.description === 'string' && args.description.trim()
+          ? args.description.trim()
+          : null
+      const icon = typeof args.icon === 'string' && args.icon.trim() ? args.icon.trim() : null
+
+      // Same Markdown → blocks expansion `createPage` / `editPage` run, so a
+      // template body lands as the identical canonical block list a hand-authored
+      // page would. A template must carry at least one block (the store's
+      // `blocks` schema enforces min(1) too).
+      const blocks = normalizeMarkdownBlocks(markdownToBlocks(content))
+      if (blocks.length === 0) {
+        return text('The `content` produced no blocks — provide some Markdown text.', true)
+      }
+
+      try {
+        const created = await pageTemplateStore.create(ctx.userId, {
+          workspaceId,
+          name,
+          description,
+          icon,
+          category: category.data,
+          blocks,
+        })
+        return text(
+          `Created page template "${created.name}" (templateId: ${created.id}, category: ${created.category}). ` +
+            'Pass this id to createPageFromTemplate to mint a page from it.',
+        )
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return text(`Failed to create the template: ${msg}`, true)
+      }
+    },
+  }
+
   return {
     readPage,
     listPages,
@@ -903,6 +1019,7 @@ function buildDocPageTools(
     createPage,
     listPageTemplates: listPageTemplatesTool,
     createPageFromTemplate,
+    createPageTemplate,
   }
 }
 
@@ -1280,6 +1397,10 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
           docPageTools.deletePage,
           docPageTools.createPage,
           docPageTools.createPageFromTemplate,
+          // Custom-template authoring has no built-in fallback, so it is exposed
+          // only when the `pageTemplateStore` is wired (mirrors the store gate
+          // inside the handler). Built-in catalog tools above need no store.
+          ...(opts.docTools?.pageTemplateStore ? [docPageTools.createPageTemplate] : []),
         ]
       : []),
     ...agentWriteBridges,
