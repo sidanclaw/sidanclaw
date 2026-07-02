@@ -228,6 +228,7 @@ import { publicShareRoutes } from './routes/public-share.js'
 import { docThemesRoutes } from './routes/doc-themes.js'
 import { runIngestPage } from './doc/ingest-page-runner.js'
 import { internalIngestRoutes } from './doc/internal-ingest-route.js'
+import { internalPageEventRoutes } from './doc/internal-page-event-route.js'
 import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanout.js'
@@ -2540,6 +2541,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       ingestPage: ingestPageRunner,
     }))
   }
+
+  // Internal content-edit page-event endpoint — doc-sync POSTs here on a
+  // debounced Yjs settle so a *block-content* edit (which never flows through
+  // the saved-views store's metadata `update`) still fires a `page`-source
+  // `updated` workflow. Shared-secret gated (DOC_SYNC_SECRET); no Pipeline B
+  // dependency, so mounted UNCONDITIONALLY — both editions get content-edit
+  // triggers. Feeds the same late-bound `publishPageLifecycle` seam the store's
+  // metadata writes use. NB: NO requireAuth (shared-secret header, not a JWT).
+  app.use('/', internalPageEventRoutes({
+    savedViewStore,
+    publish: publishPageLifecycle,
+  }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), docEntitiesRoutes({ docEntityStore, workspaceStore }))
 
