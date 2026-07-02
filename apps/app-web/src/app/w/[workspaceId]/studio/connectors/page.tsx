@@ -661,6 +661,17 @@ function ConnectorsList() {
   const [gcsProjectId, setGcsProjectId] = useState("");
   const [gcsError, setGcsError] = useState<string | null>(null);
 
+  // Bring-your-own S3-compatible storage form state (the `s3` connector).
+  // Sibling of the GCS form: bucket + region + endpoint + access/secret keys,
+  // validated on the server.
+  const [showS3Form, setShowS3Form] = useState<string | null>(null);
+  const [s3Bucket, setS3Bucket] = useState("");
+  const [s3Region, setS3Region] = useState("");
+  const [s3Endpoint, setS3Endpoint] = useState("");
+  const [s3AccessKeyId, setS3AccessKeyId] = useState("");
+  const [s3SecretKey, setS3SecretKey] = useState("");
+  const [s3Error, setS3Error] = useState<string | null>(null);
+
   // "Add another account" state — provider slug whose add-another form is open,
   // plus the nickname + secret for the new instance.
   const [addAnotherFor, setAddAnotherFor] = useState<string | null>(null);
@@ -724,6 +735,10 @@ function ConnectorsList() {
         // connected state + Remove affordance) whenever a binding exists.
         if (rows.some((r) => r.id === "gcs" && r.connectorInstanceId)) {
           rows = rows.filter((r) => !(r.id === "gcs" && !r.connectorInstanceId));
+        }
+        // Same collapse for the workspace-scoped `s3` storage binding.
+        if (rows.some((r) => r.id === "s3" && r.connectorInstanceId)) {
+          rows = rows.filter((r) => !(r.id === "s3" && !r.connectorInstanceId));
         }
         setConnectors(rows);
       })
@@ -977,6 +992,15 @@ function ConnectorsList() {
       return;
     }
 
+    // S3-compatible bring-your-own storage — show the access-key + bucket form
+    // (validated server-side) instead of the generic mark-connected POST.
+    if (id === "s3") {
+      setShowS3Form(rid);
+      setS3Error(null);
+      setConnecting(null);
+      return;
+    }
+
     // Notion OAuth — separate flow (different auth URL, no scopes). The
     // workspaceId is threaded through `state` so the server callback can
     // redirect back to this workspace-scoped route. `armConnectorOauthState`
@@ -1208,6 +1232,49 @@ function ConnectorsList() {
     setConnecting(null);
   }
 
+  // Connect the workspace's own S3-compatible bucket. The server validates the
+  // keys with a write/read/delete probe before persisting, so bad keys or a
+  // wrong endpoint surface here.
+  async function handleSaveS3(c: Connector) {
+    if (!s3Bucket.trim() || !s3AccessKeyId.trim() || !s3SecretKey.trim()) return;
+    const rid = rowId(c);
+    setConnecting(rid);
+    setS3Error(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/s3/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          bucket: s3Bucket.trim(),
+          region: s3Region.trim() || undefined,
+          endpoint: s3Endpoint.trim() || undefined,
+          accessKeyId: s3AccessKeyId.trim(),
+          secretAccessKey: s3SecretKey,
+        }),
+      });
+      if (res.ok) {
+        setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: true } : x)));
+        setSelected(rid);
+        setShowS3Form(null);
+        setS3Bucket(""); setS3Region(""); setS3Endpoint(""); setS3AccessKeyId(""); setS3SecretKey("");
+        fetchConnectors();
+        setJustConnectedId(c.id);
+      } else {
+        const data = (await res.json().catch(() => ({}))) as { code?: string };
+        setS3Error(
+          data.code === "permission_denied" ? tc.s3.errPermission
+          : data.code === "bucket_unreachable" ? tc.s3.errBucket
+          : data.code === "invalid_key" ? tc.s3.errKey
+          : tc.s3.errGeneric,
+        );
+      }
+    } catch {
+      setS3Error(tc.s3.errGeneric);
+    }
+    setConnecting(null);
+  }
+
   async function handlePolicyChange(connectorId: string, serverName: string, toolName: string, policy: "allow" | "ask" | "block") {
     setToolsMap((prev) => {
       const entry = prev[connectorId];
@@ -1340,6 +1407,22 @@ function ConnectorsList() {
       setSelected(null);
       try {
         await authFetch(`${API_URL}/api/connectors/gcs/disconnect`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspaceId }),
+        });
+      } catch {}
+      fetchConnectors();
+      return;
+    }
+
+    // S3 uses the workspace-scoped disconnect (wipes the stored keys; new
+    // writes revert to the default bucket).
+    if (c.id === "s3") {
+      setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: false } : x)));
+      setSelected(null);
+      try {
+        await authFetch(`${API_URL}/api/connectors/s3/disconnect`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ workspaceId }),
@@ -2397,6 +2480,71 @@ function ConnectorsList() {
                         className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.gcs.validatingBtn : tc.gcs.connectBtn}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* S3-compatible bring-your-own storage form — bucket + region +
+                    endpoint + access/secret keys, validated server-side before
+                    the binding is saved. */}
+                {showS3Form === rid && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{tc.s3.formHelp}</p>
+                    <input
+                      type="text"
+                      placeholder={tc.s3.bucketPlaceholder}
+                      value={s3Bucket}
+                      onChange={(e) => setS3Bucket(e.target.value)}
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      autoFocus
+                    />
+                    <input
+                      type="text"
+                      placeholder={tc.s3.regionPlaceholder}
+                      value={s3Region}
+                      onChange={(e) => setS3Region(e.target.value)}
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <input
+                      type="text"
+                      placeholder={tc.s3.endpointPlaceholder}
+                      value={s3Endpoint}
+                      onChange={(e) => setS3Endpoint(e.target.value)}
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <input
+                      type="text"
+                      placeholder={tc.s3.accessKeyPlaceholder}
+                      value={s3AccessKeyId}
+                      onChange={(e) => setS3AccessKeyId(e.target.value)}
+                      autoComplete="off"
+                      className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <input
+                      type="password"
+                      placeholder={tc.s3.secretKeyPlaceholder}
+                      value={s3SecretKey}
+                      onChange={(e) => setS3SecretKey(e.target.value)}
+                      autoComplete="off"
+                      className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <p className="text-[11px] text-muted-foreground">{tc.s3.leastPriv}</p>
+                    <p className="text-[11px] text-muted-foreground">{tc.s3.endpointNote}</p>
+                    {s3Error && <p className="text-xs text-destructive">{s3Error}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => { setShowS3Form(null); setS3Bucket(""); setS3Region(""); setS3Endpoint(""); setS3AccessKeyId(""); setS3SecretKey(""); setS3Error(null); }}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                      >
+                        {tc.cancel}
+                      </button>
+                      <button
+                        onClick={() => handleSaveS3(sel)}
+                        disabled={!s3Bucket.trim() || !s3AccessKeyId.trim() || !s3SecretKey.trim() || connecting === rid}
+                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                      >
+                        {connecting === rid ? tc.s3.validatingBtn : tc.s3.connectBtn}
                       </button>
                     </div>
                   </div>
