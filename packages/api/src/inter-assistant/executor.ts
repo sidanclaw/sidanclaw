@@ -44,6 +44,7 @@ import {
   filterToolsByAllowList,
   filterToolsByCapabilities,
   createMemoryTools,
+  createRetrievalTools,
   createConfirmationResolver,
   resolveResearchBudget,
   ASSISTANT_CALL_DEFAULT_BUDGET,
@@ -62,14 +63,14 @@ import { runProactiveCompaction } from '../routes/proactive-compaction.js'
 import { registerSchedulerResolver, unregisterSchedulerResolver } from '../scheduling/confirmation-registry.js'
 import { sendConfirmationPrompt } from '../scheduling/confirmation-prompt.js'
 import { findAssistantById, findUserById } from '../db/users.js'
-import { getConnectorUserId } from '../db/workspace-store.js'
+import { getConnectorUserId, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type {
   McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore,
-  EpisodicStore, UsageStore, AnalyticsLogger,
+  EpisodicStore, UsageStore, AnalyticsLogger, RetrievalStore,
 } from '@sidanclaw/core'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
@@ -81,6 +82,16 @@ export type CalleeExecutorOptions = {
   /** Base tool set (will be cloned + MCP-injected per callee). */
   tools: Map<string, Tool>
   memoryStore: MemoryStore
+  /**
+   * Company-brain retrieval store. When set (and the callee is workspace-
+   * scoped, free-mode), the 6 brain read tools (`recentEpisodes`, `search`,
+   * `getEntity`, `provenance`, `aggregate`, `getRowHistory`) are injected —
+   * mirroring the per-turn injection the interactive chat route does. Absent
+   * here was the structural hole behind a workflow `assistant_call` that reads
+   * the brain (e.g. "summarize github_sync episodes") having no brain-read tool
+   * at all: the model, told to call `recentEpisodes`, could never find it.
+   */
+  retrievalStore?: RetrievalStore
   /** MCP injection dependencies. */
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
@@ -477,6 +488,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // Ordinary askAssistant free-mode consults keep read-only memory; write
     // stays workflow-scoped. For restricted mode the mode's exposedTools list
     // is the source of truth (the owner lists `getMemory` / `saveMemory`).
+    //
+    // Read ceilings are resolved once here when brain retrieval tools are
+    // injected below, and threaded onto the query-loop ToolContext so the
+    // retrieval actor is workspace + clearance + compartment scoped (same
+    // `min(member, assistant)` ceiling the interactive chat route applies).
+    let retrievalReadCeilings:
+      | Awaited<ReturnType<typeof resolveReadCeilingsSystem>>
+      | null = null
     if (params.mode === null) {
       // Workflow-origin consults auto-tag every created memory `workflow:<id>`
       // (memory continuity — the deterministic key prior-run visibility reads
@@ -489,6 +508,41 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       modeTools.set('getMemory', getMemory)
       if (params.callerChannelType === 'workflow') {
         modeTools.set('saveMemory', saveMemory)
+      }
+
+      // Company-brain READ tools — the 6 retrieval tools the interactive chat
+      // route injects per-turn (`recentEpisodes`, `search`, `getEntity`,
+      // `provenance`, `aggregate`, `getRowHistory`). Without them a workflow
+      // step that reads the brain (e.g. "summarize the last 24h of github_sync
+      // episodes") had no tool to call — the model, prompted to call
+      // `recentEpisodes`, hunted via mcp_search, failed, and delivered a
+      // fallback (the "recentEpisodes not present in my toolset" incident).
+      // Workspace-scoped only: the actor's permission predicate filters every
+      // read on the workspace partition, so a personal (no-workspace) callee
+      // would only error in `actorFromContext`. Reads are clearance +
+      // compartment projected via the ceilings set on the ToolContext below.
+      if (options.retrievalStore && calleeAssistant.workspaceId) {
+        retrievalReadCeilings = await resolveReadCeilingsSystem(
+          calleeActorUserId,
+          calleeAssistant.workspaceId,
+          calleeAssistant.clearance,
+          calleeAssistant.compartments,
+        )
+        const retrievalTools = createRetrievalTools(options.retrievalStore, {
+          onEvent: (evt) => {
+            options.analytics?.logEvent({
+              userId: calleeActorUserId,
+              assistantId: params.calleeAssistantId,
+              sessionId: session.id,
+              eventName: `brain_${evt.type}`,
+              channelType: 'workflow',
+              metadata: {},
+            })
+          },
+        })
+        for (const [name, tool] of Object.entries(retrievalTools)) {
+          modeTools.set(name, tool)
+        }
       }
     }
 
@@ -887,11 +941,20 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           channelId: params.callerAssistantId,
           // A page anchor already passed the workspace gate above — the doc
           // tools need workspaceId regardless of the memory-mode conditional.
+          // Brain retrieval tools (when injected) likewise require a
+          // workspace-scoped actor, so `retrievalReadCeilings` being set forces
+          // the bind too.
           workspaceId:
-            params.pageAnchorId || includeWorkspaceMemories
+            params.pageAnchorId || includeWorkspaceMemories || retrievalReadCeilings
               ? (calleeAssistant.workspaceId ?? undefined)
               : undefined,
           assistantKind: calleeAssistant.kind,
+          // Read ceilings for the brain retrieval actor — the `min(member,
+          // assistant)` clearance + compartment grant. Set only when retrieval
+          // tools were injected; absent otherwise (passthrough, unchanged for
+          // callees without brain reads).
+          clearance: retrievalReadCeilings?.clearance,
+          compartments: retrievalReadCeilings?.compartments,
           // Doc anchor: renderView/renderChart append to this page instead
           // of minting drafts; patchPage/getCurrentPage target it.
           docViewId: params.pageAnchorId ?? null,

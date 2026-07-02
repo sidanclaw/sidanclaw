@@ -1129,6 +1129,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     provider,
     tools: allTools,
     memoryStore,
+    // Brain retrieval store — enables the 6 read tools (recentEpisodes/search/
+    // getEntity/...) on workflow `assistant_call` + free-mode consults, the
+    // same surface the interactive chat route injects per-turn.
+    retrievalStore,
     connectorStore,
     mcpSettingsStore,
     assistantConnectorStore,

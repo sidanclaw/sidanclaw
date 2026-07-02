@@ -41,6 +41,12 @@ vi.mock('../../db/workspace-store.js', () => ({
   // injectMcpTools gates the owner-personal base load on this; `true`
   // (solo workspace) preserves the pre-gate load behavior these tests expect.
   isSoloWorkspaceSystem: vi.fn().mockResolvedValue(true),
+  // Read-ceiling resolver for the brain retrieval actor. Returned shape mirrors
+  // the real `min(member, assistant)` ceiling; the callee threads it onto the
+  // query-loop ToolContext.
+  resolveReadCeilingsSystem: vi
+    .fn()
+    .mockResolvedValue({ clearance: 'confidential', compartments: null }),
 }))
 vi.mock('../../mcp/inject.js', () => ({
   injectMcpTools: vi.fn().mockResolvedValue({ enrichConfirmation: async (_t: string, i: unknown) => i, unavailable: [] }),
@@ -282,6 +288,91 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
     expect(passedTools.has('getMemory')).toBe(true)
     expect(passedTools.has('saveMemory')).toBe(false)
+  })
+
+  // ── Brain retrieval tools on the callee path (workflow assistant_call) ──
+  // Regression: a workflow step prompted to call `recentEpisodes` (read the
+  // company brain) found no such tool because the callee executor never
+  // injected the retrieval surface the interactive chat route injects per-turn.
+  const workspaceCallee = { ...calleeAssistant, workspaceId: 'ws-1', compartments: null }
+  const RETRIEVAL_TOOL_NAMES = [
+    'recentEpisodes', 'search', 'getEntity', 'provenance', 'aggregate', 'getRowHistory',
+  ]
+  function calleeWithRetrieval() {
+    return createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      retrievalStore: {} as never,
+    })
+  }
+
+  it('injects the 6 brain retrieval tools for a free-mode workspace consult when a retrievalStore is wired', async () => {
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? workspaceCallee : id === 'caller-1' ? callerAssistant : null) as never,
+    )
+    yields([{ type: 'turn_complete', response: { content: [] } }])
+    await calleeWithRetrieval()({ ...baseParams, callerChannelType: 'workflow' })
+    const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    for (const name of RETRIEVAL_TOOL_NAMES) {
+      expect(passedTools.has(name)).toBe(true)
+    }
+  })
+
+  it('scopes the query-loop actor to the workspace + read ceiling when retrieval tools are injected', async () => {
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? workspaceCallee : id === 'caller-1' ? callerAssistant : null) as never,
+    )
+    yields([{ type: 'turn_complete', response: { content: [] } }])
+    await calleeWithRetrieval()({ ...baseParams, callerChannelType: 'workflow' })
+    const ctx = mockQueryLoop.mock.calls[0][0].context as Record<string, unknown>
+    // actorFromContext requires a workspace bind; the read ceiling drives the
+    // clearance/compartment projection.
+    expect(ctx.workspaceId).toBe('ws-1')
+    expect(ctx.clearance).toBe('confidential')
+    expect(ctx.compartments).toBe(null)
+  })
+
+  it('omits the retrieval tools when no retrievalStore is wired (open build / unconfigured)', async () => {
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? workspaceCallee : id === 'caller-1' ? callerAssistant : null) as never,
+    )
+    yields([{ type: 'turn_complete', response: { content: [] } }])
+    await executor()({ ...baseParams, callerChannelType: 'workflow' })
+    const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect(passedTools.has('recentEpisodes')).toBe(false)
+    // The context stays unscoped for retrieval (no clearance forced on).
+    const ctx = mockQueryLoop.mock.calls[0][0].context as Record<string, unknown>
+    expect(ctx.clearance).toBeUndefined()
+  })
+
+  it('omits the retrieval tools for a personal (no-workspace) callee even with a store wired', async () => {
+    // Default calleeAssistant has workspaceId: null — the retrieval actor's
+    // permission predicate would only error in actorFromContext, so the tools
+    // must not be injected at all.
+    yields([{ type: 'turn_complete', response: { content: [] } }])
+    await calleeWithRetrieval()({ ...baseParams, callerChannelType: 'workflow' })
+    const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect(passedTools.has('recentEpisodes')).toBe(false)
+  })
+
+  it('a per-step tools allow-list composes over the injected retrieval tools', async () => {
+    // The allow-list runs after injection: a step that names only recentEpisodes
+    // keeps it and strips the sibling reads (search/getEntity/...).
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? workspaceCallee : id === 'caller-1' ? callerAssistant : null) as never,
+    )
+    yields([{ type: 'turn_complete', response: { content: [] } }])
+    await calleeWithRetrieval()({
+      ...baseParams,
+      callerChannelType: 'workflow',
+      allowedTools: ['recentEpisodes'],
+    })
+    const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect(passedTools.has('recentEpisodes')).toBe(true)
+    expect(passedTools.has('search')).toBe(false)
+    expect(passedTools.has('getEntity')).toBe(false)
   })
 
   it('strips the delegation tools from a callee — leaf invariant, depth=1', async () => {
