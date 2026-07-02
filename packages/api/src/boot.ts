@@ -2527,19 +2527,37 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       filesBlobClient,
       env.GCS_FILES_BUCKET ?? 'local-dev',
     )
-    const lookupGcsBinding = async (workspaceId: string): Promise<WorkspaceStorageBinding | null> => {
+    const lookupStorageBinding = async (workspaceId: string): Promise<WorkspaceStorageBinding | null> => {
       // A binding resolves only while we hold the key. Disconnect wipes the key
       // (credential type 'none'), so a disconnected workspace returns null here
       // and falls back to the app default bucket for both reads and writes —
-      // its BYO files go dormant until a reconnect re-supplies the key.
-      const inst = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'gcs')
-      if (!inst) return null
-      const creds = await connectorInstanceStore.getAuthCredentialsSystem(inst.id)
-      if (!creds || creds.type !== 'gcs') return null
-      return { credentials: creds.serviceAccountKey, bucket: creds.bucket, projectId: creds.projectId }
+      // its BYO files go dormant until a reconnect re-supplies the key. GCS
+      // takes precedence when a workspace somehow has both bindings connected.
+      const gcsInst = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'gcs')
+      if (gcsInst) {
+        const creds = await connectorInstanceStore.getAuthCredentialsSystem(gcsInst.id)
+        if (creds && creds.type === 'gcs') {
+          return { kind: 'gcs', credentials: creds.serviceAccountKey, bucket: creds.bucket, projectId: creds.projectId }
+        }
+      }
+      const s3Inst = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 's3')
+      if (s3Inst) {
+        const creds = await connectorInstanceStore.getAuthCredentialsSystem(s3Inst.id)
+        if (creds && creds.type === 's3') {
+          return {
+            kind: 's3',
+            credentials: creds.accessKey,
+            bucket: creds.bucket,
+            region: creds.region,
+            endpoint: creds.endpoint,
+            forcePathStyle: creds.forcePathStyle,
+          }
+        }
+      }
+      return null
     }
     filesApi = createFilesApi({
-      resolver: createCachedByoFilesResolver({ lookup: lookupGcsBinding, fallback: defaultFilesResolver }),
+      resolver: createCachedByoFilesResolver({ lookup: lookupStorageBinding, fallback: defaultFilesResolver }),
       store: workspaceFilesStore,
       auditStore: workspaceAuditStore,
     })
@@ -3229,6 +3247,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       connectorStore,
       connectorInstanceStore,
       gcsByo: {
+        requireWorkspaceAdmin: async (userId, workspaceId) => {
+          const m = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+          return m?.role === 'owner' || m?.role === 'admin'
+        },
+      },
+      s3Byo: {
         requireWorkspaceAdmin: async (userId, workspaceId) => {
           const m = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
           return m?.role === 'owner' || m?.role === 'admin'
