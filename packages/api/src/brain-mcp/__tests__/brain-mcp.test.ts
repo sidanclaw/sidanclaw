@@ -165,6 +165,7 @@ const READ_TOOL_NAMES = [
   'listDeals',
   'listTasks',
   'searchBrain',
+  'searchFileContent',
   'searchKnowledge',
   'searchRecording',
 ] as const

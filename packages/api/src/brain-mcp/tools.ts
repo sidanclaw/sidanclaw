@@ -322,6 +322,8 @@ const READ_TOOL_NAMES = new Set<string>([
   'searchBrain',
   // Scoped single-recording retrieval (recording-to-brain)
   'searchRecording',
+  // Scoped single-file retrieval (large-content-artifacts)
+  'searchFileContent',
   // Deprecated read alias
   'searchKnowledge',
   // Entity read + edge discovery
