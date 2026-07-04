@@ -35,7 +35,7 @@ import {
   createBaseTools, LAYER_1_SYSTEM_PROMPT,
   createWorkerManager, createWorkerTools,
   createSchedulingTools, createPollWorker,
-  startJitteredInterval,
+  startJitteredInterval, stopJitteredInterval,
   createCacheTool, createReadFileTool, distillFileToText,
   createRateLimiter, sanitizeDeep,
   AnalyticsLogger, sanitize as sanitizeAnalytics,
@@ -3114,6 +3114,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) embeddingWorker.start()
 
+  // ── file_cache reaper ──
+  // Cached files are read with an `expires_at > now()` filter, so a lapsed row
+  // is already invisible; this jittered 6h sweep reclaims its storage. Gated on
+  // `runWorkers` and wrapped so a failing tick never crashes boot. Stopped in
+  // `shutdown()` like the workers above.
+  const fileCacheReaper = runWorkers
+    ? startJitteredInterval(() => {
+        void Promise.resolve(fileStore.sweepExpired?.())
+          .then((n) => { if (n && n > 0) console.log(`[file-cache-reaper] deleted ${n} expired file(s)`) })
+          .catch((err) => console.error('[file-cache-reaper] sweep failed:', err))
+      }, 6 * 60 * 60 * 1000)
+    : null
+
   // ── Knowledge sync worker ──
   // Uses the `syncCredentials` resolver built once above (platform closed
   // factory, or the open resolver over the connector stores).
@@ -3288,6 +3301,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     pollWorker.stop()
     knowledgeSyncWorker.stop()
     stuckSessionSweeper.stop()
+    if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)
     await analytics.shutdown()
     if (server) await new Promise<void>((res) => server!.close(() => res()))
   }

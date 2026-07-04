@@ -46,4 +46,12 @@ export type FileStore = {
   get(id: string, ctx?: AccessContext): Promise<CachedFile | null>
 
   getBySession(sessionId: string, ctx?: AccessContext): Promise<CachedFile[]>
+
+  /**
+   * Delete every cached file whose `expires_at` has lapsed and return the
+   * count removed. Reads already filter `expires_at > now()`, so this is a
+   * storage-reclaim sweep, not a correctness gate. Optional: only the DB store
+   * runs it (on a jittered interval from boot); in-memory/test stores omit it.
+   */
+  sweepExpired?(): Promise<number>
 }

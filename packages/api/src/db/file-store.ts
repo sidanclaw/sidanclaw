@@ -68,5 +68,13 @@ export function createDbFileStore(): FileStore {
       )
       return result.rows
     },
+
+    // Reads already filter `expires_at > now()`, so expired rows are invisible
+    // the moment they lapse — this reclaims their storage. Called on a jittered
+    // interval from open boot (`runWorkers`-gated). Returns rows deleted.
+    async sweepExpired() {
+      const result = await query(`DELETE FROM file_cache WHERE expires_at <= now()`)
+      return result.rowCount ?? 0
+    },
   }
 }
