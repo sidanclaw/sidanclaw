@@ -197,6 +197,7 @@ import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { createGcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
 import { createFilesApi, createSingletonFilesClientResolver } from './files/files-api.js'
+import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import { createCachedByoFilesResolver, type WorkspaceStorageBinding } from './files/byo-files-resolver.js'
 import { sweepStaleByoBindings } from './files/byo-staleness.js'
 import {
@@ -1053,6 +1054,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
     tools.set('retrieveCachedResults', createCacheTool(cacheStore))
     tools.set('readFileContent', createReadFileTool(fileStore))
+    // Per-file segment retrieval over stored artifacts (large-content-artifacts
+    // §Phase 1.4). Registered in the base toolset so chat, the callee executor,
+    // and workflows all carry it by construction; the actor is rebuilt from the
+    // ToolContext per call, so read ceilings hold on every path.
+    tools.set(
+      'searchFileContent',
+      createSearchFileContentTool({ embedder: createGeminiEmbedder(env.GEMINI_API_KEY) }),
+    )
 
     // Bug report tool — the create sink is a port; open default returns a
     // synthetic id (no persistence). The platform injects its bug-report store.

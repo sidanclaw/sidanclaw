@@ -130,7 +130,7 @@ export type RetrievalToolOptions = {
  * scoped (see retrieval.md §"Universal projection") and a call without one
  * has no defined permission boundary.
  */
-function actorFromContext(context: ToolContext): RetrievalActor | RetrievalErrorBody {
+export function actorFromContext(context: ToolContext): RetrievalActor | RetrievalErrorBody {
   if (!context.workspaceId) {
     return { error: 'Retrieval requires a workspace-scoped session.' }
   }

@@ -78,6 +78,7 @@ import type {
 } from '@sidanclaw/core'
 import { query } from '../db/client.js'
 import { searchRecording as searchRecordingFn, readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
+import { searchFileSegments as searchFileSegmentsFn, readFileSegmentRange, type FileSegmentHit } from '../db/retrieval-store.js'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { toEpisodeSensitivity } from '../episode-sensitivity.js'
@@ -1096,6 +1097,60 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     },
   }
 
+  // ── Scoped file retrieval: searchFileContent (large-content-artifacts §1.4).
+  // Hand-rolled twin of searchRecordingTool over `file_segments`. Unlike
+  // recordings, file_segment ALSO rides general searchBrain (capped per
+  // artifact); this tool is the precision surface inside ONE stored document.
+  const searchFileContentTool: BrainTool = {
+    name: 'searchFileContent',
+    description:
+      'Retrieve passages from ONE stored document (a workspace file artifact), scoped to that file only ' +
+      '(never the whole company brain). Pass the `fileId` (from a file_segment searchBrain hit or a file ' +
+      'listing) plus a `query`; returns the most relevant sections, each with its `segment_index` and ' +
+      '`heading_path` breadcrumb so you can cite the exact place. For a summarize/overview intent, page ' +
+      'sequential windows with `fromIndex`/`toIndex` instead of relying on top-K. ' +
+      'Never returns the whole document at once.',
+    inputSchema: {
+      fileId: z.string().uuid(),
+      query: z.string().default(''),
+      topK: z.number().int().min(1).max(20).optional(),
+      fromIndex: z.number().int().min(0).optional(),
+      toIndex: z.number().int().min(0).optional(),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const fileId = String(args.fileId ?? '')
+      if (!fileId) return text('fileId is required', true)
+      if (!ctx.workspaceId) return text('No workspace is bound to this call.', true)
+      const actor = {
+        workspaceId: ctx.workspaceId,
+        userId: ctx.userId,
+        assistantId: ctx.assistantId,
+        assistantKind: ctx.assistantKind ?? 'standard',
+        clearance: ctx.clearance,
+        compartments: ctx.compartments,
+      }
+      try {
+        let hits: FileSegmentHit[]
+        if (typeof args.fromIndex === 'number') {
+          const from = args.fromIndex
+          const to = typeof args.toIndex === 'number' ? args.toIndex : from + 9
+          hits = await readFileSegmentRange(actor, { fileId, fromIndex: from, toIndex: to })
+        } else {
+          hits = await searchFileSegmentsFn(
+            actor,
+            { fileId, query: String(args.query ?? ''), topK: typeof args.topK === 'number' ? args.topK : undefined },
+            opts.embedder ? { embedder: opts.embedder } : undefined,
+          )
+        }
+        return text(JSON.stringify(hits, null, 2))
+      } catch (err) {
+        return text(`searchFileContent failed: ${err instanceof Error ? err.message : String(err)}`, true)
+      }
+    },
+  }
+
   // ── Entity read + edge discovery: getEntity (bridged from createRetrievalTools.getEntity).
   // The one read path that surfaces an entity's existing edges + resolves its
   // underlying entity UUID — the prerequisite for writing an edge via a save
@@ -1358,6 +1413,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     // Reads
     searchBrain,
     searchRecordingTool,
+    searchFileContentTool,
     searchKnowledge,
     getEntity,
     getMemory,
