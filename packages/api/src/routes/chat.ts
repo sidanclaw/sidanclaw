@@ -316,6 +316,10 @@ type WebChatOptions = {
    *  L1 block is injected. Optional so smoke tests / dev runs without GCS
    *  still work. */
   workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
+  /** Workspace-files byte layer — forwarded via `applyMcpInjection` so
+   *  `gmailSendMessage` can attach workspace files as real MIME parts
+   *  (`docs/architecture/integrations/gmail.md` → "Attachments"). */
+  filesApi?: import('@sidanclaw/core').FilesApi
   /**
    * Company-brain read surface (WS-5). When set, the 6 retrieval tools
    * (`getEntity`, `search`, `recentEpisodes`, `provenance`, `markUseful`,

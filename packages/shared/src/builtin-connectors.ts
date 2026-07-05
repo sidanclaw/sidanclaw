@@ -71,7 +71,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   gmail: [
     { name: 'gmailListMessages', description: 'Search Gmail messages', classification: 'read', defaultPolicy: 'allow' },
     { name: 'gmailGetMessage', description: 'Read a specific email', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'gmailSendMessage', description: 'Send an email', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'gmailSendMessage', description: 'Send an email (can attach workspace files)', classification: 'write', defaultPolicy: 'ask' },
   ],
   notion: [
     { name: 'notionSearch', description: 'Search pages and databases in Notion', classification: 'read', defaultPolicy: 'allow' },

@@ -1137,10 +1137,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       })
     : undefined
 
+  // Declared here (assigned in the workspace-filesystem block below) so the
+  // lazy references in the callee executor + workflow tool registry are
+  // TDZ-safe: pre-assignment access reads `null` and degrades honestly.
+  let filesApi: ReturnType<typeof createFilesApi> | null = null
+
   const calleeExecutor = createCalleeExecutor({
     provider,
     tools: allTools,
     memoryStore,
+    // Lazy getter: `filesApi` is assigned further down (the workspace-
+    // filesystem block) — a direct reference here would freeze `null`.
+    // The executor reads `options.filesApi` per call, post-boot.
+    get filesApi() { return filesApi ?? undefined },
     // Brain retrieval store — enables the 6 read tools (recentEpisodes/search/
     // getEntity/...) on workflow `assistant_call` + free-mode consults, the
     // same surface the interactive chat route injects per-turn.
@@ -1305,6 +1314,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         connectorInstanceStore,
         knowledgeStore,
         gdriveFilesStore,
+        // Evaluated per-run (this closure fires post-boot), so the late
+        // `filesApi` initialization below is already done.
+        filesApi: filesApi ?? undefined,
       },
       { workspaceId, assistantId, userId },
     ),
@@ -1970,7 +1982,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (filesBlobClient && !env.GCS_FILES_BUCKET) {
     console.warn(`[files] GCS_FILES_BUCKET unset — using local-disk file storage at ${LOCAL_FILES_DIR} (dev only).`)
   }
-  let filesApi: ReturnType<typeof createFilesApi> | null = null
   let brainFileTools:
     | Pick<
         ReturnType<typeof createFileTools>,
@@ -2131,6 +2142,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     chatEpisodeIngestor,
     fileStore,
     workspaceFilesStore,
+    filesApi: filesApi ?? undefined,
     usageStore,
     // Doc-page → brain distillation runner — backs the `ingestPage` chat tool.
     ingestPage: ingestPageRunner
@@ -2190,6 +2202,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorGrantStore,
     connectorInstanceStore,
     gdriveFilesStore,
+    filesApi: filesApi ?? undefined,
     assistantConnectorGrantsStore,
     engineHooks: ports.engineHooks,
   }))

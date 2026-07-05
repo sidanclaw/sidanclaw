@@ -7,7 +7,7 @@
 import { findOrCreateUser, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
 import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline } from '@sidanclaw/core'
-import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, SkillContent, EngineHooks } from '@sidanclaw/core'
+import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, SkillContent, EngineHooks, FilesApi } from '@sidanclaw/core'
 import type { ActorIdentity } from '../mcp/auth-headers.js'
 // NOTE: the real DB-backed credit gate (`checkCreditBudget`, closed billing/)
 // is NOT imported here — that would couple this OPEN helper to closed code.
@@ -225,6 +225,11 @@ export type ChannelMcpStores = {
    * callbacks gate on `assertActionAllowed` before executing.
    */
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
+  /**
+   * Workspace-files byte layer — enables `gmailSendMessage` workspace-file
+   * attachments (`docs/architecture/integrations/gmail.md` → "Attachments").
+   */
+  filesApi?: FilesApi
 }
 
 export type ApplyMcpInjectionParams = {
@@ -312,6 +317,7 @@ export async function applyMcpInjection(
       workspaceDomain: params.workspaceDomain,
       engineHooks: params.engineHooks,
       actorIdentity: params.actorIdentity,
+      filesApi: stores.filesApi,
     })
   } catch (err) {
     console.error(`[${params.scope}] MCP tool injection failed:`, err)

@@ -103,6 +103,13 @@ export type CalleeExecutorOptions = {
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
   /**
+   * Workspace-files byte layer — `gmailSendMessage` attachments on the callee
+   * path (`docs/architecture/integrations/gmail.md`). Boot passes a lazy
+   * getter (the executor is constructed before the files block), so read it
+   * from `options` at call time — never destructure it at executor creation.
+   */
+  filesApi?: import('@sidanclaw/core').FilesApi
+  /**
    * Tool-use interception port (remote MCP only), forwarded to the callee's
    * `injectMcpTools`. Open default = unset. See
    * `docs/architecture/engine/tool-hooks.md`.
@@ -404,6 +411,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           connectorInstanceStore: options.connectorInstanceStore,
           assistantTeamId: calleeAssistant.workspaceId ?? null,
           engineHooks: options.engineHooks,
+          filesApi: options.filesApi,
         })
       } catch (err) {
         console.error('[inter-assistant] MCP injection failed for callee:', err)

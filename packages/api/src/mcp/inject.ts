@@ -19,7 +19,7 @@
  */
 
 import { buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createKnowledgeTools } from '@sidanclaw/core'
-import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks } from '@sidanclaw/core'
+import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi } from '@sidanclaw/core'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
@@ -300,13 +300,20 @@ export async function injectMcpTools(params: {
    * `docs/architecture/engine/tool-hooks.md`.
    */
   actorIdentity?: ActorIdentity
+  /**
+   * Workspace-files byte layer. When set, `gmailSendMessage` can attach
+   * workspace files as real MIME parts (stat → gates → readBytes in core,
+   * per `docs/architecture/integrations/gmail.md` → "Attachments").
+   * Absent → attachment requests fail honestly; plain sends unchanged.
+   */
+  filesApi?: FilesApi
 }): Promise<McpInjectionResult> {
   const {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
     userTimezone, knowledgeStore, gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
-    keepBuiltinsDirect = false, engineHooks, actorIdentity,
+    keepBuiltinsDirect = false, engineHooks, actorIdentity, filesApi,
   } = params
 
   const unavailable: string[] = []
@@ -609,7 +616,7 @@ export async function injectMcpTools(params: {
   await injectGitHubTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('github'), resolveInstanceCreds, { report: reportHealth })
   await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth })
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
-  const enricher = await injectGoogleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, userTimezone, unavailable, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain)
+  const enricher = await injectGoogleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, userTimezone, unavailable, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi)
 
   // ── Team overlays (Stage 4/5 of the team-connector promotion) ──
   //
@@ -661,7 +668,7 @@ export async function injectMcpTools(params: {
         } else if (p === 'fathom') {
           await injectFathomTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined)
         } else if (p === 'gcal' || p === 'gmail' || p === 'gdrive') {
-          await injectGoogleTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, userTimezone, undefined, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain)
+          await injectGoogleTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, userTimezone, undefined, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi)
         } else if (g.instance.custom && g.instance.url) {
           // Custom remote MCP shared via a grant. Respect Layer-2 enablement
           // (keyed on the provider UUID, like the team-native custom path),
@@ -786,6 +793,7 @@ export async function injectMcpTools(params: {
           connectorActionAudit,
           assistantConnectorGrantsStore,
           workspaceDomain,
+          filesApi,
         )
       }
 
@@ -1098,6 +1106,12 @@ async function injectGoogleTools(
    * attendee is treated as external and `audience_clearance='public'`.
    */
   workspaceDomain?: string | null,
+  /**
+   * Workspace-files byte layer — enables `gmailSendMessage` attachments
+   * (resolution + gates run in core; see `google-gmail.ts`). Absent →
+   * attachment requests fail honestly inside the tool.
+   */
+  filesApi?: FilesApi,
 ): Promise<ConfirmationEnricher> {
   const googleCfg = getConnectorConfig('google')
   if (!googleCfg) return async (_t, input) => input
@@ -1414,6 +1428,14 @@ async function injectGoogleTools(
             has_body: Boolean(params.body),
             body_length: params.body?.length ?? 0,
             body: params.body ?? '',
+            // Attachment METADATA only — never bytes. Filenames ride
+            // through the payload classifier with the rest.
+            attachment_count: params.attachments?.length ?? 0,
+            attachments: (params.attachments ?? []).map((a) => ({
+              name: a.filename,
+              mime: a.mime,
+              size_bytes: a.data.byteLength,
+            })),
           }
 
           // Preflight: classifier decides BEFORE the network call. In
@@ -1501,7 +1523,7 @@ async function injectGoogleTools(
             throw err
           }
         },
-      })
+      }, { filesApi })
       for (const tool of gmailTools) {
         if (await applyPolicyOrSkip(tool, 'gmail', settingsStore, assistantId, userId, unavailable) === 'include') {
           tools.set(tool.name, tool)
