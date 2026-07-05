@@ -78,6 +78,31 @@ async function assertSameWorkspace(
   }
 }
 
+/**
+ * Viewer projection for the upsert-dedupe candidate scan. The dedupe must
+ * never select a row the writer cannot read back — merging into an invisible
+ * row breaks read-your-write (the tool reports success, every subsequent
+ * list/get hides the row) and mutates another principal's private record.
+ * See docs/architecture/features/crm.md → "Upsert dedupe is access-scoped"
+ * (2026-07-05 incident: saveContact merged into another user's private
+ * person entity; Brain → People never showed it).
+ *
+ * Chat tools pass their full viewer context via `params.access`. Writers
+ * that only hold a user id (ingest pipeline-B, classification composer)
+ * fall back to the primary-reflector shape for that user — workspace +
+ * user axes only — which still excludes other users' private rows.
+ * `assistantId` is unread for kind='primary' (the reflector drops the
+ * assistant axis); the empty string is never bound into SQL.
+ */
+function dedupeAccessContext(
+  userId: string,
+  workspaceId: string,
+  access?: AccessContext,
+): AccessContext {
+  if (access) return access
+  return { workspaceId, userId, assistantId: '', assistantKind: 'primary' }
+}
+
 function assertValidStage(stage: DealStage | undefined): void {
   if (stage !== undefined && !VALID_STAGES.includes(stage)) {
     throw new Error(`deals_stage_check: invalid deal stage "${stage}"`)
@@ -184,19 +209,26 @@ export async function createCompany(
     sensitivity?: Sensitivity
     compartments?: string[]
     source?: 'user' | 'extracted'
+    access?: AccessContext
   },
 ): Promise<CompanyRecord> {
   assertAuthorshipPresent('createCompany', userId)
 
-  // Upsert-by-name: dedupe against a live company entity in the workspace.
+  // Upsert-by-name: dedupe against a live company entity in the workspace
+  // — but only among rows the caller can read (see dedupeAccessContext).
+  const ap = buildAccessPredicate(
+    dedupeAccessContext(userId, params.workspaceId, params.access),
+    { startIdx: 3 },
+  )
   const existing = await queryWithRLS<{ id: string }>(
     userId,
     `SELECT id FROM entities
       WHERE workspace_id = $1 AND kind = 'company'
         AND lower(display_name) = lower($2)
         AND valid_to IS NULL AND retracted_at IS NULL
+        AND ${ap.sql}
       ORDER BY created_at ASC LIMIT 1`,
-    [params.workspaceId, params.name],
+    [params.workspaceId, params.name, ...ap.params],
   )
   if (existing.rows[0]) {
     const merged = await mergeCompanyFields(userId, existing.rows[0].id, {
@@ -353,14 +385,22 @@ export async function createContact(
     sensitivity?: Sensitivity
     compartments?: string[]
     source?: 'user' | 'extracted'
+    access?: AccessContext
   },
   entityLinks?: EntityLinksStore,
 ): Promise<ContactRecord> {
   assertAuthorshipPresent('createContact', userId)
   await assertSameWorkspace(params.companyId, params.workspaceId, 'company_id')
 
-  // Upsert-by-email (high confidence) then by name. Self entities
+  // Upsert-by-email (high confidence) then by name, scoped to rows the
+  // caller can read (see dedupeAccessContext) — an invisible same-name
+  // contact belonging to another principal is NOT a merge target; the
+  // caller gets their own visible row instead. Self entities
   // (`attributes.self=true`) are excluded — you are not your own contact.
+  const ap = buildAccessPredicate(
+    dedupeAccessContext(userId, params.workspaceId, params.access),
+    { startIdx: 4 },
+  )
   const existing = await queryWithRLS<{ id: string }>(
     userId,
     `(SELECT id, 1 AS pri FROM entities
@@ -368,6 +408,7 @@ export async function createContact(
          AND $2::text IS NOT NULL AND lower(canonical_id) = lower($2)
          AND valid_to IS NULL AND retracted_at IS NULL
          AND NOT COALESCE((attributes->>'self')::boolean, false)
+         AND ${ap.sql}
        ORDER BY created_at ASC LIMIT 1)
      UNION ALL
      (SELECT id, 2 AS pri FROM entities
@@ -375,9 +416,10 @@ export async function createContact(
          AND lower(display_name) = lower($3)
          AND valid_to IS NULL AND retracted_at IS NULL
          AND NOT COALESCE((attributes->>'self')::boolean, false)
+         AND ${ap.sql}
        ORDER BY created_at ASC LIMIT 1)
      ORDER BY pri ASC LIMIT 1`,
-    [params.workspaceId, params.email ?? null, params.name],
+    [params.workspaceId, params.email ?? null, params.name, ...ap.params],
   )
   if (existing.rows[0]) {
     const merged = await mergeContactFields(userId, existing.rows[0].id, {

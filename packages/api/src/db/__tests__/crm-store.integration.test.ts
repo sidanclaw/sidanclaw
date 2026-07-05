@@ -359,6 +359,91 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
       expect(aSeesA).toHaveLength(1)
     })
   })
+
+  describe('Dedupe access scoping', () => {
+    // Regression for the 2026-07-05 incident: saveContact's upsert-dedupe
+    // matched a same-name person entity owned by ANOTHER user in the same
+    // workspace, merged into it, and reported success — but every read
+    // path (access predicate: user_id IS NULL OR user_id = viewer) hid the
+    // row from the caller. The dedupe scan must only select rows the
+    // writer can read back.
+    let aUser: string
+    let bUser: string
+    let workspaceId: string
+
+    beforeEach(async () => {
+      const client = await pool!.connect()
+      try {
+        aUser = await makeUser(client)
+        bUser = await makeUser(client)
+        workspaceId = await makeWorkspace(client, aUser)
+        await addMember(client, workspaceId, aUser)
+        await addMember(client, workspaceId, bUser)
+      } finally {
+        client.release()
+      }
+    })
+
+    it('contact upsert does not merge into another user\'s private same-name row', async () => {
+      const theirs = await store.createContact({ userId: bUser, workspaceId, name: 'Ken Lau' })
+      const mine = await store.createContact({
+        userId: aUser, workspaceId, name: 'Ken Lau', tags: ['engineer'],
+        access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
+      })
+
+      // Fresh caller-owned row, not a merge into the invisible one.
+      expect(mine.id).not.toBe(theirs.id)
+
+      // Read-your-write: the caller's list shows the row it just wrote.
+      const visible = await store.listContacts(
+        { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
+        { query: 'Ken' },
+      )
+      expect(visible.map((r) => r.id)).toContain(mine.id)
+      expect(visible.map((r) => r.id)).not.toContain(theirs.id)
+
+      // The other user's private row was not mutated.
+      const theirsAfter = await store.getContactById(
+        { workspaceId, userId: bUser, assistantId: bUser, assistantKind: 'standard' },
+        theirs.id,
+      )
+      expect(theirsAfter?.tags).toEqual([])
+    })
+
+    it('contact upsert still dedupes into the caller\'s own same-name row', async () => {
+      const first = await store.createContact({
+        userId: aUser, workspaceId, name: 'Ken Lau', tags: ['engineer'],
+        access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
+      })
+      const second = await store.createContact({
+        userId: aUser, workspaceId, name: 'ken lau', tags: ['oss'],
+        access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
+      })
+      expect(second.id).toBe(first.id)
+      expect(second.tags.sort()).toEqual(['engineer', 'oss'])
+    })
+
+    it('contact upsert without access falls back to the user axis (no cross-user merge)', async () => {
+      const theirs = await store.createContact({ userId: bUser, workspaceId, name: 'Ken Lau' })
+      const mine = await store.createContact({ userId: aUser, workspaceId, name: 'Ken Lau' })
+      expect(mine.id).not.toBe(theirs.id)
+    })
+
+    it('company upsert does not merge into another user\'s private same-name row', async () => {
+      const theirs = await store.createCompany({ userId: bUser, workspaceId, name: 'Acme' })
+      const mine = await store.createCompany({
+        userId: aUser, workspaceId, name: 'Acme', tags: ['vendor'],
+        access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
+      })
+      expect(mine.id).not.toBe(theirs.id)
+
+      const theirsAfter = await store.getCompanyById(
+        { workspaceId, userId: bUser, assistantId: bUser, assistantKind: 'standard' },
+        theirs.id,
+      )
+      expect(theirsAfter?.tags).toEqual([])
+    })
+  })
 })
 
 describeIf('[COMP:brain/crm-write-wrapper] CRM write wrapper (Q24)', () => {
