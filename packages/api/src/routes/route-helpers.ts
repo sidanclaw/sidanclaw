@@ -429,6 +429,13 @@ type InjectSkillsOptions = {
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   workspaceId?: string
   invocationBuffer?: import('@sidanclaw/core').SkillInvocationBuffer
+  /**
+   * Optional slug allow-list. When non-empty, only skills whose `id`/slug is
+   * in this set are offered — the governance gates still apply on top. Used by
+   * a workflow `assistant_call` step's `skills` field to pin the exact skills
+   * that step may use. Absent → offer every governance-passing skill (chat).
+   */
+  restrictToSlugs?: string[]
 }
 
 type InjectSkillsResult = {
@@ -560,8 +567,16 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
       const gov = slugToGovernance.get(s.id) ?? { sensitivity: 'public' as const }
       return isSkillOfferable(gov, viewer)
     }
+    // Optional caller-supplied allow-list (workflow `assistant_call.skills`).
+    // When present, only these slugs are eligible — a step pins the exact
+    // skills it may use, and the governance gates above still apply on top
+    // (an allow-listed slug the assistant is not entitled to stays dropped).
+    // Absent → every governance-passing skill is offered, as in chat.
+    const restrictSet = opts.restrictToSlugs && opts.restrictToSlugs.length > 0 ? new Set(opts.restrictToSlugs) : null
+    const isInScope = (s: { id: string }): boolean => (restrictSet === null ? true : restrictSet.has(s.id))
     const availableSkills = allSkills.filter((s) => {
       if (disabledSlugs.has(s.id)) return false
+      if (!isInScope(s)) return false
       if (!isEnabled(s)) return false
       if (!matchesAppType(s)) return false
       if (!isOfferable(s)) return false
@@ -570,6 +585,9 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
 
     for (const s of allSkills) {
       if (disabledSlugs.has(s.id)) continue
+      // A skill outside the caller's allow-list is not "unavailable" — it was
+      // simply never requested by this step; don't surface it in the prompt.
+      if (!isInScope(s)) continue
       if (!isEnabled(s)) continue
       // Skills constrained to a different app_type are not "unavailable" —
       // they're irrelevant for this assistant. Skip surfacing them in the
