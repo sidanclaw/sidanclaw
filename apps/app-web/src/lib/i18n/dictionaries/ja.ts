@@ -2028,8 +2028,11 @@ export const ja: Dictionary = {
       skillsEmpty: "このワークスペースにはまだスキルがありません。",
       skillsHint:
         "このステップで使うブレインスキルを選びます。「提示」はアシスタントが必要に応じて使うかを判断し、「必須」は毎回そのスキルの指示を実行します。すべて未選択ならスキルは使いません。各スキルにはアシスタント自身のアクセス規則が適用されます。",
+      skillsModeOff: "オフ",
       skillsModeOffer: "提示",
       skillsModeRequire: "必須",
+      skillsSearchPlaceholder: "スキルを検索...",
+      skillsSearchEmpty: "検索に一致するスキルがありません。",
       triggerJobsHeading: "有効なトリガー",
       triggerJobsDriftManual:
         "設定上のトリガーはこのワークフローをスケジュールしていませんが、以下のトリガーが実際に起動しています。実際に動くのはこちらです。意図しない場合は削除してください。",

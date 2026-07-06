@@ -23,6 +23,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { Search } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import type { StudioAssistantSummary } from "@/lib/api/studio";
@@ -860,9 +861,11 @@ type SkillMode = "off" | "offer" | "require";
  * disjoint by construction (a slug is Offer XOR Require), so nothing is ever
  * double-surfaced. Default = every skill Off (both arrays undefined), the
  * historical no-skill behavior. Each still passes the assistant's own
- * enablement + clearance in the backend. Slugs already on the step but absent
- * from the fetched list (a built-in, or a deleted workspace skill) are
- * preserved as read-only chips so editing never silently drops them.
+ * enablement + clearance in the backend. The list is filterable by a search
+ * bar and rendered as horizontal rows — [name] [description] [Off/Offer/Require
+ * select]. Slugs already on the step but absent from the fetched list (a
+ * built-in, or a deleted workspace skill) are kept as their own rows so editing
+ * never silently drops them.
  * Spec: docs/architecture/features/workflow.md -> "assistant_call skills".
  */
 function SkillsField({
@@ -904,29 +907,44 @@ function SkillsField({
     (slug) => !knownSlugs.has(slug),
   );
 
-  // Compact two-segment toggle shown once a skill is included: Offer / Require.
-  function ModeToggle({ slug, mode }: { slug: string; mode: SkillMode }) {
+  // Client-side search over the workspace skills (name / description / slug).
+  // Not the native <input type="search">; mirrors the doc template-gallery
+  // search bar (a lucide Search icon + bare input in a bordered pill).
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const matches = (hay: string | null | undefined) =>
+    (hay ?? "").toLowerCase().includes(q);
+  const filteredSkills = q
+    ? skills.filter((s) => matches(s.name) || matches(s.description) || matches(s.slug))
+    : skills;
+  const filteredExtra = q ? extraSelected.filter((slug) => matches(slug)) : extraSelected;
+
+  // The per-row "[Option]" cell: a compact Off / Offer / Require select (base-ui
+  // `Select`, not a native <select>). Off removes the skill from both lists.
+  const MODE_ITEMS = {
+    off: b.skillsModeOff,
+    offer: b.skillsModeOffer,
+    require: b.skillsModeRequire,
+  };
+  function ModeSelect({ slug, mode }: { slug: string; mode: SkillMode }) {
     return (
-      <div className="inline-flex w-fit shrink-0 overflow-hidden rounded-md border border-border text-xs">
-        {(["offer", "require"] as const).map((m) => (
-          <button
-            key={m}
-            type="button"
-            disabled={disabled}
-            aria-pressed={mode === m}
-            onClick={() => setMode(slug, m)}
-            className={cn(
-              "px-2 py-0.5 transition-colors",
-              m === "require" && "border-l border-border",
-              mode === m
-                ? "bg-primary text-primary-foreground"
-                : "bg-background text-muted-foreground hover:bg-muted/60",
-            )}
-          >
-            {m === "offer" ? b.skillsModeOffer : b.skillsModeRequire}
-          </button>
-        ))}
-      </div>
+      <Select
+        value={mode}
+        onValueChange={(v) => {
+          if (v) setMode(slug, v as SkillMode);
+        }}
+        disabled={disabled}
+        items={MODE_ITEMS}
+      >
+        <SelectTrigger size="sm" className="w-[6.75rem] shrink-0">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="off">{b.skillsModeOff}</SelectItem>
+          <SelectItem value="offer">{b.skillsModeOffer}</SelectItem>
+          <SelectItem value="require">{b.skillsModeRequire}</SelectItem>
+        </SelectContent>
+      </Select>
     );
   }
 
@@ -936,78 +954,63 @@ function SkillsField({
       {skills.length === 0 && extraSelected.length === 0 ? (
         <div className="text-xs text-muted-foreground">{b.skillsEmpty}</div>
       ) : (
-        <div className="flex flex-col gap-1 rounded-lg border border-border bg-background p-2 max-h-56 overflow-y-auto">
-          {skills.map((s) => {
-            const mode = modeOf(s.slug);
-            const on = mode !== "off";
-            return (
-              <div
-                key={s.rowId}
-                className={cn(
-                  "flex flex-col gap-1.5 rounded-md px-2 py-1.5 text-sm",
-                  disabled && "opacity-60",
-                )}
-              >
-                <label
-                  className={cn(
-                    "flex items-start gap-2",
-                    disabled ? "cursor-not-allowed" : "cursor-pointer",
-                  )}
-                >
-                  <input
-                    type="checkbox"
-                    checked={on}
-                    disabled={disabled}
-                    onChange={(e) => setMode(s.slug, e.target.checked ? "offer" : "off")}
-                    className="mt-0.5 size-4 shrink-0 accent-primary"
-                  />
-                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="font-medium leading-tight">{s.name}</span>
-                    {s.description ? (
-                      <span className="text-xs text-muted-foreground leading-tight">
-                        {s.description}
-                      </span>
-                    ) : null}
-                  </span>
-                </label>
-                {on ? (
-                  <div className="pl-6">
-                    <ModeToggle slug={s.slug} mode={mode} />
+        <div className="flex flex-col gap-2 rounded-lg border border-border bg-background p-2">
+          {/* Search bar (template-gallery pattern) */}
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5">
+            <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={b.skillsSearchPlaceholder}
+              disabled={disabled}
+              className="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+            />
+          </div>
+
+          {/* Horizontal rows: [Name] [Description] [Option] */}
+          <div className="flex max-h-56 flex-col gap-0.5 overflow-y-auto">
+            {filteredSkills.length === 0 && filteredExtra.length === 0 ? (
+              <div className="px-2 py-2 text-xs text-muted-foreground">
+                {b.skillsSearchEmpty}
+              </div>
+            ) : (
+              <>
+                {filteredSkills.map((s) => (
+                  <div
+                    key={s.rowId}
+                    className={cn(
+                      "flex items-center gap-3 rounded-md px-2 py-1.5 text-sm hover:bg-muted/40",
+                      disabled && "opacity-60",
+                    )}
+                  >
+                    <span className="max-w-[10rem] shrink-0 truncate font-medium">
+                      {s.name}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                      {s.description}
+                    </span>
+                    <ModeSelect slug={s.slug} mode={modeOf(s.slug)} />
                   </div>
-                ) : null}
-              </div>
-            );
-          })}
-          {extraSelected.map((slug) => (
-            <div
-              key={slug}
-              className={cn(
-                "flex flex-col gap-1.5 rounded-md px-2 py-1.5 text-sm",
-                disabled && "opacity-60",
-              )}
-            >
-              <label
-                className={cn(
-                  "flex items-center gap-2",
-                  disabled ? "cursor-not-allowed" : "cursor-pointer",
-                )}
-              >
-                <input
-                  type="checkbox"
-                  checked
-                  disabled={disabled}
-                  onChange={() => setMode(slug, "off")}
-                  className="size-4 shrink-0 accent-primary"
-                />
-                <span className="min-w-0 flex-1 font-mono text-xs text-muted-foreground">
-                  {slug}
-                </span>
-              </label>
-              <div className="pl-6">
-                <ModeToggle slug={slug} mode={modeOf(slug)} />
-              </div>
-            </div>
-          ))}
+                ))}
+                {filteredExtra.map((slug) => (
+                  <div
+                    key={slug}
+                    className={cn(
+                      "flex items-center gap-3 rounded-md px-2 py-1.5 text-sm hover:bg-muted/40",
+                      disabled && "opacity-60",
+                    )}
+                  >
+                    <span className="max-w-[10rem] shrink-0 truncate font-mono text-xs text-muted-foreground">
+                      {slug}
+                    </span>
+                    <span className="min-w-0 flex-1" />
+                    <ModeSelect slug={slug} mode={modeOf(slug)} />
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>
