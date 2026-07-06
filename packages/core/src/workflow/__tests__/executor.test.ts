@@ -718,6 +718,55 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(seenAllowed).toEqual([['webFetch', 'getMemory'], undefined])
   })
 
+  it('passes an assistant_call `skills` allow-list through as the consult skills', async () => {
+    const stores = makeFakeStores()
+    const seenSkills: Array<string[] | undefined> = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: {
+        async send(request: ConsultRequest): Promise<ConsultResponse> {
+          seenSkills.push(request.skills)
+          const task: Task = {
+            taskId: 't',
+            contextId: request.contextId ?? 'c',
+            status: { state: 'completed', timestamp: new Date().toISOString() },
+            artifacts: [],
+            history: [{ messageId: 'm', role: 'agent', parts: [{ kind: 'text', text: 'ok' }] }],
+          }
+          return { task }
+        },
+      },
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+    }
+
+    const definition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [
+        {
+          id: 's1',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'a',
+          skills: ['deep-research', 'crm-enrich'],
+        },
+        {
+          id: 's2',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'b',
+        },
+      ],
+    }
+
+    const { run } = await seedWorkflowAndRun(deps, definition)
+    await advanceWorkflowRun(deps, run.id)
+
+    // The step with `skills` → that allow-list; the default step (no `skills`) → undefined.
+    expect(seenSkills).toEqual([['deep-research', 'crm-enrich'], undefined])
+  })
+
   it('parses JSON responses from assistant_call into structured output for branch', async () => {
     const stores = makeFakeStores()
     const tools = new Map<string, Tool>([

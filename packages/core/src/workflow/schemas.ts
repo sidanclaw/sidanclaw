@@ -120,6 +120,15 @@ const assistantCallStepSchema = z.object({
    */
   tools: z.array(z.string().min(1).max(128)).max(64).optional(),
   /**
+   * Optional allow-list of brain skill slugs the callee may activate. When
+   * non-empty the executor threads it through `ConsultRequest.skills` and the
+   * callee executor offers the `useSkill` tool over exactly these skills (each
+   * still gated by the callee assistant's enablement + clearance). Injected
+   * after the `tools` allow-list, so a `tools` restriction never strips
+   * `useSkill`. See docs/architecture/features/workflow.md → "assistant_call skills".
+   */
+  skills: z.array(z.string().min(1).max(128)).max(64).optional(),
+  /**
    * Optional page anchor. When set, the callee runs doc-anchored (doc tools
    * injected, `ToolContext.docViewId` set) against the resolved page.
    * See docs/architecture/features/workflow.md → "assistant_call page anchor".

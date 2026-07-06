@@ -97,6 +97,18 @@ export type AssistantCallStep = WorkflowStepCommon & {
    */
   tools?: string[]
   /**
+   * Optional allow-list of brain skill slugs the callee may activate during
+   * this step. When non-empty, the callee is offered the `useSkill` tool over
+   * exactly these skills (built-in ids or workspace skill slugs), each still
+   * passed through the normal enablement + clearance gates — a slug the callee
+   * assistant is not entitled to is silently dropped. Threaded via
+   * `ConsultRequest.skills`. Absent / empty → no skill surface, exactly the
+   * historical behavior. Independent of `tools`: skills are injected AFTER the
+   * `tools` allow-list, so a `tools` restriction never strips `useSkill`.
+   * See `docs/architecture/features/workflow.md` → "assistant_call skills".
+   */
+  skills?: string[]
+  /**
    * Optional page anchor — the bounded "edit page X" / "create a page"
    * configuration. See `PageAnchor`. Composes with `tools`: the allow-list
    * is applied AFTER doc-tool injection, so it can pin an anchored callee
