@@ -16,8 +16,11 @@
  *   1. `connector-registry.ts` — OFFICIAL_CONNECTORS (display metadata)
  *   2. this file — OFFICIAL_CONNECTOR_TOOLS + (if OAuth) OFFICIAL_OAUTH_SCOPES
  *   3. `packages/shared/src/tool-display-names.ts` — friendly names
- *   4. `packages/api/src/mcp/inject.ts` — runtime wiring (tool factories)
- *   5. `apps/web/src/components/connectors/connector-icon.tsx` — icon
+ *   4. `packages/api/src/mcp/inject.ts` — runtime wiring (tool factories),
+ *      INCLUDING the multi-account extras (a credentialed connector is
+ *      "Add another"-able by default — consume its extras like the
+ *      github/google injectors do, or mark the registry entry `single_instance`)
+ *   5. `apps/app-web/src/components/connectors/connector-icon.tsx` — icon
  */
 
 export type BuiltinToolClassification = 'read' | 'write' | 'destructive'

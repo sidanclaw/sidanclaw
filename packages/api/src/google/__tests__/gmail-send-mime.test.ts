@@ -125,3 +125,51 @@ describe('[COMP:tools/gmail-attachments] sendGmailMessage MIME assembly', () => 
     ).rejects.toThrow('Gmail API error (413): too large')
   })
 })
+
+describe('[COMP:tools/gmail-send-as] sendGmailMessage From header (alias sending)', () => {
+  it('omits the From header when no alias is given (byte-identical to before)', async () => {
+    await sendGmailMessage(TOKEN, BASE)
+
+    const raw = (JSON.parse(sentRequest().init.body as string) as { raw: string }).raw
+    const decoded = Buffer.from(raw, 'base64url').toString('utf-8')
+    expect(decoded).not.toContain('From:')
+  })
+
+  it('sets the From header on the text-only path when an alias is given', async () => {
+    await sendGmailMessage(TOKEN, { ...BASE, from: 'hinson.wong@sidan.ai' })
+
+    const raw = (JSON.parse(sentRequest().init.body as string) as { raw: string }).raw
+    const decoded = Buffer.from(raw, 'base64url').toString('utf-8')
+    expect(decoded).toContain('From: hinson.wong@sidan.ai')
+  })
+
+  it('sets the From header on the multipart (attachments) path', async () => {
+    await sendGmailMessage(TOKEN, {
+      ...BASE,
+      from: 'hinson.wong@sidan.ai',
+      attachments: [{ filename: 'a.txt', mime: 'text/plain', data: new Uint8Array([1]) }],
+    })
+
+    const mime = (sentRequest().init.body as Buffer).toString('utf-8')
+    expect(mime).toContain('From: hinson.wong@sidan.ai')
+  })
+
+  it('strips embedded CR/LF from To/From/Subject so no extra header line can be injected', async () => {
+    await sendGmailMessage(TOKEN, {
+      to: 'a@b.co\r\nBcc: evil@attacker.com',
+      from: 'hinson.wong@sidan.ai\r\nX-Injected: yes',
+      subject: 'Hi\r\nBcc: evil@attacker.com',
+      body: 'x',
+    })
+
+    const raw = (JSON.parse(sentRequest().init.body as string) as { raw: string }).raw
+    const decoded = Buffer.from(raw, 'base64url').toString('utf-8')
+    const lines = decoded.split('\r\n')
+    // The injected text survives as inert trailing content on the To/From/Subject
+    // lines themselves, but must never land on its OWN header line.
+    expect(lines).not.toContain('Bcc: evil@attacker.com')
+    expect(lines).not.toContain('X-Injected: yes')
+    expect(lines.filter((l) => l.startsWith('Bcc:'))).toHaveLength(0)
+    expect(lines.filter((l) => l.startsWith('X-Injected:'))).toHaveLength(0)
+  })
+})

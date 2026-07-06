@@ -243,4 +243,83 @@ describe('[COMP:tools/gmail-attachments] gmailSendMessage attachments', () => {
     expect(result.data).toContain('/uploads/missing.pdf not found')
     expect(sent).toHaveLength(0)
   })
+
+  describe('describeConfirmation (Approve/Deny preview)', () => {
+    it('resolves attachment ids to file names with size, alongside to/subject/body', async () => {
+      const pdf = fakeFile({ sizeBytes: 1024 * 1024 + 200 * 1024 })
+      const tool = sendTool(gmailApi().api, filesApiFor([pdf]))
+
+      const lines = await tool.describeConfirmation!(
+        { ...SEND, attachments: [pdf.id] },
+        makeContext(),
+      )
+
+      expect(lines).toEqual([
+        '• To: a@b.co',
+        '• Subject: Hi',
+        '• Body: Hello',
+        '• Attachment: receipt.pdf (1.2 MB)',
+      ])
+      expect(lines!.join('\n')).not.toContain(pdf.id)
+    })
+
+    it('formats sub-MB sizes in KB', async () => {
+      const small = fakeFile({ sizeBytes: 2048 })
+      const tool = sendTool(gmailApi().api, filesApiFor([small]))
+
+      const lines = await tool.describeConfirmation!(
+        { ...SEND, attachments: [small.id] },
+        makeContext(),
+      )
+
+      expect(lines).toContain('• Attachment: receipt.pdf (2 KB)')
+    })
+
+    it('falls back to the generic renderer (null) without attachments', async () => {
+      const tool = sendTool(gmailApi().api, filesApiFor([fakeFile()]))
+
+      expect(await tool.describeConfirmation!(SEND, makeContext())).toBeNull()
+    })
+
+    it('falls back to the generic renderer without a filesApi or workspace', async () => {
+      const noFiles = sendTool(gmailApi().api)
+      expect(
+        await noFiles.describeConfirmation!({ ...SEND, attachments: ['x'] }, makeContext()),
+      ).toBeNull()
+
+      const noWs = sendTool(gmailApi().api, filesApiFor([fakeFile()]))
+      expect(
+        await noWs.describeConfirmation!(
+          { ...SEND, attachments: ['x'] },
+          makeContext({ workspaceId: null }),
+        ),
+      ).toBeNull()
+    })
+
+    it('shows the raw ref for unresolvable attachments instead of dropping them', async () => {
+      const tool = sendTool(gmailApi().api, filesApiFor([]))
+
+      const lines = await tool.describeConfirmation!(
+        { ...SEND, attachments: ['/uploads/missing.pdf'] },
+        makeContext(),
+      )
+
+      expect(lines).toContain('• Attachment: /uploads/missing.pdf (not found)')
+    })
+
+    it('flags confidential files as refusable and dedupes refs to the same file', async () => {
+      const secret = fakeFile({ sensitivity: 'confidential', name: 'salaries.xlsx', path: '/hr/salaries.xlsx' })
+      const tool = sendTool(gmailApi().api, filesApiFor([secret]))
+
+      const lines = await tool.describeConfirmation!(
+        { ...SEND, attachments: [secret.id, '/hr/salaries.xlsx'] },
+        makeContext(),
+      )
+
+      const attachmentLines = lines!.filter((l) => l.startsWith('• Attachment:'))
+      expect(attachmentLines).toEqual([
+        '• Attachment: salaries.xlsx (confidential: send will be refused)',
+      ])
+    })
+  })
 })

@@ -337,6 +337,9 @@ type WebChatOptions = {
    * a DB-backed inspection store. See docs/architecture/brain/corrections.md.
    */
   inspectionTools?: Record<string, import('@sidanclaw/core').Tool>
+  /** Generate mode as a chat tool (fill a blueprint from the brain). Built at
+   *  boot with generateSynthesize + pageTemplateStore; workspace-scoped. */
+  generateBlueprintTool?: Tool
   /**
    * Entity-graph stores (WU-6.12). When both are set — alongside a
    * workspace-scoped assistant — `saveMemory` accepts an `entityId` that
@@ -2784,6 +2787,12 @@ export function chatRoutes(options: WebChatOptions): Router {
         for (const [name, tool] of Object.entries(retrievalTools)) {
           allTools.set(name, tool)
         }
+      }
+
+      // Generate mode as a chat tool — fill a blueprint from the brain on request
+      // (requiresConfirmation; the cost rides this turn's credit). Workspace-scoped.
+      if (options.generateBlueprintTool && assistant.workspaceId) {
+        allTools.set(options.generateBlueprintTool.name, options.generateBlueprintTool)
       }
 
       // Brain inbox inspection toolkit — read-only introspection tools.

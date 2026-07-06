@@ -9,13 +9,33 @@
  * sweep table's integrity, and the discovery-cache size accessor.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // Built-in connector injectors resolve their OAuth app creds via
-// getConnectorConfig and no-op when none are configured — stub it to undefined
-// so the no-connector path is inert regardless of the runner's process.env.
+// getConnectorConfig and no-op when none are configured — default to
+// undefined so the no-connector path is inert regardless of the runner's
+// process.env. The Google multi-account suite overrides per test.
+const getConnectorConfig = vi.fn<(provider: string) => { clientId: string; clientSecret: string } | undefined>()
+  .mockReturnValue(undefined)
 vi.mock('../../connector-config.js', () => ({
-  getConnectorConfig: () => undefined,
+  getConnectorConfig: (provider: string) => getConnectorConfig(provider),
+}))
+
+// Google API client — the multi-account suite needs token refresh + the
+// enricher's task fetch to be observable without the network. Everything
+// else keeps the real (unreached) implementation.
+const refreshGoogleAccessToken = vi.fn(
+  async (refreshToken: string, _clientId: string, _clientSecret: string) => `access-${refreshToken}`,
+)
+const getGoogleTask = vi.fn(
+  async (_token: string, _taskListId: string, _taskId: string) => ({ title: 'Standup prep' }),
+)
+vi.mock('../../google/client.js', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  refreshGoogleAccessToken: (refreshToken: string, clientId: string, clientSecret: string) =>
+    refreshGoogleAccessToken(refreshToken, clientId, clientSecret),
+  getGoogleTask: (token: string, taskListId: string, taskId: string) =>
+    getGoogleTask(token, taskListId, taskId),
 }))
 
 // The workspace-scoping gate calls `isSoloWorkspaceSystem`; mock the
@@ -548,6 +568,120 @@ describe('[COMP:api/mcp-inject] multi-instance built-ins', () => {
     })
     const names = [...tools.keys()]
     expect(names).toContain('githubSearchRepositories')
+    expect(names.some((n) => n.includes('__'))).toBe(false)
+  })
+})
+
+describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
+  // Two connected accounts per Google provider: the oldest keeps the
+  // canonical names + the legacy per-provider token path; the newer one is a
+  // suffixed variant set bound to its OWN refresh token (resolved lazily off
+  // its connector_instance row). Tasks variants ride the gcal instance.
+  function googleStores() {
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([
+        { id: 'ci-gm1', connectorId: 'gmail', name: 'Gmail', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+        { id: 'ci-gm2', connectorId: 'gmail', name: 'Work', connected: true, url: null, custom: false, createdAt: new Date('2026-02-01T00:00:00Z') },
+        { id: 'ci-gc1', connectorId: 'gcal', name: 'Google Calendar', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+        { id: 'ci-gc2', connectorId: 'gcal', name: 'Work', connected: true, url: null, custom: false, createdAt: new Date('2026-02-01T00:00:00Z') },
+      ]),
+      // Primary (oldest-connected) credential read — the legacy path.
+      getCredentials: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-primary' }),
+      getConfig: vi.fn().mockResolvedValue({}),
+      setConnected: vi.fn(),
+    }
+    const connectorInstanceStore = {
+      getCredentialsSystem: vi.fn(async (id: string) => ({ client_id: 'google_refresh', client_secret: `refresh-${id}` })),
+      updateCredentialsSystem: vi.fn(),
+      markHealth: vi.fn(),
+    }
+    return { connectorStore, connectorInstanceStore }
+  }
+
+  beforeEach(() => {
+    getConnectorConfig.mockImplementation((provider: string) =>
+      provider === 'google' ? { clientId: 'app-id', clientSecret: 'app-secret' } : undefined,
+    )
+    refreshGoogleAccessToken.mockClear()
+    getGoogleTask.mockClear()
+  })
+  afterEach(() => {
+    getConnectorConfig.mockReset()
+    getConnectorConfig.mockReturnValue(undefined)
+  })
+
+  it('injects canonical Google tools for the primary and labelled variants for the extra accounts', async () => {
+    const tools = new Map()
+    const { connectorStore, connectorInstanceStore } = googleStores()
+    await injectMcpTools({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      keepBuiltinsDirect: true,
+    })
+
+    const names = [...tools.keys()]
+    // Primaries keep canonical names.
+    expect(names).toContain('gmailSendMessage')
+    expect(names).toContain('googleCalendarListEvents')
+    expect(names).toContain('googleTasksListTasks')
+    // Extras get suffixed variants, description-tagged with the label —
+    // Gmail, Calendar, AND Tasks (which ride the gcal credential).
+    const gmailVariant = names.find((n) => n.startsWith('gmailSendMessage__'))
+    const calVariant = names.find((n) => n.startsWith('googleCalendarListEvents__'))
+    const tasksVariant = names.find((n) => n.startsWith('googleTasksListTasks__'))
+    expect(gmailVariant).toBeTruthy()
+    expect(calVariant).toBeTruthy()
+    expect(tasksVariant).toBeTruthy()
+    expect((tools.get(gmailVariant!) as { description: string }).description).toMatch(/^\[Work\]/)
+    // Only the PRIMARY refresh token was exchanged at inject time
+    // (prevalidation); extras resolve lazily at first tool call.
+    const exchanged = refreshGoogleAccessToken.mock.calls.map((c) => c[0])
+    expect(exchanged).toContain('refresh-primary')
+    expect(exchanged).not.toContain('refresh-ci-gm2')
+    expect(exchanged).not.toContain('refresh-ci-gc2')
+  })
+
+  it('enriches a suffixed confirmation with THAT account\'s token, not the primary\'s', async () => {
+    const tools = new Map()
+    const { connectorStore, connectorInstanceStore } = googleStores()
+    const result = await injectMcpTools({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      keepBuiltinsDirect: true,
+    })
+
+    const variant = [...tools.keys()].find((n) => n.startsWith('googleTasksDeleteTask__'))
+    expect(variant).toBeTruthy()
+    const enriched = await result.enrichConfirmation(variant!, { taskId: 'task-1' })
+    // The extra gcal instance is ci-gc2 → its refresh token exchanged lazily,
+    // and the task fetched with the VARIANT account's access token.
+    expect(getGoogleTask).toHaveBeenCalledWith('access-refresh-ci-gc2', '@default', 'task-1')
+    expect(enriched).toMatchObject({ task: 'Standup prep' })
+  })
+
+  it('single account per Google provider: canonical tools only, no variants', async () => {
+    const tools = new Map()
+    const { connectorStore, connectorInstanceStore } = googleStores()
+    connectorStore.list.mockResolvedValue([
+      { id: 'ci-gm1', connectorId: 'gmail', name: 'Gmail', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+    ])
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      keepBuiltinsDirect: true,
+    })
+    const names = [...tools.keys()]
+    expect(names).toContain('gmailSendMessage')
     expect(names.some((n) => n.includes('__'))).toBe(false)
   })
 })

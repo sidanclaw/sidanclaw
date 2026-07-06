@@ -419,11 +419,21 @@ export async function getGmailMessage(
   }
 }
 
+/**
+ * Strip CR/LF from a header value before it is interpolated into a raw
+ * message — otherwise a value containing embedded newlines could inject
+ * extra headers (e.g. a spoofed `Bcc:`) into the outgoing message.
+ */
+function sanitizeHeaderValue(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ')
+}
+
 /** RFC 2047: encode a header value as Base64 UTF-8 when it contains non-ASCII chars. */
 function encodeHeaderWord(value: string): string {
-  return /[^\x00-\x7F]/.test(value)
-    ? `=?UTF-8?B?${Buffer.from(value, 'utf-8').toString('base64')}?=`
-    : value
+  const sanitized = sanitizeHeaderValue(value)
+  return /[^\x00-\x7F]/.test(sanitized)
+    ? `=?UTF-8?B?${Buffer.from(sanitized, 'utf-8').toString('base64')}?=`
+    : sanitized
 }
 
 /** Fold base64 into 76-char lines per RFC 2045. */
@@ -448,13 +458,15 @@ function filenameParams(filename: string): string {
  */
 function buildMultipartMessage(params: {
   to: string
+  from?: string
   subject: string
   body: string
   attachments: GmailOutgoingAttachment[]
 }): Buffer {
   const boundary = `=_sidanclaw_${randomUUID()}`
   const lines: string[] = [
-    `To: ${params.to}`,
+    ...(params.from ? [`From: ${sanitizeHeaderValue(params.from)}`] : []),
+    `To: ${sanitizeHeaderValue(params.to)}`,
     `Subject: ${encodeHeaderWord(params.subject)}`,
     'MIME-Version: 1.0',
     `Content-Type: multipart/mixed; boundary="${boundary}"`,
@@ -482,12 +494,13 @@ function buildMultipartMessage(params: {
 
 export async function sendGmailMessage(
   accessToken: string,
-  params: { to: string; subject: string; body: string; attachments?: GmailOutgoingAttachment[] },
+  params: { to: string; from?: string; subject: string; body: string; attachments?: GmailOutgoingAttachment[] },
 ): Promise<{ id: string; threadId: string }> {
   // With attachments: multipart/mixed through the media-upload endpoint.
   if (params.attachments && params.attachments.length > 0) {
     const raw = buildMultipartMessage({
       to: params.to,
+      from: params.from,
       subject: params.subject,
       body: params.body,
       attachments: params.attachments,
@@ -514,7 +527,8 @@ export async function sendGmailMessage(
 
   // Build RFC 2822 message
   const rawMessage = [
-    `To: ${params.to}`,
+    ...(params.from ? [`From: ${sanitizeHeaderValue(params.from)}`] : []),
+    `To: ${sanitizeHeaderValue(params.to)}`,
     `Subject: ${encodedSubject}`,
     'Content-Type: text/plain; charset=utf-8',
     '',

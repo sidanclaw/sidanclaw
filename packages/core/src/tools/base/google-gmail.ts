@@ -11,6 +11,13 @@
  * resolved parts to the API layer, which builds the multipart message.
  * See docs/architecture/integrations/gmail.md → "Attachments".
  * [COMP:tools/gmail-attachments]
+ *
+ * `gmailSendMessage` also takes an optional `from` alias: core passes it
+ * through untouched (no alias validation here — the API layer sets the
+ * `From:` header and Gmail itself enforces that it is a verified "Send
+ * mail as" identity on the connected account). See
+ * docs/architecture/integrations/gmail.md → "Send As".
+ * [COMP:tools/gmail-send-as]
  */
 
 import { z } from 'zod'
@@ -44,6 +51,7 @@ export type GmailApi = {
 
   sendMessage(params: {
     to: string
+    from?: string
     subject: string
     body: string
     attachments?: GmailOutgoingAttachment[]
@@ -52,6 +60,11 @@ export type GmailApi = {
 
 function formatMb(bytes: number): string {
   return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return formatMb(bytes)
 }
 
 export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }): Tool[] {
@@ -105,14 +118,24 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
     name: 'gmailSendMessage',
     description:
       'Send an email via Gmail. ' +
-      'The email is sent from the authenticated user\'s account. ' +
+      'The email is sent from the authenticated user\'s account by default. ' +
       'Call this tool directly — the user will see an Approve/Deny prompt. ' +
+      'To send from a different address, pass `from` — it must already be a verified "Send mail as" alias ' +
+      'configured in the connected account\'s Gmail settings; Gmail rejects the send otherwise, so never ' +
+      'guess an alias the user has not confirmed exists. ' +
       'Workspace files can be attached as real email attachments (the recipient gets the file itself, never a link): ' +
       'pass their ids or paths in `attachments`. Only files already saved in the workspace brain can be attached; ' +
       'confidential files cannot be emailed. Limits: 10 attachments, 18 MB total. ' +
       'If attaching fails, relay the reason honestly — never claim a file was attached when it was not.',
     inputSchema: z.object({
       to: z.string().describe('Recipient email address.'),
+      from: z
+        .string()
+        .optional()
+        .describe(
+          'Send as this address instead of the primary account. Must be a verified "Send mail as" alias ' +
+          'already configured in the connected Gmail account\'s settings — Gmail rejects the send if it is not.',
+        ),
       subject: z.string().describe('Email subject line.'),
       body: z.string().describe('Plain text email body.'),
       attachments: z
@@ -128,6 +151,53 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
     isReadOnly: false,
     requiresConfirmation: true,
     timeoutMs: 30_000,
+
+    // Approve/Deny preview. The model passes attachments as ids, so the
+    // generic key-value renderer would show raw UUIDs. With attachments
+    // present this takes over the WHOLE preview (displayLines replaces the
+    // generic renderer on every surface), so it must carry to/subject/body
+    // too. stat is metadata-only under the caller's read ceiling — the same
+    // projection the send itself applies. Null → generic renderer.
+    async describeConfirmation(input, context) {
+      const { to, from, subject, body, attachments } = (input ?? {}) as {
+        to?: unknown
+        from?: unknown
+        subject?: unknown
+        body?: unknown
+        attachments?: unknown
+      }
+      if (!Array.isArray(attachments) || attachments.length === 0) return null
+      const filesApi = opts?.filesApi
+      if (!filesApi || !context.workspaceId) return null
+
+      const ctx = ctxFor(context)
+      const refs = attachments.filter((r): r is string => typeof r === 'string')
+      const stats = await Promise.all(refs.map((ref) => filesApi.stat(ctx, ref)))
+
+      const lines: string[] = []
+      if (typeof from === 'string') lines.push(`• From: ${from}`)
+      if (typeof to === 'string') lines.push(`• To: ${to}`)
+      if (typeof subject === 'string') lines.push(`• Subject: ${subject}`)
+      if (typeof body === 'string') lines.push(`• Body: ${body}`)
+
+      const seen = new Set<string>()
+      for (let i = 0; i < refs.length; i++) {
+        const result = stats[i]
+        if (!result.ok) {
+          lines.push(`• Attachment: ${refs[i]} (not found)`)
+          continue
+        }
+        const f = result.value
+        if (seen.has(f.id)) continue
+        seen.add(f.id)
+        lines.push(
+          f.sensitivity === 'confidential'
+            ? `• Attachment: ${f.name} (confidential: send will be refused)`
+            : `• Attachment: ${f.name} (${formatSize(f.sizeBytes)})`,
+        )
+      }
+      return lines
+    },
 
     async execute(input, context) {
       try {
@@ -191,6 +261,7 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
           to: input.to,
           subject: input.subject,
           body: input.body,
+          ...(input.from ? { from: input.from } : {}),
           ...(attachments && attachments.length > 0 ? { attachments } : {}),
         })
         const m = (data ?? {}) as Json

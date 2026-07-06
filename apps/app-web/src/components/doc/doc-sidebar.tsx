@@ -606,8 +606,9 @@ export function DocSidebar(props: Props) {
             onDragEnd={handleDragEnd}
           >
             {/* Home Dock — single "Suggested for you" entry, pinned above
-                Favorites. The suggestions render in the content pane
-                (SuggestedView). PREVIEW/MOCK (see docs/plans/home-dock.md). */}
+                Favorites, badged with the live needs-you total off the shared
+                dock. The suggestions render in the content pane
+                (SuggestedView). Spec: docs/architecture/features/home-dock.md. */}
             <HomeDock workspaceId={workspaceId} />
 
             {favoriteRoots.length > 0 && (

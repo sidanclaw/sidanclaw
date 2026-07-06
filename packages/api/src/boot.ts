@@ -237,6 +237,8 @@ import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
+import { createGenerateSynthesizer, type GenerateSynthesizeFn } from './synthesis/generate-synthesizer.js'
+import { createGenerateBlueprintTool } from './synthesis/generate-blueprint-tool.js'
 import { createDbPageGrantStore } from './db/page-grant-store.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbWorkspaceGroupStore } from './db/workspace-group-store.js'
@@ -555,6 +557,8 @@ export interface BootContext {
   usageStore: UsageStore | undefined
   /** Structural-synthesis callback for the recording path (blueprint → brief page). */
   recordingSynthesize?: RecordingSynthesizeFn
+  /** Structural-synthesis GENERATE callback (fill a blueprint from the brain). */
+  generateSynthesize?: GenerateSynthesizeFn
   workspaceStoreRefForRouter: ReturnType<typeof workspaceRoutes>
   workflowStore: ReturnType<typeof createDbWorkflowStore>
   workflowRunStore: ReturnType<typeof createDbWorkflowRunStore>
@@ -1137,6 +1141,31 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       })
     : undefined
 
+  // Structural-synthesis GENERATE fill (brain → blueprint) + the in-chat /
+  // in-workflow tool that wraps it. Built HERE (before the executor + chat route
+  // consume it) with the embedder for brain vector search. Undefined without a
+  // Gemini key. The standalone Blueprints-UI route meters its own credit
+  // (synthesis_surcharge); the tool rides the chat turn's per-message credit.
+  const generateSynthesize: GenerateSynthesizeFn | undefined = env.GEMINI_API_KEY
+    ? createGenerateSynthesizer({
+        provider,
+        model: 'gemini-flash',
+        savedViewStore,
+        docPageStore: createDbDocPageStore(),
+        crmStore,
+        taskStore,
+        workflowRunStore,
+        workspaceDirectory: workspaceDirectoryStore,
+        embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
+        usageStore,
+        pageTemplateStore,
+        computeCostUsd: (model, usage) => calculateCost(model, usage),
+      })
+    : undefined
+  const generateBlueprintTool: Tool | undefined = generateSynthesize
+    ? createGenerateBlueprintTool({ generateSynthesize, pageTemplateStore })
+    : undefined
+
   // Declared here (assigned in the workspace-filesystem block below) so the
   // lazy references in the callee executor + workflow tool registry are
   // TDZ-safe: pre-assignment access reads `null` and degrades honestly.
@@ -1189,6 +1218,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceSkillStore,
     workspaceSkillEnablementStore,
     workspaceSkillFilesStore,
+    // Generate mode as a consult tool — fill a blueprint from the brain in a
+    // workflow/callee run (same tool the chat route injects).
+    generateBlueprintTool,
   })
 
   const { createAssistantModesStore } = await import('./db/assistant-modes-store.js')
@@ -2191,6 +2223,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     memoryRecallEventsStore,
     retrievalMissDetector,
     inspectionTools: brainInspectionTools,
+    generateBlueprintTool,
   }))
 
   app.use('/api/v1', publicApiRoutes({
@@ -2432,6 +2465,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     communityRegistry: communitySkillRegistry,
     workspaceSkillStore,
     workspaceStore,
+    pageTemplateStore,
     workspaceSkillEnablementStore,
     listWorkspaceAssistants: async (userId, workspaceId) =>
       (await listAccessibleAssistants(userId, workspaceId)).map((a) => ({ id: a.id, name: a.name })),
@@ -3291,6 +3325,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     crmStore,
     taskStore,
     recordingSynthesize,
+    generateSynthesize,
     connectorStore,
     connectorInstanceStore,
     mcpSettingsStore,

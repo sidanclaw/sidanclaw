@@ -6,16 +6,19 @@
  * build bar, a conversational note, the "needs you" actions, drafts to resume,
  * upcoming workflows, and brain growth - a full-width dashboard (main + rail).
  *
- * Data: `GET /api/home-dock` returns the resolved dock (the assistant's layout
- * artifact already merged over live signals, dead cards dropped - the freshness
- * contract lives server-side). Refresh runs the primary assistant once. The
- * build bar calls `onBuild` (the shell's page builder), so the type-a-prompt
- * flow survives here. Spec: docs/architecture/features/home-dock.md.
+ * Data: the resolved dock (the assistant's layout artifact already merged over
+ * live signals, dead cards dropped - the freshness contract lives server-side)
+ * is OWNED by `DocSidebarDataProvider` and shared with the sidebar's badge
+ * (`HomeDock`) — this view renders `useSidebarData().dock`, revalidates it on
+ * re-entry via `reloadDock()`, and pushes the Refresh result (one primary-
+ * assistant curation turn) back through `setDock`. The build bar calls
+ * `onBuild` (the shell's page builder), so the type-a-prompt flow survives
+ * here. Spec: docs/architecture/features/home-dock.md.
  *
  * [COMP:app-web/home-suggested]
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   ArrowUp,
@@ -36,12 +39,8 @@ import { cn } from "@/lib/utils";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { SuggestedFileDrop } from "@/components/doc/suggested-file-drop";
 import { getAssistantIdentity, type AssistantIdentity } from "@/lib/api/views";
-import {
-  fetchHomeDock,
-  refreshHomeDock,
-  type ResolvedDock,
-  type ResolvedNeed,
-} from "@/lib/api/home-dock";
+import { refreshHomeDock, type ResolvedNeed } from "@/lib/api/home-dock";
+import { useSidebarData } from "./doc-sidebar-data";
 
 type AccentKey = "review" | "approve" | "resume" | "workflow";
 
@@ -81,25 +80,22 @@ type Props = {
 
 export function SuggestedView({ workspaceId, assistantId, userName, onBuild }: Props) {
   const t = useT().docPage.suggested;
-  const [dock, setDock] = useState<ResolvedDock | null>(null);
+  const { dock, dockLoading: loading, reloadDock, setDock } = useSidebarData();
   const [assistant, setAssistant] = useState<AssistantIdentity | null>(null);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [noteDismissed, setNoteDismissed] = useState(false);
   const [q, setQ] = useState("");
 
+  // Revalidate the shared dock once when Home re-mounts (soft-nav back from
+  // approvals/brain/etc., where the counts likely moved) — skipped while the
+  // provider's initial fetch is still in flight, so the first open costs one
+  // GET. The provider keeps the current dock until the fresh one lands.
+  const revalidatedRef = useRef(false);
   useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    fetchHomeDock(workspaceId).then((d) => {
-      if (!alive) return;
-      setDock(d);
-      setLoading(false);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [workspaceId]);
+    if (revalidatedRef.current) return;
+    revalidatedRef.current = true;
+    if (!loading) reloadDock();
+  }, [loading, reloadDock]);
 
   // The note card's identity header (getAssistantIdentity returns null on any
   // error, so a failed fetch just keeps the generic fallback).

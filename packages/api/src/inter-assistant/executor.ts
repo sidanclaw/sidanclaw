@@ -209,6 +209,9 @@ export type CalleeExecutorOptions = {
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
+  /** Generate mode as a consult tool (fill a blueprint from the brain). Same
+   *  tool the chat route injects; workspace-scoped, requiresConfirmation. */
+  generateBlueprintTool?: Tool
 }
 
 export type CalleeQueryParams = {
@@ -585,6 +588,12 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           modeTools.set(name, tool)
         }
       }
+    }
+
+    // Generate mode as a consult tool — fill a blueprint from the brain. Added
+    // for any workspace-scoped consult; the leaf filter below still applies.
+    if (options.generateBlueprintTool && calleeAssistant.workspaceId) {
+      modeTools.set(options.generateBlueprintTool.name, options.generateBlueprintTool)
     }
 
     // 4b. Per-consult tool allow-list. When the caller pins `allowedTools`
