@@ -195,6 +195,22 @@ export type WorkflowAuditEvent =
     }
   | {
       /**
+       * Emitted by the event-dispatch storm guard when a workflow's event
+       * trigger started more runs inside the window than the threshold
+       * allows. The workflow was paused (`enabled = false` +
+       * `paused_reason`) INSTEAD of enqueueing this run — the spend
+       * circuit-breaker. See workflow.md → "Event run queue".
+       */
+      type: 'workflow.storm_paused'
+      workspaceId: string
+      actorUserId: null
+      workflowId: string
+      /** Runs the workflow started inside the storm window. */
+      recentRuns: number
+      windowSeconds: number
+    }
+  | {
+      /**
        * Emitted after an `assistant_call` step with a `deliver` target
        * attempts channel delivery. Makes a no-op / failed push observable
        * instead of swallowing it: `delivery.status` is `delivered` | `skipped`

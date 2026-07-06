@@ -39,6 +39,7 @@ function makeFakeStores() {
         description: description ?? null,
         definition,
         enabled: true,
+        pausedReason: null,
         trigger: trigger ?? { kind: 'manual' },
         webhookSlug: webhookSlug ?? null,
         webhookSecret: webhookSecret ?? null,

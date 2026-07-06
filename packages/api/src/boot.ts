@@ -61,6 +61,7 @@ import {
   advanceWorkflowRun,
   createWorkflowEventDispatcher,
   type WorkflowEventDispatcher,
+  createRunQueueWorker,
   createTaskTools,
   createGoalTools,
   buildOneStepReminderWorkflow,
@@ -210,6 +211,9 @@ import {
   findEventTriggeredWorkflowsSystem,
   getWorkflowCreatorSystem,
   getPrimaryAssistantForWorkspace,
+  createWorkflowRunQueueStore,
+  countRecentRunsForWorkflowSystem,
+  pauseWorkflowSystem,
 } from './db/workflow-store.js'
 import { buildWorkflowToolRegistry } from './workflow/mcp-bridge.js'
 import { createPendingApprovalsStore } from './db/pending-approvals-store.js'
@@ -235,6 +239,7 @@ import { internalIngestRoutes } from './doc/internal-ingest-route.js'
 import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanout.js'
+import { setTaskEventDispatcher } from './task-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
 import { createGenerateSynthesizer, type GenerateSynthesizeFn } from './synthesis/generate-synthesizer.js'
@@ -1398,10 +1403,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         details.reason = event.reason; details.streak = event.streak
       } else if (event.type === 'workflow.step_delivered') {
         details.workflowId = event.workflowId; details.stepId = event.stepId; details.delivery = event.delivery
+      } else if (event.type === 'workflow.storm_paused') {
+        details.workflowId = event.workflowId
+        details.recentRuns = event.recentRuns; details.windowSeconds = event.windowSeconds
       }
       await workspaceAuditStore.append({
         workspaceId: event.workspaceId, actorUserId: event.actorUserId,
-        eventType: event.type, subjectId: event.runId, details,
+        // storm_paused has no run — the guard fired INSTEAD of enqueueing one;
+        // key the audit row on the workflow instead.
+        eventType: event.type,
+        subjectId: event.type === 'workflow.storm_paused' ? event.workflowId : event.runId,
+        details,
       })
     },
     deliverToChannel: createWorkflowChannelDelivery({
@@ -2706,19 +2718,71 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // workflow (the OSS regression this fixes). Mirrors the webhook receiver:
   // event runs are attributed to the workflow creator and recorded
   // `triggerKind='manual'` (the `trigger_kind` enum has no `event` member).
+  // Event run queue — the bounded drain behind event-triggered runs. Event
+  // dispatch ENQUEUES (a `pending` workflow_runs row) and never inline-
+  // executes; this worker drains with per-workflow serialization, a per-
+  // workspace in-flight cap, lease/stale reclaim, and an attempts cap
+  // (mig 302). Producers nudge it right after enqueueing so a quiet system
+  // keeps near-inline latency; the interval is the durable fallback.
+  // Spec: docs/architecture/features/workflow.md → "Event run queue".
+  const runQueueWorker = createRunQueueWorker({
+    store: createWorkflowRunQueueStore(),
+    advance: (runId) => advanceWorkflowRun(workflowExecutorDeps, runId),
+    onError: (err, errCtx) => {
+      console.warn(
+        `[run-queue] ${errCtx.runId ?? '(tick)'} failed:`,
+        err instanceof Error ? err.message : err,
+      )
+    },
+  })
+
+  // Storm guard — the spend circuit-breaker at enqueue time. Queuing bounds
+  // stability, not cost: at the threshold the workflow is PAUSED (enabled =
+  // false + human-readable paused_reason, surfaced by the builder) instead
+  // of enqueueing, and the enabled=true finder filter then drops subsequent
+  // events for free. Re-enabling via PATCH clears the reason.
+  const RUN_STORM_WINDOW_SECONDS = 300
+  const RUN_STORM_THRESHOLD = 25
+
   const workflowEventDispatcher: WorkflowEventDispatcher = createWorkflowEventDispatcher({
     findEventTriggeredWorkflows: ({ workspaceId }) =>
       findEventTriggeredWorkflowsSystem(workspaceId),
     startWorkflowRun: async ({ workflowId, workspaceId, input }) => {
+      const recent = await countRecentRunsForWorkflowSystem(
+        workflowId,
+        RUN_STORM_WINDOW_SECONDS,
+      )
+      if (recent >= RUN_STORM_THRESHOLD) {
+        await pauseWorkflowSystem(
+          workflowId,
+          `Paused automatically: this workflow's event trigger started ${recent} runs in the last ${Math.round(RUN_STORM_WINDOW_SECONDS / 60)} minutes. Review the trigger's match filter, then re-enable the workflow to resume.`,
+        )
+        void Promise.resolve(
+          workflowExecutorDeps.emitAudit?.({
+            type: 'workflow.storm_paused',
+            workspaceId,
+            actorUserId: null,
+            workflowId,
+            recentRuns: recent,
+            windowSeconds: RUN_STORM_WINDOW_SECONDS,
+          }),
+        ).catch(() => {})
+        console.warn(
+          `[workflow-event] storm guard paused workflow ${workflowId} (${recent} runs / ${RUN_STORM_WINDOW_SECONDS}s)`,
+        )
+        return
+      }
       const triggeredBy = await getWorkflowCreatorSystem(workflowId)
-      const run = await workflowRunStore.createRun({
+      await workflowRunStore.createRun({
         workflowId,
         workspaceId,
         triggeredBy,
         triggerKind: 'manual',
         input,
       })
-      await advanceWorkflowRun(workflowExecutorDeps, run.id)
+      // Enqueue-only: the run row (status `pending`) IS the queue entry.
+      // Nudge the local drain for near-inline latency on quiet systems.
+      runQueueWorker.nudge()
     },
     // Second subscriber (additive): goals parked on `until:event`. The finder
     // reads the workspace's non-terminal goals carrying an `awaiting_event`
@@ -2744,6 +2808,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   setPageEventDispatcher(workflowEventDispatcher)
+  // Task lifecycle events ride the same dispatcher — the late-bound seam
+  // `db/tasks.ts` publishes into (no-op until this bind). Both editions.
+  setTaskEventDispatcher(workflowEventDispatcher)
 
   // ════════════════════════════════════════════════════════════════
   // Open background workers
@@ -2861,6 +2928,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) pollWorker.start()
+  if (runWorkers) runQueueWorker.start()
 
   const cleanupWorker = createCleanupWorker({ jobStore })
   if (runWorkers) cleanupWorker.start()
@@ -3399,6 +3467,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     skillReviewWorker.stop()
     embeddingWorker.stop()
     pollWorker.stop()
+    runQueueWorker.stop()
     knowledgeSyncWorker.stop()
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()

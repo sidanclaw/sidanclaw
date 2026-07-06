@@ -2135,6 +2135,7 @@ export const en = {
       savedJustNow: "Saved",
       enabledLabel: "Enabled",
       disabledLabel: "Disabled",
+      stormPausedTitle: "Paused automatically.",
       runNowBtn: "Run now",
       enableAction: "Enable",
       disableAction: "Disable",
@@ -2405,6 +2406,26 @@ export const en = {
         "Only fire when one of these members made the change. Leave empty for anyone.",
       eventPageChangedByAdd: "Add a member",
       eventPageChangedByEmpty: "No workspace members to filter by.",
+      eventSourceKindTask: "Tasks",
+      eventTaskSourceHint:
+        "Fires on task activity in this workspace. Use the filters below to narrow which tasks and which changes.",
+      eventTaskWatchForLabel: "Watch for",
+      eventTaskWatchForHint:
+        "Pick one or more. Nothing checked means any task activity.",
+      eventTaskActionCreated: "Task created",
+      eventTaskActionTagged: "Tag added",
+      eventTaskActionCompleted: "Task completed",
+      eventTaskActionBlocked: "Task blocked",
+      eventTaskActionReopened: "Task reopened",
+      eventTaskActionAssigned: "Task assigned",
+      eventTaskActionUpdated: "Any task change",
+      eventTaskTagsLabel: "With tags (optional)",
+      eventTaskTagsHint:
+        "Match tasks carrying any of these tags. For edits, only newly added tags count: adding a tag later still fires, but unrelated edits of an already-tagged task don't.",
+      eventTaskAssigneeLabel: "Assigned to (optional)",
+      eventTaskAssigneeHint:
+        "Only fire when the task's assignee is one of these members. Leave empty for anyone.",
+      eventTaskAssigneeAdd: "Add a member",
       eventSourceNotConnected: "(not connected)",
       eventMatchHeading: "Match (optional)",
       eventMatchAllHint:

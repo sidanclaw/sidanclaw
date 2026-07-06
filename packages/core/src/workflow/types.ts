@@ -301,6 +301,21 @@ export type EventSourceRef =
        */
       pageId: string
     }
+  | {
+      /**
+       * The workspace's task table — an *internal*, **id-less** source: there
+       * is no natural "one task to watch", so the subscription scope is every
+       * task write in the workspace and `match` does all the selection.
+       * Lifecycle actions (`created` | `completed` | `blocked` | `reopened` |
+       * `assigned` | `tagged` | `updated`) ride the `inChannels` axis; task
+       * tags ride the task-only `match.tags` filter (full set on `created`,
+       * ADDED set on updates — appearance semantics). Events reach the
+       * dispatcher from the task write path (`task-event-fanout.ts` →
+       * `taskLifecycleToDispatchEvent`), not a poller or webhook. See
+       * docs/architecture/features/workflow.md → "Task event source".
+       */
+      type: 'task'
+    }
 
 /**
  * Declarative selectivity on one event subscription. Every present field is
@@ -318,10 +333,21 @@ export type EventMatch = {
   keywords?: string[]
   /** Event actor id (Slack user id, GitHub login) ∈ list. */
   fromActors?: string[]
-  /** Event sub-channel (Slack channel id, GitHub repo) ∈ list. */
+  /**
+   * Event sub-channel (Slack channel id, GitHub repo, lifecycle action) ∈
+   * list. Evaluated against the event's action **set** when the producer
+   * emits one (`DispatchEvent.actions`), so a multi-facet write (a task
+   * update that both completes and tags) satisfies a filter on either facet.
+   */
   inChannels?: string[]
   /** Any entity the event mentions ∈ list. */
   mentions?: string[]
+  /**
+   * Event tags ∩ list ≠ ∅. Only `task` events carry tags (full set on
+   * `created`, ADDED set on updates — appearance semantics); a `tags` filter
+   * on a connector / channel / page subscription never matches.
+   */
+  tags?: string[]
   /** Allow bot-authored events to fire this subscription. Default false. */
   fromBots?: boolean
 }
@@ -436,6 +462,12 @@ export type WorkflowRecord = {
   description: string | null
   definition: WorkflowDefinition
   enabled: boolean
+  /**
+   * Mig 302. Why the workflow was auto-disabled (the event-dispatch storm
+   * guard), human-readable. Null when never paused; cleared when a PATCH
+   * re-enables the workflow.
+   */
+  pausedReason: string | null
   /** Mig 141. Defaults to `{ kind: 'manual' }`. */
   trigger: WorkflowTrigger
   /** Mig 141. Set when `trigger.kind === 'webhook'`; null otherwise. */

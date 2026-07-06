@@ -515,10 +515,20 @@ export default function WorkflowDetailPage({
                 )}
               </>
             ) : (
-              <h1 className="text-xl font-semibold flex items-center gap-2">
-                {workflow.name}
-                <EnabledBadge enabled={workflow.enabled} t={t} />
-              </h1>
+              <>
+                <h1 className="text-xl font-semibold flex items-center gap-2">
+                  {workflow.name}
+                  <EnabledBadge enabled={workflow.enabled} t={t} />
+                </h1>
+                {!workflow.enabled && workflow.pausedReason ? (
+                  <p className="mt-1 text-xs rounded-md border border-amber-300/60 bg-amber-500/10 text-amber-700 dark:text-amber-400 px-2 py-1.5">
+                    <span className="font-medium">
+                      {t.workflowPage.builder.stormPausedTitle}
+                    </span>{" "}
+                    {workflow.pausedReason}
+                  </p>
+                ) : null}
+              </>
             )}
             {editing ? (
               <>

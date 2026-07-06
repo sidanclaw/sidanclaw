@@ -63,6 +63,15 @@ export type EventSourceRef =
        * sub-channel.
        */
       pageId: string;
+    }
+  | {
+      /**
+       * The workspace's task table — id-less: `match` does all the selection.
+       * Lifecycle actions (`created` | `completed` | `blocked` | `reopened` |
+       * `assigned` | `tagged` | `updated`) ride `match.inChannels`; task tags
+       * ride the task-only `match.tags`.
+       */
+      type: "task";
     };
 
 /**
@@ -80,6 +89,11 @@ export type EventMatch = {
   inChannels?: string[];
   /** Any entity the event mentions ∈ list. Cap 128. */
   mentions?: string[];
+  /**
+   * Task-event tag filter (overlap). Full set on `created`, ADDED set on
+   * updates. Only task events carry tags. Cap 64.
+   */
+  tags?: string[];
   /** Allow bot-authored events. Default false (self-loop guard). */
   fromBots?: boolean;
 };
@@ -234,6 +248,8 @@ export type WorkflowSummary = {
   name: string;
   description?: string | null;
   enabled: boolean;
+  /** Mig 302 — why the storm guard auto-disabled this workflow; null otherwise. */
+  pausedReason?: string | null;
   trigger: WorkflowTrigger;
   stepCount: number;
   updatedAt: string;
@@ -266,6 +282,8 @@ export type WorkflowFull = {
   description: string | null;
   definition: WorkflowDefinition;
   enabled: boolean;
+  /** Mig 302 — why the storm guard auto-disabled this workflow; null otherwise. */
+  pausedReason?: string | null;
   trigger: WorkflowTrigger;
   webhookSlug: string | null;
   webhookSecret: string | null;

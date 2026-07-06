@@ -1949,6 +1949,7 @@ export const ja: Dictionary = {
       savedJustNow: "保存しました",
       enabledLabel: "有効",
       disabledLabel: "無効",
+      stormPausedTitle: "自動的に一時停止されました。",
       runNowBtn: "今すぐ実行",
       enableAction: "有効にする",
       disableAction: "無効にする",
@@ -2219,6 +2220,26 @@ export const ja: Dictionary = {
         "これらのメンバーが変更したときのみ起動します。空欄の場合は誰でも対象です。",
       eventPageChangedByAdd: "メンバーを追加",
       eventPageChangedByEmpty: "絞り込めるワークスペースメンバーがいません。",
+      eventSourceKindTask: "タスク",
+      eventTaskSourceHint:
+        "このワークスペースのタスクの動きで発火します。下のフィルターで対象のタスクと変更を絞り込めます。",
+      eventTaskWatchForLabel: "監視する変更",
+      eventTaskWatchForHint:
+        "1つ以上選択してください。未選択の場合はすべてのタスクの動きが対象になります。",
+      eventTaskActionCreated: "タスク作成",
+      eventTaskActionTagged: "タグ追加",
+      eventTaskActionCompleted: "タスク完了",
+      eventTaskActionBlocked: "タスクのブロック",
+      eventTaskActionReopened: "タスクの再開",
+      eventTaskActionAssigned: "タスクの割り当て",
+      eventTaskActionUpdated: "すべての変更",
+      eventTaskTagsLabel: "タグで絞り込み（任意）",
+      eventTaskTagsHint:
+        "いずれかのタグを持つタスクにマッチします。編集時は新しく追加されたタグのみが対象です。後からタグを追加しても発火しますが、タグ付き済みタスクの無関係な編集では発火しません。",
+      eventTaskAssigneeLabel: "担当者で絞り込み（任意）",
+      eventTaskAssigneeHint:
+        "タスクの担当者がこれらのメンバーの場合のみ発火します。未指定の場合は全員が対象です。",
+      eventTaskAssigneeAdd: "メンバーを追加",
       eventSourceNotConnected: "(未接続)",
       eventMatchHeading: "マッチ条件（任意）",
       eventMatchAllHint:
