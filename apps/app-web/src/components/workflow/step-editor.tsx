@@ -949,7 +949,10 @@ function SkillsField({
   }
 
   return (
-    <div className="flex flex-col gap-1.5">
+    // Span the whole identity-strip grid (it is otherwise a single ~1/4-width
+    // cell): the skill rows need the full document-column width so the
+    // description column has room to show.
+    <div className="col-span-full flex flex-col gap-1.5">
       <FieldLabel label={b.skillsLabel} hint={b.skillsHint} />
       {skills.length === 0 && extraSelected.length === 0 ? (
         <div className="text-xs text-muted-foreground">{b.skillsEmpty}</div>
