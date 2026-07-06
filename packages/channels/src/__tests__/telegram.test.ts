@@ -3,7 +3,7 @@ import { createTelegramAdapter, parseTopicChannelId, type TelegramAdapterConfig 
 import { createTelegramApi, isTelegramThreadNotFoundError, TelegramApiError } from '../telegram/api.js'
 import { chunkText } from '../chunking.js'
 import { createDedupBuffer } from '../dedup.js'
-import { verifyTelegramWebhook } from '../telegram/webhook.js'
+import { createTelegramWebhookHandler, verifyTelegramWebhook } from '../telegram/webhook.js'
 import { escapeHtml, markdownToTelegramHTML, stripMarkdown } from '../telegram/markdown.js'
 
 // ── Chunking ───────────────────────────────────────────────────
@@ -69,6 +69,53 @@ describe('[COMP:channels/telegram] verifyTelegramWebhook', () => {
 
   it('rejects undefined header', () => {
     expect(verifyTelegramWebhook('my-secret', undefined)).toBe(false)
+  })
+})
+
+describe('[COMP:channels/telegram] createTelegramWebhookHandler (fail-closed)', () => {
+  function makeHandler(secretToken?: string) {
+    const handleWebhook = vi.fn()
+    const handler = createTelegramWebhookHandler({
+      adapter: { deduplicateId: () => null, handleWebhook } as never,
+      secretToken,
+      onMessage: () => {},
+    })
+    const call = (headers: Record<string, string | undefined>) => {
+      let status = 0
+      handler.middleware(
+        { body: { update_id: 1 }, headers },
+        { status: (code: number) => { status = code; return { json: () => {}, end: () => {} } } },
+      )
+      return status
+    }
+    return { call, handleWebhook }
+  }
+
+  it('rejects EVERY update when no secretToken is configured (fail closed)', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { call, handleWebhook } = makeHandler(undefined)
+      expect(call({ 'x-telegram-bot-api-secret-token': 'anything' })).toBe(401)
+      expect(call({})).toBe(401)
+      expect(handleWebhook).not.toHaveBeenCalled()
+      // The missing-secret misconfiguration logs once, not per update.
+      expect(errSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      errSpy.mockRestore()
+    }
+  })
+
+  it('accepts a correct secret header and delegates to the adapter', () => {
+    const { call, handleWebhook } = makeHandler('s3cret')
+    expect(call({ 'x-telegram-bot-api-secret-token': 's3cret' })).toBe(200)
+    expect(handleWebhook).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a wrong or missing secret header', () => {
+    const { call, handleWebhook } = makeHandler('s3cret')
+    expect(call({ 'x-telegram-bot-api-secret-token': 'nope' })).toBe(401)
+    expect(call({})).toBe(401)
+    expect(handleWebhook).not.toHaveBeenCalled()
   })
 })
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // Mock the pg module before importing client
 vi.mock('pg', () => {
@@ -169,5 +169,53 @@ describe('[COMP:api/db-client] Database client', () => {
     await expect(
       rollbackAndRelease(mockClient as unknown as Parameters<typeof rollbackAndRelease>[0]),
     ).resolves.toBeUndefined()
+  })
+})
+
+// ── getAppPool production fail-closed ──────────────────────────
+//
+// A missing DATABASE_URL_APP used to warn and silently fall back to the
+// OWNER connection — which bypasses RLS — in every environment. In a
+// production context (NODE_ENV=production or Cloud Run's K_SERVICE) that
+// fallback must be a boot failure, not a silent isolation-off.
+describe('[COMP:api/db-client] getAppPool production fail-closed', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  async function freshClient() {
+    vi.resetModules()
+    return await import('../client.js')
+  }
+
+  it('throws under NODE_ENV=production when DATABASE_URL_APP is unset', async () => {
+    vi.stubEnv('NODE_ENV', 'production')
+    vi.stubEnv('DATABASE_URL_APP', '')
+    vi.stubEnv('PG_SINGLE_CONNECTION', '')
+    const fresh = await freshClient()
+    expect(() => fresh.getAppPool()).toThrow(/DATABASE_URL_APP/)
+  })
+
+  it('throws on Cloud Run (K_SERVICE) even without NODE_ENV=production', async () => {
+    vi.stubEnv('NODE_ENV', 'test')
+    vi.stubEnv('K_SERVICE', 'sidanclaw-api')
+    vi.stubEnv('DATABASE_URL_APP', '')
+    vi.stubEnv('PG_SINGLE_CONNECTION', '')
+    const fresh = await freshClient()
+    expect(() => fresh.getAppPool()).toThrow(/DATABASE_URL_APP/)
+  })
+
+  it('falls back with a loud warning outside production', async () => {
+    vi.stubEnv('NODE_ENV', 'test')
+    vi.stubEnv('DATABASE_URL_APP', '')
+    vi.stubEnv('PG_SINGLE_CONNECTION', '')
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fresh = await freshClient()
+      expect(fresh.getAppPool()).toBeDefined()
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('DATABASE_URL_APP'))
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })
