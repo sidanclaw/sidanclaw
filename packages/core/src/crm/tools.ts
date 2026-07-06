@@ -617,7 +617,21 @@ export function createCrmTools(
       let updated: ContactRecord | null = null
       if (hasFieldChange) {
         try {
-          updated = await store.updateContact(context.userId, input.id, fields)
+          // Write under the viewer projection — never patch a row the
+          // caller cannot read back (read/write symmetry).
+          updated = await store.updateContact(
+            context.userId,
+            input.id,
+            fields,
+            ctxFor({
+              userId: context.userId,
+              assistantId: context.assistantId,
+              workspaceId: context.workspaceId!,
+              assistantKind: context.assistantKind,
+              clearance: context.clearance,
+              compartments: context.compartments,
+            }),
+          )
         } catch (err) {
           const translated = translateLinkError(err)
           if (translated) return translated
@@ -841,7 +855,20 @@ export function createCrmTools(
 
       let updated: CompanyRecord | null = null
       if (hasFieldChange) {
-        updated = await store.updateCompany(context.userId, input.id, fields)
+        // Write under the viewer projection (read/write symmetry).
+        updated = await store.updateCompany(
+          context.userId,
+          input.id,
+          fields,
+          ctxFor({
+            userId: context.userId,
+            assistantId: context.assistantId,
+            workspaceId: context.workspaceId!,
+            assistantKind: context.assistantKind,
+            clearance: context.clearance,
+            compartments: context.compartments,
+          }),
+        )
         if (!updated) return { data: `Company ${input.id} not found in workspace.`, isError: true }
         opts?.onEvent?.({ type: 'company_updated', companyId: updated.id, fields: Object.keys(fields) }, eventCtx(context))
       } else {
@@ -1062,7 +1089,20 @@ export function createCrmTools(
       let updated: DealRecord | null = null
       if (hasFieldChange) {
         try {
-          updated = await store.updateDeal(context.userId, input.id, fields)
+          // Write under the viewer projection (read/write symmetry).
+          updated = await store.updateDeal(
+            context.userId,
+            input.id,
+            fields,
+            ctxFor({
+              userId: context.userId,
+              assistantId: context.assistantId,
+              workspaceId: context.workspaceId!,
+              assistantKind: context.assistantKind,
+              clearance: context.clearance,
+              compartments: context.compartments,
+            }),
+          )
         } catch (err) {
           const translated = translateLinkError(err)
           if (translated) return translated
@@ -1121,7 +1161,20 @@ export function createCrmTools(
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
 
-      const updated = await store.setDealStage(context.userId, input.id, input.stage)
+      // Write under the viewer projection (read/write symmetry).
+      const updated = await store.setDealStage(
+        context.userId,
+        input.id,
+        input.stage,
+        ctxFor({
+          userId: context.userId,
+          assistantId: context.assistantId,
+          workspaceId: context.workspaceId!,
+          assistantKind: context.assistantKind,
+          clearance: context.clearance,
+          compartments: context.compartments,
+        }),
+      )
       if (!updated) return { data: `Deal ${input.id} not found in workspace.`, isError: true }
       opts?.onEvent?.({ type: 'deal_stage_advanced', dealId: updated.id, stage: input.stage }, eventCtx(context))
       return { data: `Moved deal [${updated.id}] to ${input.stage}` }

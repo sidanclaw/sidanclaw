@@ -12,7 +12,7 @@ import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { query, queryGated, queryWithRLS } from './client.js'
 import { emitCrmRelationEdge, emitEdgeFireAndForget, superseedCrmRelationEdge } from './edge-hooks.js'
-import { createEntity, getEntityByIdSystem, updateEntity } from './entities-store.js'
+import { createEntity, getEntityById, getEntityByIdSystem, updateEntity } from './entities-store.js'
 
 /**
  * CRM SQL layer — post CRM→entity unification
@@ -318,12 +318,21 @@ export async function listCompanies(ctx: AccessContext, filters: CompanyListFilt
   return result.rows.map(toCompanyRow)
 }
 
+/**
+ * Update-by-id writes are access-scoped (the write-path half of the
+ * "Upsert dedupe is access-scoped" rule — see `crm.md`): the target row
+ * is read AND written under the caller's viewer projection when the tool
+ * passes `access`; writers holding only a user id fall back to the
+ * user-axis projection built from the row's own workspace, which still
+ * refuses another principal's private row.
+ */
 export async function updateCompany(
   userId: string,
   id: string,
   fields: CompanyUpdateFields,
+  access?: AccessContext,
 ): Promise<CompanyRecord | null> {
-  const old = await getEntityByIdSystem(userId, id)
+  const old = access ? await getEntityById(access, id) : await getEntityByIdSystem(userId, id)
   if (!old || old.kind !== 'company') return null
   const a = { ...old.attributes }
   if (fields.domain !== undefined) {
@@ -336,7 +345,7 @@ export async function updateCompany(
     displayName: fields.name,
     canonicalId: fields.domain !== undefined ? (fields.domain ?? null) : undefined,
     attributes: a,
-  })
+  }, dedupeAccessContext(userId, old.workspaceId, access))
   if (!e) return null
   return companyFromEntity(e)
 }
@@ -532,13 +541,15 @@ export async function listContacts(ctx: AccessContext, filters: ContactListFilte
   return result.rows.map(toContactRow)
 }
 
+/** `access`: see `updateCompany` — write-path viewer projection. */
 export async function updateContact(
   userId: string,
   id: string,
   fields: ContactUpdateFields,
   entityLinks?: EntityLinksStore,
+  access?: AccessContext,
 ): Promise<ContactRecord | null> {
-  const old = await getEntityByIdSystem(userId, id)
+  const old = access ? await getEntityById(access, id) : await getEntityByIdSystem(userId, id)
   if (!old || old.kind !== 'person') return null
   if (fields.companyId !== undefined) {
     await assertSameWorkspace(fields.companyId, old.workspaceId, 'company_id')
@@ -554,7 +565,7 @@ export async function updateContact(
     displayName: fields.name,
     canonicalId: fields.email !== undefined ? (fields.email ?? null) : undefined,
     attributes: a,
-  })
+  }, dedupeAccessContext(userId, old.workspaceId, access))
   if (!e) return null
   if (fields.companyId !== undefined) {
     repointGraphEdge(entityLinks, userId, {
@@ -706,14 +717,16 @@ export async function listDeals(ctx: AccessContext, filters: DealListFilters): P
   return result.rows.map(toDealRow)
 }
 
+/** `access`: see `updateCompany` — write-path viewer projection. */
 export async function updateDeal(
   userId: string,
   id: string,
   fields: DealUpdateFields,
   entityLinks?: EntityLinksStore,
+  access?: AccessContext,
 ): Promise<DealRecord | null> {
   assertNonNegativeAmount(fields.amount)
-  const old = await getEntityByIdSystem(userId, id)
+  const old = access ? await getEntityById(access, id) : await getEntityByIdSystem(userId, id)
   if (!old || old.kind !== 'deal') return null
   if (fields.companyId !== undefined) await assertSameWorkspace(fields.companyId, old.workspaceId, 'company_id')
   if (fields.contactId !== undefined) await assertSameWorkspace(fields.contactId, old.workspaceId, 'contact_id')
@@ -727,7 +740,9 @@ export async function updateDeal(
   }
   if (fields.externalRef !== undefined) a.external_ref = fields.externalRef
 
-  const e = await updateEntity(userId, id, { attributes: a })
+  const e = await updateEntity(
+    userId, id, { attributes: a }, dedupeAccessContext(userId, old.workspaceId, access),
+  )
   if (!e) return null
 
   if (fields.companyId !== undefined) {
@@ -748,12 +763,20 @@ export async function updateDeal(
   return dealFromEntity(e)
 }
 
-export async function setDealStage(userId: string, id: string, stage: DealStage): Promise<DealRecord | null> {
+/** `access`: see `updateCompany` — write-path viewer projection. */
+export async function setDealStage(
+  userId: string,
+  id: string,
+  stage: DealStage,
+  access?: AccessContext,
+): Promise<DealRecord | null> {
   assertValidStage(stage)
-  const old = await getEntityByIdSystem(userId, id)
+  const old = access ? await getEntityById(access, id) : await getEntityByIdSystem(userId, id)
   if (!old || old.kind !== 'deal') return null
   const a = { ...old.attributes, stage }
-  const e = await updateEntity(userId, id, { attributes: a })
+  const e = await updateEntity(
+    userId, id, { attributes: a }, dedupeAccessContext(userId, old.workspaceId, access),
+  )
   if (!e) return null
   return dealFromEntity(e)
 }
