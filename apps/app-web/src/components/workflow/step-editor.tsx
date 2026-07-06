@@ -907,7 +907,7 @@ function SkillsField({
   // Compact two-segment toggle shown once a skill is included: Offer / Require.
   function ModeToggle({ slug, mode }: { slug: string; mode: SkillMode }) {
     return (
-      <div className="flex shrink-0 overflow-hidden rounded-md border border-border text-xs">
+      <div className="inline-flex w-fit shrink-0 overflow-hidden rounded-md border border-border text-xs">
         {(["offer", "require"] as const).map((m) => (
           <button
             key={m}
@@ -944,26 +944,37 @@ function SkillsField({
               <div
                 key={s.rowId}
                 className={cn(
-                  "flex items-start gap-2 rounded-md px-2 py-1.5 text-sm",
+                  "flex flex-col gap-1.5 rounded-md px-2 py-1.5 text-sm",
                   disabled && "opacity-60",
                 )}
               >
-                <input
-                  type="checkbox"
-                  checked={on}
-                  disabled={disabled}
-                  onChange={(e) => setMode(s.slug, e.target.checked ? "offer" : "off")}
-                  className="mt-0.5 size-4 shrink-0 accent-primary"
-                />
-                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="font-medium leading-tight">{s.name}</span>
-                  {s.description ? (
-                    <span className="text-xs text-muted-foreground leading-tight">
-                      {s.description}
-                    </span>
-                  ) : null}
-                </span>
-                {on ? <ModeToggle slug={s.slug} mode={mode} /> : null}
+                <label
+                  className={cn(
+                    "flex items-start gap-2",
+                    disabled ? "cursor-not-allowed" : "cursor-pointer",
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    disabled={disabled}
+                    onChange={(e) => setMode(s.slug, e.target.checked ? "offer" : "off")}
+                    className="mt-0.5 size-4 shrink-0 accent-primary"
+                  />
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="font-medium leading-tight">{s.name}</span>
+                    {s.description ? (
+                      <span className="text-xs text-muted-foreground leading-tight">
+                        {s.description}
+                      </span>
+                    ) : null}
+                  </span>
+                </label>
+                {on ? (
+                  <div className="pl-6">
+                    <ModeToggle slug={s.slug} mode={mode} />
+                  </div>
+                ) : null}
               </div>
             );
           })}
@@ -971,21 +982,30 @@ function SkillsField({
             <div
               key={slug}
               className={cn(
-                "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm",
+                "flex flex-col gap-1.5 rounded-md px-2 py-1.5 text-sm",
                 disabled && "opacity-60",
               )}
             >
-              <input
-                type="checkbox"
-                checked
-                disabled={disabled}
-                onChange={() => setMode(slug, "off")}
-                className="size-4 shrink-0 accent-primary"
-              />
-              <span className="min-w-0 flex-1 font-mono text-xs text-muted-foreground">
-                {slug}
-              </span>
-              <ModeToggle slug={slug} mode={modeOf(slug)} />
+              <label
+                className={cn(
+                  "flex items-center gap-2",
+                  disabled ? "cursor-not-allowed" : "cursor-pointer",
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked
+                  disabled={disabled}
+                  onChange={() => setMode(slug, "off")}
+                  className="size-4 shrink-0 accent-primary"
+                />
+                <span className="min-w-0 flex-1 font-mono text-xs text-muted-foreground">
+                  {slug}
+                </span>
+              </label>
+              <div className="pl-6">
+                <ModeToggle slug={slug} mode={modeOf(slug)} />
+              </div>
             </div>
           ))}
         </div>
