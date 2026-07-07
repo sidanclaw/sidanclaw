@@ -120,6 +120,10 @@ describe('[COMP:evals/capability-probes] fixture workspace', () => {
     for (const id of fixture.unavailable.slice(0, 2)) {
       expect(fixture.systemPrompt.toLowerCase()).toContain(id.slice(0, 4).toLowerCase())
     }
+    // …and the frozen clock (prod `# User Context` parity). Without it the
+    // SUT fabricates absolute dates or invents time tools.
+    expect(fixture.systemPrompt).toContain('Current date and time: Monday, March 2, 2026, 9:30 AM')
+    expect(fixture.systemPrompt).toContain('Timezone: Asia/Hong_Kong')
   })
 
   it('stubs every execute — no probe turn can write anywhere', async () => {

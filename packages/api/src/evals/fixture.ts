@@ -106,6 +106,23 @@ function addAll(map: Map<string, Tool>, tools: Tool[] | Record<string, Tool>): v
   }
 }
 
+/**
+ * Frozen "now" for the fixture, mirroring prod's `# User Context` block
+ * (`_prompt-builder.ts` → `Current date and time: ... / Timezone: ...`).
+ * Without it the SUT has no clock: models fabricated absolute dates
+ * ("Saturday, May 17th" from an invented today), invented time tools
+ * (a `getTime` call that failed the invented-tool hard check), or honestly
+ * stalled asking what day it is — all three observed across 2026-07-07
+ * battery runs. Part of the D4 frozen state: changing this instant means
+ * re-deriving any probe expectation that becomes date-sensitive.
+ */
+export const FIXTURE_NOW = {
+  display: 'Monday, March 2, 2026, 9:30 AM',
+  timezone: 'Asia/Hong_Kong',
+} as const
+
+const FIXTURE_USER_CONTEXT = `# User Context\nCurrent date and time: ${FIXTURE_NOW.display}\nTimezone: ${FIXTURE_NOW.timezone}\n\n`
+
 export type FixtureWorkspace = {
   systemPrompt: string
   tools: Map<string, Tool>
@@ -146,7 +163,10 @@ export function buildFixtureWorkspace(): FixtureWorkspace {
   const unavailable = OFFICIAL_CONNECTORS.map((c) => c.id).filter((id) => id !== 'gcal')
 
   const systemPrompt =
-    LAYER_1_SYSTEM_PROMPT + '\n\n' + buildUnavailableCapabilitiesPrompt(unavailable)
+    LAYER_1_SYSTEM_PROMPT +
+    '\n\n' +
+    FIXTURE_USER_CONTEXT +
+    buildUnavailableCapabilitiesPrompt(unavailable)
 
   // Frozen-state capability grants: 'tasks' (§3 explicit) + 'crm' (probe
   // expectations require saveContact/listDeals callable). The other declared
