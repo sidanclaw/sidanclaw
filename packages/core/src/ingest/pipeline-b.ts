@@ -65,6 +65,7 @@ import {
   classifySensitivity,
   type SensitivityClassification,
 } from './sensitivity-classifier.js'
+import { SPOTLIGHT_RULE, spotlightContent } from './spotlight.js'
 import type { PlatformEngagementMetrics, SourceKind } from './types.js'
 
 // ── Public types ─────────────────────────────────────────────────────
@@ -391,7 +392,8 @@ const CONTENT_CHAR_LIMIT = 128 * 1024
 
 const SYSTEM_PROMPT =
   'You are the extraction step of a knowledge-management pipeline. ' +
-  'Output ONE JSON object and nothing else. No markdown fences. No commentary.'
+  'Output ONE JSON object and nothing else. No markdown fences. No commentary. ' +
+  SPOTLIGHT_RULE
 
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s
@@ -404,14 +406,17 @@ function buildExtractionPrompt(
 ): string {
   const allowedEdges = EDGE_TYPES.join(' | ')
   const allowedEphemeralReasons = EPHEMERAL_REASONS.join(' | ')
+  // The content is untrusted third-party text — spotlight it so an embedded
+  // "ignore previous instructions" string lands as DATA, not a command. The
+  // markers pair with SPOTLIGHT_RULE in SYSTEM_PROMPT. Spotlight the truncated
+  // text (what actually reaches the model) so the collision-free nonce is
+  // derived over the exact bytes present in the prompt.
   return `Source: ${episode.sourceKind}
 Occurred at: ${episode.occurredAt.toISOString()}
 Channel sensitivity: ${episode.sensitivity}
 
 Content:
-"""
-${truncate(content, CONTENT_CHAR_LIMIT)}
-"""
+${spotlightContent(truncate(content, CONTENT_CHAR_LIMIT))}
 
 You are extracting structured knowledge from this content. Memory is the LAST resort, not the default. Run every observation through the precedence ladder below and emit it at the FIRST tier that fits.
 
