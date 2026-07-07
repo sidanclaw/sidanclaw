@@ -3,7 +3,8 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".next/**"]
+      "outputs": ["dist/**", ".next/**"],
+      "env": ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"]
     },
     "dev": {
       "cache": false,
