@@ -452,13 +452,56 @@ const eventMatchSchema = z.object({
   fromBots: z.boolean().optional(),
 })
 
+// The discriminant values of `eventSourceRefSchema` ('connector' | 'channel' |
+// 'page' | 'task'), read off the union's options so the flatten-tolerance below
+// can never diverge from the actual source types (adding a variant to the union
+// extends this automatically). Used only by the preprocessor.
+const EVENT_SOURCE_TYPE_VALUES = new Set(
+  eventSourceRefSchema.options.map((o) => o.shape.type.value as string),
+)
+
+/**
+ * The canonical subscription is `{ source: { type, ... }, match? }`. The prod
+ * chat model (gemini-3-flash-preview) intermittently emits a FLATTENED entry
+ * instead — lifting the source's fields to the entry top level, e.g.
+ * `{ type: 'task', match: {...} }` — which otherwise fails validation with
+ * "Required" (no `source`). This regressed real task-tag event triggers (the
+ * `wf-task-tag-event` eval probe). `normalizeEventSubscriptionShape` rewrites
+ * the *unambiguous* flattened form back to the nested one BEFORE validation.
+ *
+ * The lift fires only when `source` is absent AND a top-level `type` is one of
+ * the known source-type discriminants. `match` is the ONLY other legal
+ * entry-level key, so every remaining key is a misplaced source field: the lift
+ * pulls all non-`match` keys into `source` (so a flattened connector entry's
+ * `connectorInstanceId` / `provider` land in `source`, not just `type`). Any
+ * other shape — already-nested, or genuinely malformed with neither `source`
+ * nor a valid `type` — is passed through untouched, so the canonical form keeps
+ * validating unchanged and invalid input still fails loudly (an unknown `type`
+ * is not lifted, so it can't be silently rewritten into a bogus source). See
+ * docs/architecture/features/workflow.md → "Event trigger" (flattened-source
+ * tolerance).
+ */
+export function normalizeEventSubscriptionShape(value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
+  const obj = value as Record<string, unknown>
+  if ('source' in obj) return value
+  if (typeof obj.type !== 'string' || !EVENT_SOURCE_TYPE_VALUES.has(obj.type)) return value
+  const { match, ...source } = obj
+  return match === undefined ? { source } : { source, match }
+}
+
 // Exported so the goals acting loop's `waitForEvent` tool can validate the
 // subscription an agent parks a goal on — the same `(source, match)` struct an
-// `event`-trigger workflow subscribes with.
-export const EventSubscriptionSchema = z.object({
-  source: eventSourceRefSchema,
-  match: eventMatchSchema.optional(),
-})
+// `event`-trigger workflow subscribes with. Wrapped in `z.preprocess` so the
+// flattened source shape the model sometimes emits is lifted before validation
+// (see `normalizeEventSubscriptionShape`); the nested form is untouched.
+export const EventSubscriptionSchema = z.preprocess(
+  normalizeEventSubscriptionShape,
+  z.object({
+    source: eventSourceRefSchema,
+    match: eventMatchSchema.optional(),
+  }),
+)
 
 export const WorkflowTriggerSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('manual') }),
