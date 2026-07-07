@@ -1,21 +1,40 @@
 import { Router } from 'express'
+import type { Request, Response, NextFunction } from 'express'
 import { sanitize } from '@sidanclaw/core'
 import type { AnalyticsStore } from '@sidanclaw/core'
 import { isValidDateString } from './route-helpers.js'
 
 /**
- * Analytics API routes (admin-only).
+ * Analytics API routes.
  *
  * GET /api/analytics/daily?date=2026-04-08   — daily system report
  * GET /api/analytics/weekly?date=2026-04-08  — weekly report ending on date
  *
- * These endpoints return system-wide aggregations for operational review.
- * Protected by admin check — only users with admin role can access.
+ * The daily/weekly/errors reads and the destructive POST /prune return
+ * system-wide, cross-workspace data. The router is mounted with
+ * `optionalAuth`, so each of those routes is guarded on an authenticated
+ * user via `requireUserId` — without it they were reachable ANONYMOUSLY,
+ * including `POST /prune` wiping the `analytics_events` audit log (WS3
+ * boundary finding #1). This closes the anonymous access; admin-level
+ * gating (`X-Admin-Key`) and relocating these operator routes to
+ * `apps/api-admin` (where the analytics surface already lives) is the queued
+ * follow-up — see docs/plans/overnight-review-queue.md. `POST /events` (the
+ * apps/web client funnel bridge) keeps its own `req.userId` check.
  */
 export function analyticsRoutes(analyticsStore: AnalyticsStore): Router {
   const router = Router()
 
-  router.get('/daily', async (req, res) => {
+  // Guard for the operator-only system routes: reject when the optionalAuth
+  // mount produced no authenticated user.
+  function requireUserId(req: Request, res: Response, next: NextFunction): void {
+    if (!(req as { userId?: string }).userId) {
+      res.status(401).json({ error: 'Authentication required' })
+      return
+    }
+    next()
+  }
+
+  router.get('/daily', requireUserId, async (req, res) => {
     try {
       const date = req.query.date as string | undefined
       if (date && !isValidDateString(date)) {
@@ -30,7 +49,7 @@ export function analyticsRoutes(analyticsStore: AnalyticsStore): Router {
     }
   })
 
-  router.get('/weekly', async (req, res) => {
+  router.get('/weekly', requireUserId, async (req, res) => {
     try {
       const date = req.query.date as string | undefined
       if (date && !isValidDateString(date)) {
@@ -49,7 +68,7 @@ export function analyticsRoutes(analyticsStore: AnalyticsStore): Router {
    * GET /api/analytics/errors?sinceHours=24&limit=100 — recent error events.
    * Use this for the "read log, fix bug" daily triage routine.
    */
-  router.get('/errors', async (req, res) => {
+  router.get('/errors', requireUserId, async (req, res) => {
     try {
       const sinceHours = parseInt((req.query.sinceHours as string) ?? '24', 10)
       const limit = parseInt((req.query.limit as string) ?? '100', 10)
@@ -69,7 +88,7 @@ export function analyticsRoutes(analyticsStore: AnalyticsStore): Router {
    * GET /api/analytics/errors/summary?sinceHours=24 — grouped error summary.
    * Returns one row per (event_name, error_type) with counts + affected users.
    */
-  router.get('/errors/summary', async (req, res) => {
+  router.get('/errors/summary', requireUserId, async (req, res) => {
     try {
       const sinceHours = parseInt((req.query.sinceHours as string) ?? '24', 10)
       if (isNaN(sinceHours) || sinceHours < 1 || sinceHours > 720) {
@@ -89,7 +108,7 @@ export function analyticsRoutes(analyticsStore: AnalyticsStore): Router {
    * POST /api/analytics/prune — delete raw events older than retention period.
    * Default: 30 days. Override with ?days=N query param.
    */
-  router.post('/prune', async (req, res) => {
+  router.post('/prune', requireUserId, async (req, res) => {
     try {
       const days = parseInt(req.query.days as string ?? '30', 10)
       if (isNaN(days) || days < 1) {
