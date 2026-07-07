@@ -206,6 +206,32 @@ describe('[COMP:tools/gmail-attachments] gmailSendMessage attachments', () => {
     expect(sent).toHaveLength(0)
   })
 
+  // WS3 finding #6: the confidential refusal now covers the email BODY too,
+  // not only attachments. The body is free text the model composes, so a
+  // secret read this turn could be pasted in; the turn sensitivity floor
+  // (context.sensitivity.max) gates the send the same way a confidential
+  // attachment does.
+  it('refuses the send when the turn sensitivity floor is confidential (body egress)', async () => {
+    const { api, sent } = gmailApi()
+    const result = await sendTool(api).execute(
+      SEND,
+      makeContext({ sensitivity: { max: 'confidential' } as never }),
+    )
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toMatch(/confidential/i)
+    expect(sent).toHaveLength(0)
+  })
+
+  it('sends normally when the turn floor is internal', async () => {
+    const { api, sent } = gmailApi()
+    const result = await sendTool(api).execute(
+      SEND,
+      makeContext({ sensitivity: { max: 'internal' } as never }),
+    )
+    expect(result.isError).toBeUndefined()
+    expect(sent).toHaveLength(1)
+  })
+
   it('refuses when the total size exceeds the email cap, before reading bytes', async () => {
     const big = fakeFile({ sizeBytes: MAX_EMAIL_ATTACHMENT_TOTAL_BYTES - 100 })
     const two = fakeFile({
