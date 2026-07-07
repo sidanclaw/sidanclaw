@@ -1796,6 +1796,95 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
     expect(usage.recordUsage).toHaveBeenCalledTimes(2)
   })
 
+  it('meters the resolver LLM disambiguation call as its own overhead row', async () => {
+    // WS8 finding #2: the third-pass resolver's LLM disambiguation call
+    // (resolver.ts → disambiguateWithLLM) produced usage that writeEntity
+    // discarded — unmetered ingest spend. It now rides the same
+    // overhead:extraction billing bucket as extraction (its source is not
+    // yet in the usage_tracking CHECK constraint) but carries a distinct
+    // triggerKey so per-trigger rollups keep the two calls apart.
+    const usage = usageSpy()
+    const entities = spyEntities()
+    // Two live candidates share the extracted name → the resolver's exact
+    // tier finds >1 match and escalates to the LLM disambiguator.
+    entities.store.listLiveEntitiesSystem = async () => [
+      makeEntity({ id: 'ent-a1', kind: 'company', displayName: 'Acme' }),
+      makeEntity({ id: 'ent-a2', kind: 'company', displayName: 'Acme' }),
+    ]
+    const extraction = JSON.stringify({
+      summary: 'Acme mentioned.',
+      entities: [{ kind: 'company', display_name: 'Acme', canonical_id: null }],
+      edges: [],
+      memories: [],
+      tags: [],
+    })
+    // The extraction provider (deps.provider) and the resolver provider
+    // (entityResolver.llm.provider) are distinct streams; the resolver's
+    // returns the disambiguation pick plus its own usage.
+    const extractionProvider = sequencedProvider([
+      extraction,
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ])
+    const resolverProvider = sequencedProvider([JSON.stringify({ id: 'ent-a1' })])
+    const deps = makeDeps({ provider: extractionProvider, entities: entities.store, usage: usage.store })
+    ;(deps as { entityResolver?: unknown }).entityResolver = {
+      candidateLimit: 100,
+      llm: { provider: resolverProvider, model: 'resolver-model' },
+    }
+
+    await processEpisode(baseEpisode(), 'note', deps)
+
+    // Extraction row + the resolver disambiguation row.
+    const rows = usage.recordUsage.mock.calls.map((c) => c[0])
+    const resolverRow = rows.find((r) => r.triggerKey === 'pipeline_b_entity_resolution')
+    expect(resolverRow).toBeDefined()
+    expect(resolverRow).toMatchObject({
+      userId: 'u-1',
+      workspaceId: 'ws-1',
+      sessionId: null,
+      model: 'resolver-model',
+      inputTokens: 10,
+      outputTokens: 20,
+      source: 'overhead:extraction',
+      triggerKey: 'pipeline_b_entity_resolution',
+    })
+    expect(resolverRow!.actualCostUsd).toBeGreaterThan(0)
+  })
+
+  it('records no resolver row when resolution stays on a local tier (no LLM spend)', async () => {
+    // A single fuzzy candidate resolves locally — no disambiguation call,
+    // so nothing to meter beyond extraction. Guards against double-count /
+    // phantom rows when the resolver never touches the model.
+    const usage = usageSpy()
+    const entities = spyEntities()
+    entities.store.listLiveEntitiesSystem = async () => [
+      makeEntity({ id: 'ent-ddf', kind: 'project', displayName: 'DeltaDeFi' }),
+    ]
+    const extraction = JSON.stringify({
+      summary: 'DeltaDeFy typo.',
+      entities: [{ kind: 'project', display_name: 'DeltaDeFy', canonical_id: null }],
+      edges: [],
+      memories: [],
+      tags: [],
+    })
+    const extractionProvider = sequencedProvider([
+      extraction,
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ])
+    const resolverProvider = sequencedProvider([JSON.stringify({ id: 'ent-ddf' })])
+    const deps = makeDeps({ provider: extractionProvider, entities: entities.store, usage: usage.store })
+    ;(deps as { entityResolver?: unknown }).entityResolver = {
+      fuzzyThreshold: 0.9,
+      candidateLimit: 100,
+      llm: { provider: resolverProvider, model: 'resolver-model' },
+    }
+
+    await processEpisode(baseEpisode(), 'note', deps)
+
+    const rows = usage.recordUsage.mock.calls.map((c) => c[0])
+    expect(rows.some((r) => r.triggerKey === 'pipeline_b_entity_resolution')).toBe(false)
+  })
+
   it('tolerates a null assistant (workspace-scoped batch) as a blank-assistant row', async () => {
     const usage = usageSpy()
     const provider = sequencedProvider(['nope'])
