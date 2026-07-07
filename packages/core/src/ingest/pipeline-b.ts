@@ -672,6 +672,12 @@ export async function processEpisode(
         ],
         maxTokens: 4000,
         temperature: 0.1,
+        // Decoder-level JSON constraint (Gemini responseMimeType). A parse
+        // failure below archives the episode EMPTY — silent knowledge loss —
+        // so malformed output is eliminated at generation where the provider
+        // supports it. parseExtraction's sanitizers + Zod gate stay as the
+        // real boundary (providers without JSON mode ignore the hint).
+        responseFormat: 'json',
       }),
     )
     extractionUsage = response.usage

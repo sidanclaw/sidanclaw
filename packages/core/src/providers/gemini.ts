@@ -127,6 +127,7 @@ type GeminiRequest = {
   generationConfig?: {
     maxOutputTokens?: number
     temperature?: number
+    responseMimeType?: string
     thinkingConfig?: { thinkingLevel?: 'LOW' | 'HIGH'; includeThoughts?: boolean }
   }
 }
@@ -486,7 +487,7 @@ export function resolveGeminiThinkingLevel(
 
 function buildRequest(
   contents: GeminiContent[],
-  options: { systemPrompt: string; tools?: ToolDefinition[]; maxTokens?: number; temperature?: number; thinkingLevel?: ThinkingLevel },
+  options: { systemPrompt: string; tools?: ToolDefinition[]; maxTokens?: number; temperature?: number; thinkingLevel?: ThinkingLevel; responseFormat?: 'json' },
   modelId: string,
 ): GeminiRequest {
   // Universal choke point: every request (stateless stream() AND stateful
@@ -519,6 +520,14 @@ function buildRequest(
     generationConfig: {
       maxOutputTokens: options.maxTokens,
       temperature: options.temperature,
+      // JSON mode: decoder-constrained syntactically-valid JSON. Only when
+      // the caller asked for it AND no tools are declared — Gemini rejects
+      // responseMimeType together with function declarations. Callers still
+      // schema-validate: this kills the malformed-JSON class (fences,
+      // commentary, trailing commas), not schema mismatches.
+      ...(options.responseFormat === 'json' && toolEntries.length === 0
+        ? { responseMimeType: 'application/json' }
+        : {}),
       ...(() => {
         // Gemini 3 thinks on every turn regardless; `includeThoughts: true`
         // asks it to also return a streamable SUMMARY of that reasoning (a

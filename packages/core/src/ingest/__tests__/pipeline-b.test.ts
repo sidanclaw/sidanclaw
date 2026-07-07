@@ -34,7 +34,7 @@ import type {
   EntitySupersedePatch,
 } from '../../entities/types.js'
 import type { MemoryRecord, MemoryStore, MemoryWithMetrics, SoulSynthesisInput } from '../../memory/types.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, ProviderRequest, StreamChunk } from '../../providers/types.js'
 import type { Sensitivity } from '../../security/sensitivity.js'
 
 import { processEpisode, type PipelineBDeps, type PipelineBEpisode, type EpisodeUpdaterPort } from '../pipeline-b.js'
@@ -880,6 +880,43 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(episodes.statusCalls).toEqual([{ id: 'ep-1', next: 'archived' }])
 
     warn.mockRestore()
+  })
+
+  it('requests decoder-level JSON output for the extraction call', async () => {
+    // A parse failure archives the episode EMPTY (silent knowledge loss), so
+    // the extraction call must opt into the provider JSON mode where one
+    // exists (`responseFormat: 'json'` → Gemini responseMimeType). The
+    // sanitizers + Zod gate in parseExtraction remain the real boundary.
+    const requests: ProviderRequest[] = []
+    const responses = [
+      JSON.stringify({ summary: 'noted', entities: [], edges: [], memories: [], tags: [] }),
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ]
+    let call = 0
+    const provider = {
+      name: 'mock',
+      models: ['mock'],
+      createSession() {
+        return {} as never
+      },
+      async *stream(req: ProviderRequest): AsyncGenerator<StreamChunk> {
+        requests.push(req)
+        const text = responses[Math.min(call, responses.length - 1)] ?? ''
+        call++
+        yield { type: 'text_delta', text } as StreamChunk
+        yield {
+          type: 'message_end',
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 20 },
+        } as StreamChunk
+      },
+    } as unknown as LLMProvider
+
+    const result = await processEpisode(baseEpisode(), 'quick note', makeDeps({ provider }))
+
+    expect(result.extracted).toBe(true)
+    // First stream() call is extraction — it must carry the JSON hint.
+    expect(requests[0]?.responseFormat).toBe('json')
   })
 
   it('recovers when the LLM emits a raw control character inside a string literal', async () => {

@@ -143,6 +143,16 @@ export type ProviderRequest = {
   temperature?: number
   thinkingLevel?: ThinkingLevel
   signal?: AbortSignal
+  /**
+   * Advisory hint: constrain generation to syntactically-valid JSON at the
+   * decoder (Gemini maps it to `responseMimeType: application/json`).
+   * Providers without a JSON mode ignore it — callers must still schema-
+   * validate the output (the hint removes the malformed-JSON failure class,
+   * not the schema-mismatch one). Ignored when `tools` are present: JSON
+   * mode and function calling are mutually exclusive on Gemini.
+   * See docs/architecture/brain/ingest-pipeline.md → "Extraction".
+   */
+  responseFormat?: 'json'
 }
 
 export type StreamFn = (request: ProviderRequest) => AsyncIterable<StreamChunk>
