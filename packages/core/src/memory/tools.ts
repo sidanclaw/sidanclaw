@@ -498,11 +498,10 @@ export function createMemoryTools(
   const getMemory = buildTool({
     name: 'getMemory',
     description:
-      'Retrieve one memory\'s full detail when you have its ID from the memory index. ' +
-      'To find memories by topic, use `search` (it returns memory rows alongside every other brain primitive); reach for `getMemory` once you have the id.',
+      'Fetch ONE memory\'s full detail by its id. NOT a search tool: to find memories about a topic or keyword, call `search` instead (it returns memory rows ranked alongside every other brain primitive) and come back here with the id it gives you.',
     inputSchema: z.object({
       id: z.string().optional().describe('Memory ID or prefix to fetch (e.g. "5794afc9" from [id:5794afc9] in the memory index)'),
-      query: z.string().optional().describe('Keyword search (if no specific ID)'),
+      query: z.string().optional().describe('Exact-phrase fallback when you hold a near-verbatim fragment of the memory text but no id. Never for topic lookup: use the `search` tool for that.'),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
