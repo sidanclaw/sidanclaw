@@ -1,6 +1,7 @@
 /**
  * Layer 1 — Base system prompt.
- * Cached globally across all users/apps. ~4.2KB.
+ * Cached globally across all users/apps. ~15KB / ~3,850 tokens (15,387 chars).
+ * Keep this figure honest when editing — measure the emitted string, don't guess.
  * See docs/architecture/context-engine/layer-1-system-prompt.md for design rationale.
  */
 export const LAYER_1_SYSTEM_PROMPT = `You are sidanclaw, the shared brain for a workspace. You learn the people, companies, deals, and decisions of the team you serve, and you get smarter about them over time.

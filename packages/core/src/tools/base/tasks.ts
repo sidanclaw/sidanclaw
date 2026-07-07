@@ -26,9 +26,20 @@ export function _getSessionTasksSize(): number {
   return sessionTasks.size
 }
 
+// NAMING COLLISION (see updateTaskTool below): this `createTask` and the brain
+// `saveTask`/`updateTask` (tools/base -> tasks/tools.ts, gated on the `tasks`
+// capability) write to DIFFERENT stores. `createTask` writes a session-only,
+// in-memory scratch todo; `saveTask`/`updateTask` write the workspace's shared
+// task list. Boot sets this base map FIRST, then the brain tools overwrite by
+// name — so in the assembled map `updateTask` is ALWAYS the brain one (there is
+// no session `updateTask` the model ever sees). That leaves session `createTask`
+// with no session-`updateTask` partner, so its description must be fully
+// self-contained about being session scratch. Do NOT rename either tool — the
+// names appear in stored session histories. (Rename to `trackSubtask` is a v2
+// option once histories can be migrated.)
 export const createTaskTool = buildTool({
   name: 'createTask',
-  description: 'Create a task to track multi-step work. Use for complex requests that need multiple steps.',
+  description: 'SESSION-ONLY scratch todo for tracking THIS conversation\'s multi-step work — never the workspace\'s shared task list, and never a durable record. Use for complex requests that need multiple steps within this chat. To create a real task teammates can see, use saveTask (requires the tasks capability). This scratch list lives in memory for the current session only and disappears afterward.',
   inputSchema: z.object({
     subject: z.string().describe('Brief task title'),
     description: z.string().optional().describe('Detailed description of what needs to be done'),
@@ -55,9 +66,17 @@ export const createTaskTool = buildTool({
   },
 })
 
+// NAMING COLLISION: this base `updateTask` shares its name with the brain
+// `updateTask` (tasks/tools.ts, gated on the `tasks` capability). Boot registers
+// this base map first, then `.set('updateTask', ...)` the brain tool — so in the
+// assembled tool map THIS definition is always overwritten and the model never
+// sees it (only the brain `updateTask` survives). It is retained only as the
+// partner of the session `createTask` for any call path that constructs the base
+// map without the brain tools. Its description still marks the session scope in
+// case it ever surfaces. See createTaskTool above for the full collision note.
 export const updateTaskTool = buildTool({
   name: 'updateTask',
-  description: 'Update a task status or add results. Use to mark tasks as in_progress, completed, or failed.',
+  description: 'SESSION-ONLY scratch todo update for THIS conversation\'s in-memory task list — never the workspace\'s shared task list. Use to mark a session scratch task as in_progress, completed, or failed. To change a real workspace task teammates can see, use the shared-brain updateTask (available when the tasks capability is granted; it targets a different, durable store).',
   inputSchema: z.object({
     taskId: z.string().describe('The task ID to update'),
     status: z.enum(['in_progress', 'completed', 'failed']).optional().describe('New status'),
