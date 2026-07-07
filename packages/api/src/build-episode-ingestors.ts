@@ -82,6 +82,8 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
     analytics: deps.analytics,
     // overhead:extraction attribution — absent in OSS (no usage store).
     usage: deps.usageStore,
+    // Bulk-ingest surcharge (0.5cr item) — absent in OSS (no charge hook).
+    ingestCharge: deps.ingestCharge,
   })
 
   const brainEpisodeIngestor: BrainEpisodeIngestor = async (input) => {

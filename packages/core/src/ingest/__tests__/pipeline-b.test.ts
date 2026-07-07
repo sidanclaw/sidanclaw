@@ -1647,3 +1647,48 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
     expect(result.episodeId).toBe('ep-1')
   })
 })
+
+// ── bulk-ingest surcharge hook ───────────────────────────────────────
+//
+// The charge hook fires INSIDE processEpisode after a successful
+// extraction (step 7b) — same no-caller-can-skip placement as the usage
+// recorder. Pricing/eligibility policy lives entirely behind the hook
+// (platform: 0.5cr for file/manual/bulk kinds, idempotent per episode).
+
+describe('[COMP:brain/pipeline-b] bulk-ingest charge hook', () => {
+  const goodOutput = [
+    JSON.stringify({ summary: 'A note.', entities: [], edges: [], memories: [], tags: [] }),
+    JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+  ]
+
+  it('invokes ingestCharge once with the episode after a successful extraction', async () => {
+    const ingestCharge = vi.fn(async (_e: unknown) => {})
+    const provider = sequencedProvider(goodOutput)
+    await processEpisode(baseEpisode(), 'note', makeDeps({ provider, ingestCharge }))
+
+    expect(ingestCharge).toHaveBeenCalledTimes(1)
+    expect(ingestCharge.mock.calls[0]![0]).toMatchObject({ id: 'ep-1', workspaceId: 'ws-1' })
+  })
+
+  it('never charges on the extraction-failure paths — the run produced nothing billable', async () => {
+    const ingestCharge = vi.fn(async (_e: unknown) => {})
+    const provider = sequencedProvider(['this is not json'])
+    await processEpisode(baseEpisode(), 'note', makeDeps({ provider, ingestCharge }))
+    expect(ingestCharge).not.toHaveBeenCalled()
+  })
+
+  it('a charge failure logs and never breaks ingestion', async () => {
+    const ingestCharge = vi.fn(async () => {
+      throw new Error('ledger down')
+    })
+    const provider = sequencedProvider(goodOutput)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await processEpisode(baseEpisode(), 'note', makeDeps({ provider, ingestCharge }))
+    expect(result.episodeId).toBe('ep-1')
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('ingest charge failed for episode ep-1'),
+      'ledger down',
+    )
+    warnSpy.mockRestore()
+  })
+})

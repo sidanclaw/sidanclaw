@@ -387,6 +387,13 @@ export interface EpisodeIngestorDeps {
    * pipeline then skips recording.
    */
   usageStore?: UsageStore
+  /**
+   * Bulk-ingest surcharge hook threaded into Pipeline B (`ingestCharge`),
+   * fired once per successfully-extracted episode. The platform's
+   * implementation prices by source kind (0.5-credit bulk-ingest item,
+   * idempotent per episode); absent in OSS — ingest stays uncharged.
+   */
+  ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
 }
 
 /**
@@ -401,6 +408,12 @@ export interface OpenApiPorts {
   checkCreditBudget?: CreditBudgetGate
   /** Real DB usage recorder; default no-op (covers consolidation + chat). */
   usageStore?: UsageStore
+  /**
+   * Bulk-ingest surcharge hook (0.5-credit bulk-ingest item, priced +
+   * ledgered platform-side, idempotent per episode). Threaded into every
+   * Pipeline B wiring; default absent — OSS ingest is uncharged.
+   */
+  ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
 
   // ── Feed/distribution host hooks — open default: inert ──
   injectExtraTools?: InjectExtraTools
@@ -1128,6 +1141,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const builtIngestors = ports.buildEpisodeIngestors?.({
     provider, crmStore, entitiesStore, entityLinksStore, memoryStore, taskStore, episodesStore, analytics,
     usageStore,
+    ingestCharge: ports.ingestCharge,
   })
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})

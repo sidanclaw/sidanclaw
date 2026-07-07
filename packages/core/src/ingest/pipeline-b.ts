@@ -228,6 +228,20 @@ export type PipelineBDeps = {
    * store simply omit it.
    */
   usage?: UsageStore
+  /**
+   * Optional user-billed charge hook, invoked once per episode after a
+   * SUCCESSFUL extraction (post summary+archive, step 7) — never on the
+   * empty-summary failure paths. All charging policy lives behind the
+   * hook: the platform's implementation classifies `episode.sourceKind`
+   * (file/manual/bulk billable; conversational, connector-drip, and
+   * recording-surcharge-covered kinds exempt) and debits the 0.5-credit
+   * bulk-ingest item into its per-episode-idempotent ledger, so a
+   * reprocessed episode can never double-charge (cost-and-pricing.md →
+   * "Credit operation menu"). Same inside-processEpisode placement
+   * rationale as `usage`: no caller can ship an uncharged ingest path.
+   * Best-effort: failures log and never break ingestion. Absent in OSS.
+   */
+  ingestCharge?: (episode: PipelineBEpisode) => Promise<void>
 }
 
 export type PipelineBResult = {
@@ -861,6 +875,22 @@ export async function processEpisode(
         err instanceof Error ? err.message : String(err)
       }`,
     )
+  }
+
+  // 7b. Bulk-ingest surcharge — extraction succeeded, so the billable unit
+  // exists. The hook's ledger is idempotent on episode id, so charging
+  // after a (possibly retried) archive write cannot double-debit. The
+  // empty-summary failure paths above never reach here: a failed run
+  // charges nothing (the recording-surcharge precedent).
+  if (deps.ingestCharge) {
+    try {
+      await deps.ingestCharge(episode)
+    } catch (err) {
+      console.warn(
+        `[pipeline-b] ingest charge failed for episode ${episode.id}:`,
+        err instanceof Error ? err.message : err,
+      )
+    }
   }
 
   // 8. Final step — async sensitivity classifier (non-blocking, flag-not-bump).
