@@ -1044,8 +1044,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     description:
       `Propose a workflow definition for the user to approve. Validates the draft against the schema and returns a summary the user can read. ` +
       `No database writes. After this returns, present the proposal to the user verbatim and ask for explicit confirmation ("yes / create it / go ahead") before calling \`createWorkflow\`. ` +
-      `Step types (V1): assistant_call (free-mode A2A), tool_call (first-party + MCP allow-policy), wait (Phase B only), branch (JSONLogic condition). ` +
+      `Step types (V1): assistant_call (free-mode A2A), tool_call (first-party + MCP allow-policy), wait (not yet available), branch (JSONLogic condition). ` +
+      `There is no loop / for-each step: to process each item in a list, propose a recurring schedule trigger that handles one batch per run and carries a cursor across runs via storeOutputAs + {{lastRun.<var>}}, or a research fan-out step for a read-only gather; name these routes when you decline a loop request. ` +
       `Use \`storeOutputAs\` on a step to make its output available as \`{{vars.<name>}}\` in later steps. Use \`{{input.<name>}}\` to reference the trigger payload. ` +
+      `A later step's prompt must NEVER assert what an earlier step supposedly did (e.g. "...which was emailed to the reviewer") — the earlier step may have failed or refused, and the assertion would be recorded as fact. Thread the earlier step's REAL output via storeOutputAs + {{vars.<name>}} and phrase the prompt conditionally on it. ` +
       `\n\nPage editing: when a step should edit or produce a doc page, set the step's \`page\` field — NEVER just mention a page id in the prompt (the callee gets no page tools that way and the step fails on every run). ` +
       `Variants: \`page: {"id": "<page uuid>"}\` edits an existing page; \`page: {"create": true, "title": "...", "nestUnder": "<page uuid>"}\` creates a saved page each run and anchors the step to it (title may use {{vars}}/{{input}}); \`page: {"fromStep": "<stepId>"}\` edits the page an earlier create-step made this run. ` +
       `The callee then runs with the doc tools (getCurrentPage / patchPage / renderPage) against that page.` +
