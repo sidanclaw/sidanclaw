@@ -5,6 +5,7 @@ import type { AccessContext } from '../security/access-context.js'
 import { researchWriteFloor } from '../security/sensitivity.js'
 import { unionCompartments } from '../security/compartments.js'
 import { buildTool, type Tool } from '../tools/types.js'
+import { tolerantInt } from '../tools/schema-tolerance.js'
 import {
   applyExplicitCloses,
   applyExplicitLinks,
@@ -235,6 +236,62 @@ function eventCtx(context: { userId: string; assistantId: string; sessionId: str
   }
 }
 
+// ── Dedupe-merge visibility (Tier B, write-gating-decision-brief.md §3) ──
+//
+// saveContact / saveCompany upsert: the store silently dedupe-merges into
+// an existing active row (same email/name) instead of inserting. The tool
+// result must SURFACE that branch so a merge into the wrong record is
+// visible in the turn (no gate — supersede is chain-restorable, but a
+// SILENT merge is the risk). `CrmStore.createContact/createCompany` return
+// a plain record with no merged flag, so we detect the merge tool-side
+// without a store-contract change: snapshot the exact-identity candidate
+// ids the store would dedupe against BEFORE the save (same access
+// projection), then check whether the saved row's id was pre-existing.
+// A fresh insert always mints a new id, so id ∈ snapshot ⇒ merged.
+
+/** Ids of active contacts whose email OR name exactly matches (case-insensitive) — the store's dedupe keys. */
+async function existingContactMatchIds(
+  store: CrmStore,
+  ctx: AccessContext,
+  identity: { name: string; email?: string | null },
+): Promise<Set<string>> {
+  const ids = new Set<string>()
+  const email = identity.email?.trim().toLowerCase()
+  const name = identity.name.trim().toLowerCase()
+  try {
+    // listContacts filters name/email by ILIKE substring — query the exact
+    // term, then keep only exact (case-insensitive) matches on the field the
+    // store dedupes on (email first, else name).
+    if (email) {
+      const byEmail = await store.listContacts(ctx, { query: identity.email!, limit: 100 })
+      for (const r of byEmail) if ((r.email ?? '').trim().toLowerCase() === email) ids.add(r.id)
+    }
+    const byName = await store.listContacts(ctx, { query: identity.name, limit: 100 })
+    for (const r of byName) if (r.name.trim().toLowerCase() === name) ids.add(r.id)
+  } catch {
+    // Best-effort: a failed pre-scan just means we can't prove a merge, so
+    // the result falls back to "Created" — never blocks the save.
+  }
+  return ids
+}
+
+/** Ids of active companies whose name exactly matches (case-insensitive) — the store's dedupe key. */
+async function existingCompanyMatchIds(
+  store: CrmStore,
+  ctx: AccessContext,
+  name: string,
+): Promise<Set<string>> {
+  const ids = new Set<string>()
+  const norm = name.trim().toLowerCase()
+  try {
+    const rows = await store.listCompanies(ctx, { query: name, limit: 100 })
+    for (const r of rows) if (r.name.trim().toLowerCase() === norm) ids.add(r.id)
+  } catch {
+    // Best-effort — see existingContactMatchIds.
+  }
+  return ids
+}
+
 // ── Row formatters ──────────────────────────────────────────────────
 
 // Every projection emits `entity_id` alongside `id`. `id` is the
@@ -451,20 +508,28 @@ export function createCrmTools(
       )
       if (reject) return reject
 
+      const dedupeCtx = ctxFor({
+        userId: context.userId,
+        assistantId: context.assistantId,
+        workspaceId: context.workspaceId!,
+        assistantKind: context.assistantKind,
+        clearance: context.clearance,
+        compartments: context.compartments,
+      })
+      // Snapshot the ids the store's upsert-dedupe would target, BEFORE the
+      // write, so the merge branch is visible in the result (Tier B).
+      const priorMatchIds = await existingContactMatchIds(store, dedupeCtx, {
+        name: input.name,
+        email: input.email ?? null,
+      })
+
       try {
         const contact = await store.createContact({
           userId: context.userId,
           workspaceId: context.workspaceId!,
           // Scope the upsert-dedupe to entities this caller can read —
           // never merge into another principal's invisible row.
-          access: ctxFor({
-            userId: context.userId,
-            assistantId: context.assistantId,
-            workspaceId: context.workspaceId!,
-            assistantKind: context.assistantKind,
-            clearance: context.clearance,
-            compartments: context.compartments,
-          }),
+          access: dedupeCtx,
           name: input.name,
           email: input.email ?? null,
           phone: input.phone ?? null,
@@ -494,9 +559,13 @@ export function createCrmTools(
           links: contact.entityId ? input.links : undefined,
         })
         const entitySuffix = contact.entityId ? `, entityId=${contact.entityId}` : ''
+        const merged = priorMatchIds.has(contact.id)
+        const verb = merged
+          ? `Merged into existing contact [${contact.id}${entitySuffix}]: ${contact.name}`
+          : `Created contact [${contact.id}${entitySuffix}]: ${contact.name}`
         return {
           data:
-            `Created contact [${contact.id}${entitySuffix}]: ${contact.name}` +
+            verb +
             formatLinksSummary(linksSummary) +
             formatSuggestions(suggestions),
         }
@@ -547,7 +616,7 @@ export function createCrmTools(
       query: z.string().min(1).max(128).optional().describe('ILIKE substring on name and email.'),
       tag: z.string().min(1).max(64).optional(),
       company_id: idShape.optional(),
-      limit: z.coerce.number().int().min(1).max(100).optional().default(25),
+      limit: tolerantInt({ min: 1, max: 100 }).optional().default(25),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -709,18 +778,23 @@ export function createCrmTools(
       )
       if (reject) return reject
 
+      const dedupeCtx = ctxFor({
+        userId: context.userId,
+        assistantId: context.assistantId,
+        workspaceId: context.workspaceId!,
+        assistantKind: context.assistantKind,
+        clearance: context.clearance,
+        compartments: context.compartments,
+      })
+      // Snapshot the dedupe-target ids before the write (Tier B merge
+      // visibility) — see saveContact.
+      const priorMatchIds = await existingCompanyMatchIds(store, dedupeCtx, input.name)
+
       const company = await store.createCompany({
         userId: context.userId,
         workspaceId: context.workspaceId!,
         // Same dedupe scoping as saveContact — see that call site.
-        access: ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-        }),
+        access: dedupeCtx,
         name: input.name,
         domain: input.domain ?? null,
         tags: input.tags,
@@ -748,9 +822,13 @@ export function createCrmTools(
         links: company.entityId ? input.links : undefined,
       })
       const entitySuffix = company.entityId ? `, entityId=${company.entityId}` : ''
+      const merged = priorMatchIds.has(company.id)
+      const verb = merged
+        ? `Merged into existing company [${company.id}${entitySuffix}]: ${company.name}`
+        : `Created company [${company.id}${entitySuffix}]: ${company.name}`
       return {
         data:
-          `Created company [${company.id}${entitySuffix}]: ${company.name}` +
+          verb +
           formatLinksSummary(linksSummary) +
           formatSuggestions(suggestions),
       }
@@ -793,7 +871,7 @@ export function createCrmTools(
     inputSchema: z.object({
       query: z.string().min(1).max(128).optional().describe('ILIKE substring on name and domain.'),
       tag: z.string().min(1).max(64).optional(),
-      limit: z.coerce.number().int().min(1).max(100).optional().default(25),
+      limit: tolerantInt({ min: 1, max: 100 }).optional().default(25),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -1021,7 +1099,7 @@ export function createCrmTools(
       stage: stageEnum.or(z.array(stageEnum)).optional(),
       contact_id: idShape.optional(),
       company_id: idShape.optional(),
-      limit: z.coerce.number().int().min(1).max(100).optional().default(25),
+      limit: tolerantInt({ min: 1, max: 100 }).optional().default(25),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
