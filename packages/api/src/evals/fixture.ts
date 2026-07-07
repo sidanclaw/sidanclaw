@@ -69,6 +69,60 @@ const SEMANTIC_ACKS: Record<string, string> = {
   proposeWorkflow: 'Proposal recorded and shown to the user as a preview card for approval.',
 }
 
+/**
+ * Deterministic fixture id minted for an id-returning write ack. Derived
+ * purely from the tool name so the same tool yields the same id on every
+ * run (D4 determinism — never Date.now / randomness). "-1" because the
+ * fixture is a frozen empty workspace: it mints exactly one id per tool
+ * per turn, it does not count writes.
+ */
+function fixtureId(toolName: string): string {
+  return `fx-${toolName.toLowerCase()}-1`
+}
+
+/**
+ * Write-ack templates for the id-returning tool families. WHY this exists
+ * (v1.1 debt (b), docs/plans/behavioral-evals.md §3): the prod save tools
+ * return the new row's id, and their descriptions instruct the model to
+ * reuse it — saveContact/saveCompany/saveDeal echo `entityId=<id>` and say
+ * "use the `entityId` returned from prior save* calls" for `links`;
+ * saveTask/saveMemory echo `[<id>]` and say to pass it as `parent_id`;
+ * renderPage/createSubPage return `{ pageId }` for follow-up patchPage;
+ * createScheduledJob/createWorkflow return `{ id }`. A bare "Done." strips
+ * that id, so a model running the prod-valid multi-step flow (save the
+ * company, then link the contact to it via `links`, or render a page then
+ * patch it) can never obtain the id — lookups return the empty-workspace
+ * read ack — and dead-ends looping (observed: crm-link-contact-deal burned
+ * its whole tool budget). Each template returns an ack of the SHAPE the
+ * tool's description promises, carrying a deterministic fixture id.
+ *
+ * SCOPE GUARD — the fixture never simulates state. These ids exist so a
+ * flow can PROCEED to its next step, NOT so a later read can confirm the
+ * write: a subsequent listContacts / getWorkflow still returns the frozen
+ * empty-workspace read ack, and that asymmetry is ACCEPTED. Probes grade
+ * the PROPOSAL / the act, not a materialised workspace.
+ */
+const WRITE_ACK_TEMPLATES: Record<string, (id: string) => unknown> = {
+  // CRM saves — string ack, id + entityId inline (mirrors
+  // `Created contact [<id>, entityId=<id>]: ...`). Same fixture id serves as
+  // both the row id and the entityId; the model reuses entityId for `links`.
+  saveContact: (id) => `Created contact [${id}, entityId=${id}].`,
+  saveCompany: (id) => `Created company [${id}, entityId=${id}].`,
+  saveDeal: (id) => `Created deal [${id}, entityId=${id}].`,
+  // Task / memory — string ack, id in [brackets] (parent_id / update target).
+  saveTask: (id) => `Created task [${id}].`,
+  saveMemory: (id) => `Saved memory [${id}].`,
+  // Doc pages — object ack `{ pageId, version, outline }` (createSubPage
+  // shares the shape). Empty outline: nothing was really rendered, and the
+  // model needs only `pageId` to follow up with patchPage.
+  renderPage: (id) => ({ pageId: id, version: 1, outline: [] }),
+  createSubPage: (id) => ({ pageId: id, version: 1, outline: [] }),
+  // Scheduling / workflow — object ack keyed `id` (their real returns carry
+  // far more, but `id` is the only field a follow-up step consumes).
+  createScheduledJob: (id) => ({ id }),
+  createWorkflow: (id) => ({ id }),
+}
+
 function stubExecute(tool: Tool): Tool {
   return {
     ...tool,
@@ -87,9 +141,15 @@ function stubExecute(tool: Tool): Tool {
     // framing on the write ack ("no real write occurred") reads as a
     // failed/blocked write and manufactures phantom-permission narratives.
     // The ack must be indistinguishable from a plain success.
+    //
+    // Priority: proposeWorkflow's semantic ack first; then id-returning
+    // writes get a shape-matched ack carrying a deterministic fixture id so
+    // multi-step flows can proceed (v1.1 debt (b)); then the empty-workspace
+    // read ack; then a bare "Done." for id-less writes.
     execute: async () => ({
       data:
         SEMANTIC_ACKS[tool.name] ??
+        WRITE_ACK_TEMPLATES[tool.name]?.(fixtureId(tool.name)) ??
         (tool.isReadOnly
           ? 'No matching records — this workspace is new and has no data yet.'
           : 'Done.'),
