@@ -372,10 +372,11 @@ export function createDbLinkedAccountStore(): LinkedAccountStore {
       try {
         await client.query('BEGIN')
 
-        // Capture (provider, provider_id) for the routing cleanup.
+        // Capture (provider, provider_id) for the routing cleanup, scoped to
+        // the acting user so a foreign id returns nothing (no delete, no leak).
         const identityRow = await client.query<{ provider: string; provider_id: string }>(
-          `SELECT provider, provider_id FROM linked_identities WHERE id = $1`,
-          [id],
+          `SELECT provider, provider_id FROM linked_identities WHERE id = $1 AND user_id = $2`,
+          [id, actingUserId],
         )
         if (identityRow.rows.length === 0) {
           await client.query('COMMIT')
@@ -383,12 +384,16 @@ export function createDbLinkedAccountStore(): LinkedAccountStore {
         }
         const { provider, provider_id: providerId } = identityRow.rows[0]
 
-        // Delete identity — RLS-gated so a foreign user can't delete.
-        // Switch to queryWithRLS-equivalent: set the session var, execute, then reset.
-        await client.query(`SELECT set_config('app.current_user_id', $1, true)`, [actingUserId])
+        // Delete the identity scoped to its owner. This store runs on the
+        // owner pool (getPool), which BYPASSES RLS, so the explicit
+        // `user_id = $2` predicate is the ONLY gate. A previous version set
+        // `app.current_user_id` and trusted RLS, but on the owner pool that
+        // GUC is inert, so any authenticated user could delete any identity
+        // (and wipe its channel routing) by id — WS3 cross-user-unlink fix,
+        // 2026-07-07.
         const identityDelete = await client.query(
-          `DELETE FROM linked_identities WHERE id = $1`,
-          [id],
+          `DELETE FROM linked_identities WHERE id = $1 AND user_id = $2`,
+          [id, actingUserId],
         )
         if ((identityDelete.rowCount ?? 0) === 0) {
           await client.query('ROLLBACK')

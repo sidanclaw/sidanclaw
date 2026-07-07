@@ -146,7 +146,6 @@ describe('[COMP:api/linked-accounts-store] deleteForUser', () => {
         if (sql.includes('SELECT provider, provider_id FROM linked_identities')) {
           return { rows: identityRows, rowCount: identityRows.length }
         }
-        if (sql.includes('set_config')) return { rows: [], rowCount: 0 }
         if (sql.includes('DELETE FROM linked_identities')) {
           return { rows: [], rowCount: deleteRowCount }
         }
@@ -175,15 +174,40 @@ describe('[COMP:api/linked-accounts-store] deleteForUser', () => {
     expect(sqls[sqls.length - 1]).toBe('COMMIT')
   })
 
+  // WS3 cross-user-unlink regression: the owner pool bypasses RLS, so both
+  // the SELECT and the DELETE must carry an explicit `user_id = $2` predicate
+  // bound to the acting user. Without it, any authenticated user could delete
+  // any other user's linked identity (and wipe their channel routing) by id.
+  it('scopes both the SELECT and the DELETE to the acting user (no inert set_config)', async () => {
+    const client = makeTxClient([{ provider: 'telegram', provider_id: '12345' }], 1)
+
+    await store.deleteForUser('u_owner', 'li_1')
+
+    const calls = client.query.mock.calls as Array<[string, unknown[]?]>
+    const selectCall = calls.find((c) => c[0].includes('SELECT provider, provider_id FROM linked_identities'))
+    const deleteCall = calls.find((c) => c[0].includes('DELETE FROM linked_identities'))
+    expect(selectCall?.[0]).toContain('user_id = $2')
+    expect(selectCall?.[1]).toEqual(['li_1', 'u_owner'])
+    expect(deleteCall?.[0]).toContain('user_id = $2')
+    expect(deleteCall?.[1]).toEqual(['li_1', 'u_owner'])
+    // The inert owner-pool GUC is gone — it never gated anything.
+    expect(calls.some((c) => c[0].includes('set_config'))).toBe(false)
+  })
+
   it('returns false when the identity row does not exist', async () => {
     makeTxClient([], 0)
     const result = await store.deleteForUser('u_1', 'li_missing')
     expect(result).toBe(false)
   })
 
-  it('returns false when RLS hides the identity from the caller', async () => {
-    makeTxClient([{ provider: 'telegram', provider_id: '12345' }], 0)
+  it('returns false and issues no DELETE when the id belongs to another user', async () => {
+    // The scoped SELECT finds nothing for a foreign acting user, so the
+    // transaction commits without touching linked_identities or channel_routes.
+    const client = makeTxClient([], 0)
     const result = await store.deleteForUser('u_stranger', 'li_1')
     expect(result).toBe(false)
+    const sqls = client.query.mock.calls.map((c) => c[0] as string)
+    expect(sqls.some((s) => s.includes('DELETE FROM linked_identities'))).toBe(false)
+    expect(sqls.some((s) => s.includes('DELETE FROM channel_routes'))).toBe(false)
   })
 })
