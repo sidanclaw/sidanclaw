@@ -26,6 +26,33 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
     expect(result.success).toBe(true)
   })
 
+  it('unwraps JSON-string steps (the steps-as-strings model prior, 2026-07-07 tolerance fix)', () => {
+    // 4 prod authoring failures in 14 days: `steps.0: Expected object,
+    // received string`. A JSON-serialised step object now parses.
+    const def = {
+      startStepId: 'step_1',
+      steps: [
+        JSON.stringify({
+          id: 'step_1',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'do the thing',
+        }),
+      ],
+    }
+    const result = WorkflowDefinitionSchema.safeParse(def)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.steps[0]).toMatchObject({ id: 'step_1', type: 'assistant_call' })
+    }
+  })
+
+  it('a non-JSON string step still fails with the normal validation error', () => {
+    const def = { startStepId: 's1', steps: ['not json at all'] }
+    const result = WorkflowDefinitionSchema.safeParse(def)
+    expect(result.success).toBe(false)
+  })
+
   it('accepts a branch with both legs', () => {
     const def = {
       startStepId: 'check',
@@ -434,6 +461,91 @@ describe('[COMP:workflow/schemas] WorkflowTriggerSchema', () => {
       },
     }
     expect(WorkflowTriggerSchema.safeParse(trigger).success).toBe(true)
+  })
+
+  it('accepts a task event source with a tag filter (canonical nested form)', () => {
+    const trigger = {
+      kind: 'event',
+      event: {
+        sources: [
+          {
+            source: { type: 'task' },
+            match: { inChannels: ['created', 'tagged'], tags: ['triage'] },
+          },
+        ],
+      },
+    }
+    const r = WorkflowTriggerSchema.safeParse(trigger)
+    expect(r.success).toBe(true)
+    if (r.success && r.data.kind === 'event') {
+      expect(r.data.event.sources[0].source).toEqual({ type: 'task' })
+    }
+  })
+
+  it('lifts the FLATTENED task-source entry the prod model emits back to the nested form', () => {
+    // Regression: gemini-3-flash-preview intermittently flattens `source.type`
+    // to the entry top level (`wf-task-tag-event` eval probe), which used to
+    // fail validation with "Required" (missing `source`). z.preprocess lifts
+    // the unambiguous flattened form before validation.
+    const trigger = {
+      kind: 'event',
+      event: {
+        sources: [
+          {
+            type: 'task',
+            match: { inChannels: ['tagged'], tags: ['triage'] },
+          },
+        ],
+      },
+    }
+    const r = WorkflowTriggerSchema.safeParse(trigger)
+    expect(r.success).toBe(true)
+    if (r.success && r.data.kind === 'event') {
+      // Normalized to the canonical shape: source nested, match preserved.
+      expect(r.data.event.sources[0]).toEqual({
+        source: { type: 'task' },
+        match: { inChannels: ['tagged'], tags: ['triage'] },
+      })
+    }
+  })
+
+  it('lifts a flattened connector-source entry (type + its own fields) to nested', () => {
+    const trigger = {
+      kind: 'event',
+      event: {
+        sources: [{ type: 'connector', connectorInstanceId: 'ci-123', provider: 'github' }],
+      },
+    }
+    const r = WorkflowTriggerSchema.safeParse(trigger)
+    expect(r.success).toBe(true)
+    if (r.success && r.data.kind === 'event') {
+      expect(r.data.event.sources[0].source).toEqual({
+        type: 'connector',
+        connectorInstanceId: 'ci-123',
+        provider: 'github',
+      })
+    }
+  })
+
+  it('rejects an entry with neither `source` nor a valid top-level `type`', () => {
+    // The flatten-lift is unambiguous-only: no `source` and no recognized
+    // `type` discriminant stays untouched and fails as before.
+    const trigger = {
+      kind: 'event',
+      event: { sources: [{ match: { tags: ['triage'] } }] },
+    }
+    expect(WorkflowTriggerSchema.safeParse(trigger).success).toBe(false)
+  })
+
+  it('does not lift a flattened entry whose top-level `type` is not a known source type', () => {
+    // `type: 'database'` is not a source discriminant, so the entry is passed
+    // through unchanged and fails validation (no `source`) rather than being
+    // silently rewritten into a bogus source.
+    const trigger = {
+      kind: 'event',
+      event: { sources: [{ type: 'database', connectorInstanceId: 'x' }] },
+    }
+    expect(WorkflowTriggerSchema.safeParse(trigger).success).toBe(false)
   })
 
   it('accepts a page event source filtered by lifecycle action', () => {

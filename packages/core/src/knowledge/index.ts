@@ -1,4 +1,4 @@
-export type { KnowledgeStoreInterface, KnowledgeSearchResult, KnowledgeEntryDetail } from './types.js'
+export type { KnowledgeStoreInterface, KnowledgeSearchResult, KnowledgeEntryDetail, KnowledgeRepoWriter, KnowledgeRepoWriteResult } from './types.js'
 export { computeSimilarity } from './similarity.js'
 export { createKnowledgeSyncWorker } from './sync-worker.js'
 export type { SyncGitHubApi, SyncStore, SyncCredentials, SyncSource, SyncEvent } from './sync-worker.js'

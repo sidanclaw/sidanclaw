@@ -54,6 +54,12 @@ function fakeStores() {
         maxTurns: params.maxTurns ?? null,
         researchMode: params.researchMode ?? false,
         nameManuallySet: false,
+        lifecycleState: 'active' as const,
+        lifecycleTransitionedAt: null,
+        lifecycleReason: null,
+        pinned: false,
+        digestedAt: null,
+        digestVerdict: null,
         createdAt: now, updatedAt: now,
       }
       workflows.set(r.id, r)
@@ -260,7 +266,13 @@ function makeAllTools(opts?: {
   preflightConnectorTool?: (args: {
     userId: string
     toolName: string
-  }) => Promise<{ ok: boolean; provider: string; reason?: string } | null>
+    assistantId?: string
+  }) => Promise<{
+    ok: boolean
+    provider: string
+    reason?: string
+    policy?: 'allow' | 'ask' | 'block'
+  } | null>
   listSlackChannels?: (args: { assistantId: string }) => Promise<
     | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
     | { ok: false; reason: string }
@@ -632,6 +644,38 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(warnings.some((w) => w.includes('`web`') && w.includes('not'))).toBe(true)
   })
 
+  it('proposeWorkflow warns when a blueprint-bound step\'s tools allow-list strips saveBlueprintRecord', async () => {
+    const { tools } = makeAllTools()
+    const step = {
+      id: 's',
+      type: 'assistant_call' as const,
+      target: { assistantId: 'primary' as const },
+      prompt: 'research and record it',
+      blueprintId: '00000000-0000-0000-0000-0000000000bb',
+    }
+    // Allow-list omitting the save tool → the binding cannot produce its record.
+    const stripped = await tools.proposeWorkflow.execute({
+      name: 'W',
+      definition: { startStepId: 's', steps: [{ ...step, tools: ['getMemory', 'webSearch'] }] },
+    }, makeContext())
+    const warnings = (stripped.data as Record<string, unknown>).warnings as string[]
+    expect(warnings.some((w) => w.includes('saveBlueprintRecord') && w.includes('allow-list'))).toBe(true)
+
+    // Including the save tool — or having no allow-list at all — stays quiet.
+    const included = await tools.proposeWorkflow.execute({
+      name: 'W',
+      definition: { startStepId: 's', steps: [{ ...step, tools: ['saveBlueprintRecord'] }] },
+    }, makeContext())
+    const noList = await tools.proposeWorkflow.execute({
+      name: 'W',
+      definition: { startStepId: 's', steps: [step] },
+    }, makeContext())
+    for (const r of [included, noList]) {
+      const w = (r.data as Record<string, unknown>).warnings as string[]
+      expect(w.some((x) => x.includes('saveBlueprintRecord'))).toBe(false)
+    }
+  })
+
   it('proposeWorkflow warns when a non-recurring workflow stores into a reserved cross-run var name', async () => {
     const { tools } = makeAllTools()
     const r = await tools.proposeWorkflow.execute({
@@ -832,6 +876,108 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(data.workflowName).toBe('x')
     expect(data.status).toBe('completed')
     expect((data.steps as unknown[]).length).toBe(1)
+  })
+
+  // Step-output visibility: without it a step's honest refusal/apology text
+  // sat unreachable in workflow_step_runs.output while the calling assistant
+  // asserted the side-effect happened (the 2026-07-07 send-step incident).
+  // See docs/architecture/features/workflow.md → "Step outcome honesty".
+  it('step trail exposes each step output (assistant_call text unwrapped from {value})', async () => {
+    const { tools } = makeAllTools()
+    const created = await tools.createWorkflow.execute(
+      {
+        name: 'trail',
+        definition: {
+          startStepId: 's1',
+          steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'go' }],
+        },
+      },
+      makeContext(),
+    )
+    const wf = created.data as { id: string }
+    const ran = await tools.runWorkflow.execute({ workflowId: wf.id }, makeContext())
+    const runSteps = (ran.data as { steps: Array<{ output: string | null }> }).steps
+    expect(runSteps[0].output).toBe('hello')
+
+    const runData = ran.data as { runId: string }
+    const r = await tools.getWorkflowRun.execute({ runId: runData.runId }, makeContext())
+    const getSteps = (r.data as { steps: Array<{ output: string | null }> }).steps
+    expect(getSteps[0].output).toBe('hello')
+  })
+
+  it('step trail output is truncated to the preview cap', async () => {
+    const stores = fakeStores()
+    const longText = 'x'.repeat(2000)
+    const tools = createWorkflowTools({
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      executorDeps: {
+        workflowStore: stores.workflowStore,
+        runStore: stores.runStore,
+        consultTransport: fakeConsultTransport(longText),
+        resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+        buildToolRegistry: async () => new Map(),
+      },
+    })
+    const created = await tools.createWorkflow.execute(
+      {
+        name: 'long',
+        definition: {
+          startStepId: 's1',
+          steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'go' }],
+        },
+      },
+      makeContext(),
+    )
+    const wf = created.data as { id: string }
+    const ran = await tools.runWorkflow.execute({ workflowId: wf.id }, makeContext())
+    const steps = (ran.data as { steps: Array<{ output: string | null }> }).steps
+    expect(steps[0].output).toHaveLength(600)
+    expect(steps[0].output!.endsWith('...')).toBe(true)
+  })
+
+  // A thrown consult error carrying a typed reason (the callee executor's
+  // `empty_response` — an all-empty consult must never read as success) lands
+  // as a FAILED step with that reason, mirroring the `timeout` hoist.
+  it('runWorkflow marks the step failed with the typed reason when the consult throws empty_response', async () => {
+    const stores = fakeStores()
+    const throwingTransport: ConsultTransport = {
+      async send() {
+        throw Object.assign(
+          new Error('The callee assistant produced no output for this consult.'),
+          { reason: 'empty_response' },
+        )
+      },
+    }
+    const tools = createWorkflowTools({
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      executorDeps: {
+        workflowStore: stores.workflowStore,
+        runStore: stores.runStore,
+        consultTransport: throwingTransport,
+        resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+        buildToolRegistry: async () => new Map(),
+      },
+    })
+    const created = await tools.createWorkflow.execute(
+      {
+        name: 'empty',
+        definition: {
+          startStepId: 's1',
+          steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'send it' }],
+        },
+      },
+      makeContext(),
+    )
+    const wf = created.data as { id: string }
+    const r = await tools.runWorkflow.execute({ workflowId: wf.id }, makeContext())
+    expect(r.isError).toBe(true)
+    const data = r.data as Record<string, unknown>
+    expect(data.status).toBe('failed')
+    const steps = data.steps as Array<{ status: string; error: { reason?: string } | null }>
+    expect(steps[0].status).toBe('failed')
+    expect(steps[0].error?.reason).toBe('empty_response')
   })
 
   it('getWorkflow returns the full definition (read before edit)', async () => {
@@ -1239,6 +1385,86 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
     const r = await tools.createWorkflow.execute({ name: 'X', definition: SIMPLE_DEF }, makeContext())
     expect(r.isError).toBeFalsy()
     expect(preflightConnectorTool).toHaveBeenCalled()
+  })
+
+  // ── Policy gate (2026-07-07 send-step incident) ─────────────────────────
+  // An ask-policy tool pinned on an assistant_call step can never execute:
+  // the callee surface drops non-allow tools at run time. Authoring must
+  // reject the pin and steer to a tool_call step (which pauses in the
+  // unified Approvals queue). On a tool_call step, ask-policy is the designed
+  // pause contract — warn so the author knows runs are not hands-free.
+  it('blocks an ask-policy tool pinned on an assistant_call step, steering to tool_call', async () => {
+    const preflightConnectorTool = vi.fn(async () => ({ ok: true, provider: 'Gmail', policy: 'ask' as const }))
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [
+        {
+          id: 's1',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Send the draft via gmailSendMessage.',
+          tools: ['gmailSendMessage'],
+        },
+      ],
+    }
+    const { tools } = makeAllTools({ preflightConnectorTool })
+    const r = await tools.createWorkflow.execute({ name: 'X', definition: def }, makeContext())
+    expect(r.isError).toBe(true)
+    const errors = (r.data as { errors: string[] }).errors.join(' ')
+    expect(errors).toContain('ask-policy')
+    expect(errors).toContain('tool_call')
+    expect(errors).toContain('Approvals')
+    // The step's target assistant threads through for the L2 policy lookup.
+    expect(preflightConnectorTool).toHaveBeenCalledWith({
+      userId: USER_ID,
+      toolName: 'gmailSendMessage',
+      assistantId: 'primary',
+    })
+  })
+
+  it('warns (not blocks) an ask-policy tool on a tool_call step — approval pause is the contract', async () => {
+    const preflightConnectorTool = vi.fn(async () => ({ ok: true, provider: 'Gmail', policy: 'ask' as const }))
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'tool_call', toolName: 'gmailSendMessage', arguments: {} }],
+    }
+    const { tools } = makeAllTools({ preflightConnectorTool, isKnownTool: () => true })
+    const r = await tools.proposeWorkflow.execute({ name: 'X', definition: def }, makeContext())
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as { warnings: string[] }).warnings
+    expect(warnings.some((w) => /Approvals queue/.test(w) && /pause/.test(w))).toBe(true)
+  })
+
+  it('blocks a block-policy tool on any step type', async () => {
+    const preflightConnectorTool = vi.fn(async () => ({ ok: true, provider: 'Gmail', policy: 'block' as const }))
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'tool_call', toolName: 'gmailSendMessage', arguments: {} }],
+    }
+    const { tools } = makeAllTools({ preflightConnectorTool, isKnownTool: () => true })
+    const r = await tools.createWorkflow.execute({ name: 'X', definition: def }, makeContext())
+    expect(r.isError).toBe(true)
+    expect((r.data as { errors: string[] }).errors.join(' ')).toContain('blocked by policy')
+  })
+
+  it('accepts an allow-policy tool pinned on an assistant_call step', async () => {
+    const preflightConnectorTool = vi.fn(async () => ({ ok: true, provider: 'Gmail', policy: 'allow' as const }))
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [
+        {
+          id: 's1',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Search the inbox.',
+          tools: ['gmailSearchMessages'],
+        },
+      ],
+    }
+    const { tools } = makeAllTools({ preflightConnectorTool })
+    const r = await tools.proposeWorkflow.execute({ name: 'X', definition: def }, makeContext())
+    expect(r.isError).toBeFalsy()
+    expect((r.data as { ok: boolean }).ok).toBe(true)
   })
 
   it('warns (fix D) when an assistant_call fetches connector data with no pinned tool', async () => {

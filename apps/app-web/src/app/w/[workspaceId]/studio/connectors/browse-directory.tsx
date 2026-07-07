@@ -10,10 +10,14 @@
  *   - Uses app-web's mirrored `OFFICIAL_OAUTH_SCOPES` + `ConnectorIcon`
  *     instead of `@sidanclaw/shared` (app-web does not depend on shared).
  *
- * INFRA NOTE (degraded): the OAuth "Connect" path builds the Google authorize
- * URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID` (unset in app-web).
- * Non-OAuth connectors ("Add" → backend connect) and the skills tab work
- * regardless. See the connectors page header for the full infra-pending list.
+ * INFRA NOTE (connector OAuth env): the OAuth "Connect" path builds the Google
+ * authorize URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID`, which must
+ * reach the browser bundle as a real `NEXT_PUBLIC_*` build var — Turborepo
+ * strict env mode strips bare `GOOGLE_CLIENT_ID` unless it's declared in
+ * `sidanclaw/turbo.json` build.env, which `next.config.ts` maps to it; missing
+ * either ships an empty `client_id`. Non-OAuth connectors ("Add" → backend
+ * connect) and the skills tab work regardless. See the connectors page header
+ * and docs/architecture/platform/deployment.md → "Turbo strict env mode".
  *
  * [COMP:app-web/browse-directory]
  */
@@ -22,6 +26,8 @@ import { useState, useEffect, useCallback } from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { OFFICIAL_OAUTH_SCOPES } from "@sidanclaw/shared/builtin-connectors";
+import { buildConnectorState } from "@/lib/connector-oauth-state";
+import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
 import {
   Select,
   SelectContent,
@@ -219,9 +225,14 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
     }
     setAddingId(entry.id);
 
-    // OAuth connectors — build Google OAuth URL client-side (same pattern as login)
+    // OAuth connectors — build Google OAuth URL client-side (same pattern as
+    // login). `armConnectorOauthState` mints the CSRF nonce into `state` + a
+    // companion cookie the callback verifies. This degraded fallback has no
+    // workspace in scope, so `state` carries an empty workspaceId (the callback
+    // then falls back to `/teams`, matching the pre-nonce behavior).
     const scopes = OFFICIAL_OAUTH_SCOPES[entry.id];
     if (scopes) {
+      const nonce = armConnectorOauthState();
       const redirectUri = `${window.location.origin}/api/auth/callback/google-connector`;
       const params = new URLSearchParams({
         client_id: GOOGLE_CLIENT_ID,
@@ -230,7 +241,7 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
         scope: scopes.join(" "),
         access_type: "offline",
         prompt: "consent",
-        state: entry.id,
+        state: buildConnectorState({ connector: entry.id, workspaceId: "", nonce }),
       });
       window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
       return;

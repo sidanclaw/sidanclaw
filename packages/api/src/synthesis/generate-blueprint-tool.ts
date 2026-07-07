@@ -24,7 +24,13 @@ const fillBlueprintSchema = z.object({
   subject: z
     .string()
     .min(1)
-    .describe('What the draft is about (an entity, account, or topic). Scopes the page + the brain gather.'),
+    .describe('What the draft is about (an entity, account, or topic). Scopes the record + the brain gather.'),
+  renderPage: z
+    .boolean()
+    .optional()
+    .describe(
+      'Also render/refresh the readable page projection of the record. Default false — the in-chat fill is record-only; pass true only when the user asked for a page/document.',
+    ),
 })
 
 export function createGenerateBlueprintTool(deps: {
@@ -34,9 +40,9 @@ export function createGenerateBlueprintTool(deps: {
   return buildTool({
     name: 'fillBlueprintFromBrain',
     description:
-      'Fill a workspace BLUEPRINT from the company brain, producing a structured brief page plus captured entities. ' +
-      'Use when the user asks to draft or generate a known structured document (a proposal, account brief, report, or shop/contact list) from what the brain already holds — NOT for free-form writing. ' +
-      'Pass the blueprint by name (or id) and a subject (the account/topic it is about). Returns the filled page id. ' +
+      'Fill a workspace BLUEPRINT from the company brain, producing its typed RECORD (plus captured entities). Record-only by default; pass renderPage:true when the user wants a readable page too. ' +
+      'Use when the output must be SYNTHESIZED from what the brain already holds (a proposal, account brief, report drafted from brain facts) — NOT for free-form writing, and not for content you already produced this conversation (save that with saveBlueprintRecord instead, which costs no extra model run). ' +
+      'Pass the blueprint by name (or id) and a subject (the account/topic it is about). ' +
       'Requires confirmation because it spends a bounded model run and writes to the brain.',
     inputSchema: fillBlueprintSchema,
     requiresConfirmation: true,
@@ -69,11 +75,26 @@ export function createGenerateBlueprintTool(deps: {
         workspaceId,
         userId: context.userId,
         assistantId: context.assistantId,
+        // Per-surface render default (LOCKED): the in-chat / in-workflow fill
+        // is record-only unless explicitly asked — the record is the
+        // deliverable; the page is an on-demand projection. The Blueprints-UI
+        // route omits renderPage, so the synthesizer's default (true) keeps
+        // that human-initiated surface rendering as today.
+        renderPage: input.renderPage ?? false,
       })
       if (!result) {
         return { data: { error: `Blueprint "${match.name}" could not be resolved.` }, isError: true }
       }
-      return { data: { pageId: result.pageId, blueprint: match.name, subject: input.subject.trim() } }
+      return {
+        data: {
+          blueprint: match.name,
+          subject: input.subject.trim(),
+          recordId: result.recordId ?? null,
+          recordStatus: result.recordStatus ?? null,
+          missing: result.missing ?? [],
+          pageId: result.pageId,
+        },
+      }
     },
   })
 }

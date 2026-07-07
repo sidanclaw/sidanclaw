@@ -38,6 +38,10 @@
  *   degree) fade in near fit zoom, everything else fades in by ~2×;
  *   small graphs (≤30 nodes) label everything from fit. Emphasized
  *   nodes (hover / search match + their neighbours) are always labelled.
+ * - Filter dim: the sidebar's primitive chips ghost unselected node
+ *   kinds (nodes cap at a low alpha, edges with a ghosted endpoint cap
+ *   lower, ambient particles off) instead of unmounting them, so a chip
+ *   toggle never reshuffles the layout. See Props.filterKinds.
  * - Hover/search dim transitions EASE (per-frame lerp via `stepToward`
  *   driven by a bounded rAF tick) instead of snapping; the hovered
  *   node's incident edges run directional particles and emphasized
@@ -130,6 +134,18 @@ type Props = {
    *  untouched rather than fully greyed). Independent of hover, which still
    *  works as a transient inspect gesture on top. */
   focusQuery?: string;
+  /** Selected node kinds from the sidebar's primitive filter chips
+   *  (`primitivesToGraphKinds` in `lib/api/brain.ts`). The list view
+   *  hard-filters its rows; the graph keeps the whole constellation and
+   *  GHOSTS the unselected kinds instead — nodes cap at a low alpha, edges
+   *  with a ghosted endpoint cap lower, ambient particles stop — so a chip
+   *  toggle never reshuffles the layout and the selection reads in context.
+   *  `null`/empty = no filter. A selection whose kinds match nothing on the
+   *  canvas leaves the graph untouched (the same no-anchor rule as a
+   *  zero-match `focusQuery`). The cap applies UNDER the hover / search
+   *  tiers, except the hovered node itself — pointer intent beats the chip.
+   *  Spec: graph-view.md → "Filter dim". */
+  filterKinds?: ReadonlySet<BrainGraphNodeKind> | null;
   loading?: boolean;
 };
 
@@ -234,6 +250,16 @@ const LINK_STRENGTH_INTER = 0.08;
 // graph would melt the frame budget for a cue nobody can read anyway.
 const AMBIENT_PARTICLE_EDGE_CAP = 400;
 
+// Filter-dim caps (graph-view.md → "Filter dim") — the ghost tier for node
+// kinds outside the sidebar's primitive-chip selection. Applied as a CAP
+// under the hover/search tiers, so a ghosted kind stays ghosted through
+// hover-neighbour and search-match emphasis. Node alpha sits between the
+// search rest tier (0.12) and the hover rest tier (0.18); the edge values
+// mirror the search spotlight's non-match edge treatment.
+const FILTER_DIM_NODE_ALPHA = 0.15;
+const FILTER_DIM_EDGE_ALPHA = 0.08;
+const FILTER_DIM_EDGE_WIDTH = 0.35;
+
 // Exported for the entry reader's mini connections graph
 // (`connections-graph.tsx`) so both canvases read the same `--graph-*`
 // palette and re-theme together.
@@ -295,6 +321,7 @@ export function BrainGraphView({
   onSelect,
   onSelectSkillNode,
   focusQuery,
+  filterKinds,
   loading,
 }: Props) {
   const t = useT();
@@ -408,6 +435,32 @@ export function BrainGraphView({
     for (const n of graph.nodes) m.set(n.id, n.kind);
     return m;
   }, [graph]);
+
+  // Filter-dim selection — the sidebar's primitive chips re-applied visually
+  // (graph-view.md → "Filter dim"). Nulled when the selection matches nothing
+  // on the canvas, so a tasks/files-only filter (primitives with no graph
+  // nodes) never greys the whole graph — the same no-anchor guard as the
+  // search spotlight above.
+  const activeFilterKinds = useMemo(() => {
+    if (!filterKinds || filterKinds.size === 0) return null;
+    return graph.nodes.some((n) => filterKinds.has(n.kind))
+      ? filterKinds
+      : null;
+  }, [graph, filterKinds]);
+
+  /** True when the edge should ghost with the filter — either endpoint's
+   *  kind sits outside the chip selection. Hover exemption is the caller's
+   *  job (the hovered node's incident threads stay the inspect cue). */
+  const edgeFilteredOut = useCallback(
+    (l: GraphEdgeWithRefs): boolean => {
+      if (activeFilterKinds === null) return false;
+      return (
+        !activeFilterKinds.has(kindById.get(l.__sourceId) ?? "other") ||
+        !activeFilterKinds.has(kindById.get(l.__targetId) ?? "other")
+      );
+    },
+    [activeFilterKinds, kindById],
+  );
 
   // Hub cut for label tiering — top-decile degree (0 on small graphs, so
   // everything is labelled from fit zoom).
@@ -1083,6 +1136,15 @@ export function BrainGraphView({
             } else if (focusMatchIds) {
               target = isMatch ? 1 : isFocusNeighbor ? 0.5 : 0.12;
             }
+            // Filter dim caps the tier from BELOW: a ghosted kind stays
+            // ghosted through hover-neighbour and search-match emphasis
+            // alike. The hovered node itself is exempt — pointer intent
+            // beats the chip.
+            const isFilteredOut =
+              activeFilterKinds !== null && !activeFilterKinds.has(n.kind);
+            if (isFilteredOut && !isHovered) {
+              target = Math.min(target, FILTER_DIM_NODE_ALPHA);
+            }
             const alpha = stepToward(
               nodeAlphaRef.current.get(n.id) ?? target,
               target,
@@ -1237,6 +1299,17 @@ export function BrainGraphView({
                 target = 0.08;
               }
             }
+            // A ghosted endpoint ghosts the edge — unless it's the hovered
+            // node's incident thread (the transient inspect cue wins).
+            if (
+              edgeFilteredOut(l) &&
+              !(
+                hoverId !== null &&
+                (l.__sourceId === hoverId || l.__targetId === hoverId)
+              )
+            ) {
+              target = Math.min(target, FILTER_DIM_EDGE_ALPHA);
+            }
             const alpha = stepToward(
               edgeAlphaRef.current.get(l.id) ?? target,
               target,
@@ -1259,6 +1332,15 @@ export function BrainGraphView({
                   ? 1.1
                   : 0.35;
             }
+            if (
+              edgeFilteredOut(l) &&
+              !(
+                hoverId !== null &&
+                (l.__sourceId === hoverId || l.__targetId === hoverId)
+              )
+            ) {
+              target = Math.min(target, FILTER_DIM_EDGE_WIDTH);
+            }
             const width = stepToward(
               edgeWidthRef.current.get(l.id) ?? target,
               target,
@@ -1280,6 +1362,9 @@ export function BrainGraphView({
                 : 0;
             }
             if (focusMatchIds) return 0;
+            // Ghosted edges carry no ambient photon — a bright particle
+            // over a 0.08-alpha thread would contradict the dim.
+            if (edgeFilteredOut(link)) return 0;
             return graph.edges.length <= AMBIENT_PARTICLE_EDGE_CAP ? 1 : 0;
           }}
           linkDirectionalParticleWidth={(link: GraphEdgeWithRefs) => {

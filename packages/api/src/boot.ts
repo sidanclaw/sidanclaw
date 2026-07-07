@@ -91,6 +91,7 @@ import {
   type GDriveFilesStore,
   type EntityRecord,
   type EngineHooks,
+  createIntrospectionTools,
 } from '@sidanclaw/core'
 
 // ── OPEN package imports (@sidanclaw/api) ──────────────────────────
@@ -141,8 +142,9 @@ import { createChatConfirmationStore } from './db/chat-confirmation-store.js'
 import { createDeferredConfirmationStore } from './db/deferred-confirmation-store.js'
 import { createSnapshotStore } from './db/snapshot-store.js'
 import { createDbKnowledgeStore } from './db/knowledge-store.js'
+import { createKnowledgeRepoWriter } from './knowledge/repo-writer.js'
 import { knowledgeRoutes, workspaceKnowledgeRoutes } from './routes/knowledge.js'
-import { getBranchHead, getRepoTree, getFileContents, compareCommits } from './github/client.js'
+import { getBranchHead, getRepoTree, getFileContents, compareCommits, getRepoPermissions } from './github/client.js'
 import { startBrainStreamFanout } from './brain-stream/sse-fanout.js'
 import { brainStreamRoutes } from './routes/brain-stream.js'
 import { publishSessionEvent, startSessionEventBus, subscribeSessionEvents } from './session-event-bus.js'
@@ -161,6 +163,11 @@ import { createDbSkillCuratorDigestStore } from './db/skill-curator-digest-store
 import { skillApprovalsRoutes } from './routes/skill-approvals.js'
 import { createSkillReviewWorker } from './workers/skill-review-worker.js'
 import { createGeminiSkillReviewLLM } from './workers/skill-review-llm.js'
+import { createWorkflowLifecycleWorker } from './workers/workflow-lifecycle-worker.js'
+import {
+  createGeminiWorkflowDigestLLM,
+  WORKFLOW_DIGEST_MODEL,
+} from './workers/workflow-digest-llm.js'
 import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js'
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
@@ -215,6 +222,10 @@ import {
   createWorkflowRunQueueStore,
   countRecentRunsForWorkflowSystem,
   pauseWorkflowSystem,
+  listLifecycleSweepRowsSystem,
+  applyLifecycleTransitionSystem,
+  markWorkflowsDigestedSystem,
+  deleteWorkflowSystem,
 } from './db/workflow-store.js'
 import { buildWorkflowToolRegistry } from './workflow/mcp-bridge.js'
 import { createPendingApprovalsStore } from './db/pending-approvals-store.js'
@@ -245,8 +256,13 @@ import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthe
 import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
 import { createGenerateSynthesizer, type GenerateSynthesizeFn } from './synthesis/generate-synthesizer.js'
 import { createGenerateBlueprintTool } from './synthesis/generate-blueprint-tool.js'
+import {
+  buildBlueprintSurfacePrompt,
+  createBlueprintRecordTools,
+} from './synthesis/blueprint-record-tools.js'
 import { createDbPageGrantStore } from './db/page-grant-store.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
+import { createDbBlueprintRecordStore } from './db/blueprint-records-store.js'
 import { createDbWorkspaceGroupStore } from './db/workspace-group-store.js'
 import { createDbDocThemesStore } from './db/doc-themes-store.js'
 import { createDbDocPageStore } from './db/doc-page-store.js'
@@ -364,6 +380,8 @@ export interface OpenApiEnv {
   GCS_FILES_BUCKET?: string
   // Weekly skill-hygiene passes ship dark unless on.
   SKILLS_AUTO_GEN_ENABLED?: boolean
+  // Workflow staleness/digestion/archival sweep ships dark unless on.
+  WORKFLOW_LIFECYCLE_ENABLED?: boolean
 }
 
 /**
@@ -773,6 +791,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // (closed app boot) — see page-event-fanout.ts.
   const savedViewStore = createDbSavedViewStore({ onPageLifecycle: publishPageLifecycle })
   const pageTemplateStore = createDbPageTemplateStore()
+  // Blueprint RECORDS (migration 307) — the typed output of every document-
+  // blueprint fill; pages are per-surface projections of these rows.
+  const blueprintRecordStore = createDbBlueprintRecordStore()
   const homeDockStore = createDbHomeDockStore()
   const docEntityStore = createDbDocEntityStore()
   const pageGrantStore = createDbPageGrantStore()
@@ -1017,6 +1038,28 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const deferredConfirmationStore = createDeferredConfirmationStore()
   const snapshotStore = createSnapshotStore()
   const knowledgeStore = createDbKnowledgeStore()
+
+  // ── Assistant KB repo writer ──
+  // Direct-commit write-back for the KB write tools (updateKnowledgeEntry /
+  // addKnowledgeEntry repo mode), over the same `syncCredentials` resolver
+  // the sync worker and edit-proposal routes use. Only interactive,
+  // confirmation-capable surfaces receive it (web chat here; the platform
+  // channel pipeline builds its own) — see
+  // docs/architecture/features/knowledge-base.md → "Assistant direct edits".
+  const knowledgeRepoWriter = createKnowledgeRepoWriter({
+    store: knowledgeStore,
+    syncCredentials,
+    recordEvent: ({ userId, eventName, metadata }) => {
+      const safe: Record<string, number | boolean | undefined | ReturnType<typeof sanitizeAnalytics>> = {}
+      for (const [k, v] of Object.entries(metadata)) {
+        if (typeof v === 'number' || typeof v === 'boolean' || v === undefined) safe[k] = v
+        else if (v === null) safe[k] = undefined
+        else safe[k] = sanitizeAnalytics(String(v)) // ids / repo / sha / op — metadata-only, no content
+      }
+      analytics.logEvent({ userId, eventName, metadata: safe })
+    },
+  })
+
   // gdriveFilesStore is closed (api-platform) and arrives via the port. Open
   // passes undefined; the open chat / executor / brain-mcp deps accept it as
   // optional.
@@ -1164,6 +1207,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workspaceDirectory: workspaceDirectoryStore,
         usageStore,
         pageTemplateStore,
+        blueprintRecordStore,
         computeCostUsd: (model, usage) => calculateCost(model, usage),
       })
     : undefined
@@ -1186,12 +1230,51 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
         usageStore,
         pageTemplateStore,
+        blueprintRecordStore,
         computeCostUsd: (model, usage) => calculateCost(model, usage),
       })
     : undefined
   const generateBlueprintTool: Tool | undefined = generateSynthesize
     ? createGenerateBlueprintTool({ generateSynthesize, pageTemplateStore })
     : undefined
+
+  // The blueprint output-contract direct surface: save/read records in-context
+  // (no model run), define contracts from chat, discover what exists — plus
+  // the dynamic "workspace blueprints" prompt section (closed-world: present
+  // only when the workspace has blueprints, naming only what exists). Injected
+  // into BOTH the chat route and the callee executor. Unlike the fill tool,
+  // this needs no model key — records are plain rows.
+  const blueprintRecordTools: Tool[] = createBlueprintRecordTools({
+    pageTemplateStore,
+    blueprintRecordStore,
+  })
+  const buildBlueprintPromptFragment = async (userId: string, workspaceId: string): Promise<string> => {
+    try {
+      const templates = await pageTemplateStore.list(userId, workspaceId)
+      return buildBlueprintSurfacePrompt(templates)
+    } catch (err) {
+      console.warn('[boot] blueprint prompt fragment failed (skipped):', err)
+      return ''
+    }
+  }
+
+  // The on-demand introspection lane (ability audit §6-c/d): operational-
+  // visibility reads for workspace primaries — pending approvals, scheduled
+  // jobs, research runs, session history. The chat route passes these to
+  // `applyMcpInjection` for primary turns only, where they become the
+  // `introspection` mcp_search local source (discovered on demand, never
+  // direct-injected). The platform build can append its closed-tree reads
+  // (connector-actions audit, workspace-scoped analytics) to this array.
+  // See docs/architecture/engine/introspection-tools.md.
+  const { listSessionsForWorkspaceSystem, getSessionTranscriptForWorkspaceSystem } = await import(
+    './db/sessions.js'
+  )
+  const introspectionTools: Tool[] = createIntrospectionTools({
+    pendingApprovals: pendingApprovalsStore,
+    scheduledJobs: jobStore,
+    workerRuns: workerRunsStore,
+    sessionHistory: { listSessionsForWorkspaceSystem, getSessionTranscriptForWorkspaceSystem },
+  })
 
   // Declared here (assigned in the workspace-filesystem block below) so the
   // lazy references in the callee executor + workflow tool registry are
@@ -1248,6 +1331,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // Generate mode as a consult tool — fill a blueprint from the brain in a
     // workflow/callee run (same tool the chat route injects).
     generateBlueprintTool,
+    // Record surface parity: the SAME record tools + dynamic blueprint prompt
+    // chat injects (callee-path parity is load-bearing — workflow steps must
+    // save/read records with the exact tools chat uses).
+    blueprintRecordTools,
+    buildBlueprintPromptFragment,
   })
 
   const { createAssistantModesStore } = await import('./db/assistant-modes-store.js')
@@ -1304,6 +1392,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         callerChannelType: request.caller.channelType,
         workflowId: request.workflowId,
         blueprintId: request.blueprintId,
+        workflowRunId: request.workflowRunId,
       })
       return { text }
     },
@@ -1656,6 +1745,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     waConnectorUrl: env.WA_CONNECTOR_URL,
     waConnectorSecret: env.WA_CONNECTOR_SECRET,
     connectorStore,
+    // Policy-aware preflight: lets authoring reject an `ask`-policy tool
+    // pinned on an `assistant_call` step (never executable there — the callee
+    // surface drops ask-policy tools; see dependencyIssues) instead of
+    // shipping a workflow that fails every run.
+    mcpSettingsStore,
   })
 
   const {
@@ -2238,6 +2332,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workerManager,
     workerRunsStore,
     knowledgeStore,
+    knowledgeRepoWriter,
     gdriveFilesStore,
     skillStore,
     workspaceSkillStore,
@@ -2262,6 +2357,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     retrievalMissDetector,
     inspectionTools: brainInspectionTools,
     generateBlueprintTool,
+    blueprintRecordTools,
+    buildBlueprintPromptFragment,
+    introspectionTools,
   }))
 
   app.use('/api/v1', publicApiRoutes({
@@ -2633,6 +2731,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api', requireAuth(env.JWT_SECRET), viewsRoutes({
     savedViewStore,
     pageTemplateStore,
+    blueprintRecordStore,
     pageGrantStore,
     workspaceGroupStore,
     analytics,
@@ -3145,6 +3244,110 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) skillReviewWorker.start()
 
+  // ── Workflow lifecycle sweep worker (mig 308) ──
+  // Stales / archives / one-off-deletes unused workflows and digests
+  // retiring patterns into staged skill candidates. Ships dark behind
+  // WORKFLOW_LIFECYCLE_ENABLED; spec: docs/architecture/features/
+  // workflow-lifecycle.md.
+  const workflowDigestLLM = createGeminiWorkflowDigestLLM(
+    async ({ systemPrompt, prompt, maxTokens, attribution }) => {
+      const response = await collectStream(provider.stream({
+        model: WORKFLOW_DIGEST_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        systemPrompt,
+        maxTokens,
+      }))
+      if (response.usage && usageStore) {
+        const cost = calculateCost(WORKFLOW_DIGEST_MODEL, response.usage)
+        usageStore.recordUsage({
+          userId: attribution.userId,
+          // Blank assistant + workspace fallback — the mig-305 attribution
+          // axis for recorders with no single assistant.
+          assistantId: '',
+          workspaceId: attribution.workspaceId,
+          sessionId: null,
+          model: WORKFLOW_DIGEST_MODEL,
+          inputTokens: response.usage.inputTokens,
+          outputTokens: response.usage.outputTokens,
+          cacheReadTokens: response.usage.cacheReadTokens,
+          cacheWriteTokens: response.usage.cacheWriteTokens,
+          actualCostUsd: cost,
+          source: 'overhead:workflow-digest',
+        }).catch((err) => console.error('[workflow-lifecycle] usage tracking failed:', err))
+      }
+      return response.content
+        .filter((b) => b.type === 'text')
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('')
+    },
+  )
+  const workflowLifecycleWorker = createWorkflowLifecycleWorker({
+    store: {
+      listSweepRows: listLifecycleSweepRowsSystem,
+      applyTransition: applyLifecycleTransitionSystem,
+      markDigested: markWorkflowsDigestedSystem,
+      deleteWorkflow: deleteWorkflowSystem,
+      getWorkflow: (id) => workflowStore.findByIdSystem(id),
+    },
+    digestLLM: workflowDigestLLM,
+    skillPort: {
+      async listSkillSummaries(workspaceId, actingUserId) {
+        const skills = await workspaceSkillStore.listForWorkspace(workspaceId, { actingUserId })
+        return skills.map((s) => ({
+          slug: s.slug,
+          name: s.name,
+          description: s.description ?? '',
+        }))
+      },
+      async hasPendingOrExistingSlug(workspaceId, slug) {
+        const existing = await query(
+          `SELECT 1 FROM workspace_skills
+            WHERE workspace_id = $1 AND slug = $2 AND valid_to IS NULL
+            LIMIT 1`,
+          [workspaceId, slug],
+        )
+        if ((existing.rowCount ?? 0) > 0) return true
+        const staged = await query(
+          `SELECT 1 FROM pending_approvals
+            WHERE workspace_id = $1
+              AND kind = 'staged_skill_creation'
+              AND responded_at IS NULL
+              AND arguments->'umbrella'->>'slug' = $2
+            LIMIT 1`,
+          [workspaceId, slug],
+        )
+        return (staged.rowCount ?? 0) > 0
+      },
+      async stageCandidate({ workspaceId, umbrella, approverUserId, sourceWorkflowIds }) {
+        await pendingApprovalsStore.createStagedSkillCreation({
+          workspaceId,
+          proposedUmbrella: umbrella,
+          approverUserId,
+          originatingAssistantId: null,
+          origin: 'workflow-digest',
+          sourceWorkflowIds,
+        })
+      },
+    },
+    emitAudit: (event) =>
+      workspaceAuditStore.append({
+        workspaceId: event.workspaceId,
+        actorUserId: null,
+        eventType: event.eventType,
+        subjectId: event.subjectId,
+        details: event.details,
+      }),
+    enabled: env.WORKFLOW_LIFECYCLE_ENABLED ?? false,
+    onEvent: (event) => {
+      if (event.type === 'tick_complete') {
+        console.log(
+          `[workflow-lifecycle] tick complete — staled:${event.staled} archived:${event.archived} reactivated:${event.reactivated} deleted:${event.deleted} digested:${event.digested} staged:${event.staged}`,
+        )
+      }
+    },
+  })
+  if (runWorkers) workflowLifecycleWorker.start()
+
   // ── Classifier self-heal worker — needs the closed pending-classification
   //    queue. Only started when injected (platform); open omits it. ──
   if (ports.pendingClassificationStore) {
@@ -3342,6 +3545,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         return data as { content?: string }
       },
       compareCommits,
+      getRepoPermissions,
     },
     credentials: syncCredentials,
     intervalMs: 15 * 60 * 1000,
@@ -3403,6 +3607,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
         usageStore,
         pageTemplateStore,
+        blueprintRecordStore,
         computeCostUsd: (model, usage) => calculateCost(model, usage),
       })
     : undefined

@@ -56,6 +56,7 @@ import {
   GitBranch,
   Home,
   Inbox,
+  Megaphone,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -90,6 +91,7 @@ import {
 } from "@/components/ui/select";
 import { derivePageIcon, type ViewListRow } from "@/lib/api/views";
 import { buildTree, savedAncestorIds, type TreeNode } from "@/lib/sidebar-tree";
+import { surfaceShortcutLabel } from "@/lib/surface-shortcuts";
 import { fetchInboxBadgeCount } from "@/lib/api/inbox";
 import { INBOX_CHANGED_EVENT } from "@/lib/inbox-events";
 import { DOC_COMMENTS_CHANGED_EVENT } from "@/lib/comment-events";
@@ -101,6 +103,7 @@ import { EmptyDraftsSidebar, EmptySearchResults } from "./empty-states";
 import { BrainSidebarPanel } from "./sidebar-panels/brain-sidebar-panel";
 import { StudioSidebarPanel } from "./sidebar-panels/studio-sidebar-panel";
 import { WorkflowSidebarPanel } from "./sidebar-panels/workflow-sidebar-panel";
+import { FeedSidebarPanel } from "./sidebar-panels/feed-sidebar-panel";
 
 export type SidebarMove = {
   viewId: string;
@@ -146,6 +149,13 @@ type Props = {
   studioNudge: boolean;
   /** Dismiss the Studio nudge (persists per workspace in localStorage). */
   onDismissStudioNudge: () => void;
+  /**
+   * Whether the Feed surface is available for this workspace (hosted edition
+   * AND at least one connected distribution profile — the `feedProfiles`
+   * probe in `DocSidebarDataProvider`). Gates the Feed nav row; the routes
+   * themselves stay deep-linkable for trial onboarding.
+   */
+  feedEnabled: boolean;
 };
 
 function collapseKey(workspaceId: string): string {
@@ -405,8 +415,11 @@ export function DocSidebar(props: Props) {
           the right of Search drag the window; the icon links/buttons opt back out
           via the `[data-doc-chrome] :is(a, button, …)` rule in globals.css. */}
       <nav data-doc-chrome className="flex flex-row items-center gap-0.5 px-2 pt-1 pb-1.5">
-        {/* Home — ⌘1, first of the ⌘1/2/3/4 surface shortcuts (wired in WorkspaceChrome). */}
-        <Tooltip label={t.iconHome} shortcut="⌘1">
+        {/* Home — first of the ⌘/Ctrl+1/2/3/4 surface shortcuts (wired in
+            WorkspaceChrome). The chip label is browser-dependent
+            (`surfaceShortcutLabel`): ⌘n on mac, ⌃n on mac Firefox (which
+            reserves ⌘+digit for tab switching), Ctrl+n elsewhere. */}
+        <Tooltip label={t.iconHome} shortcut={surfaceShortcutLabel(1)}>
           <Link
             href={`/w/${workspaceId}/p`}
             aria-label={t.iconHomeAria}
@@ -420,9 +433,9 @@ export function DocSidebar(props: Props) {
         </Tooltip>
 
         {/* Surface destinations (consolidation §4) — Brain / Studio / Workflow,
-            with ⌘2/3/4 shortcuts (wired in WorkspaceChrome). Studio shows the
-            cold-start nudge dot until the workspace connects its first tool. */}
-        <Tooltip label={t.iconBrain} shortcut="⌘2">
+            with ⌘/Ctrl+2/3/4 shortcuts (wired in WorkspaceChrome). Studio shows
+            the cold-start nudge dot until the workspace connects its first tool. */}
+        <Tooltip label={t.iconBrain} shortcut={surfaceShortcutLabel(2)}>
           <Link
             href={`/w/${workspaceId}/brain`}
             aria-label={t.iconBrainAria}
@@ -434,7 +447,7 @@ export function DocSidebar(props: Props) {
             ) : null}
           </Link>
         </Tooltip>
-        <Tooltip label={t.iconStudio} shortcut="⌘3">
+        <Tooltip label={t.iconStudio} shortcut={surfaceShortcutLabel(3)}>
           <Link
             href={`/w/${workspaceId}/studio`}
             aria-label={t.iconStudioAria}
@@ -452,7 +465,7 @@ export function DocSidebar(props: Props) {
             ) : null}
           </Link>
         </Tooltip>
-        <Tooltip label={t.iconWorkflow} shortcut="⌘4">
+        <Tooltip label={t.iconWorkflow} shortcut={surfaceShortcutLabel(4)}>
           <Link
             href={`/w/${workspaceId}/workflow`}
             aria-label={t.iconWorkflowAria}
@@ -464,6 +477,23 @@ export function DocSidebar(props: Props) {
             ) : null}
           </Link>
         </Tooltip>
+        {/* Feed — the ported feed-web operator app. Hosted-only and shown only
+            when the workspace has a connected distribution profile
+            (`feedEnabled`); the routes stay deep-linkable regardless. */}
+        {props.feedEnabled ? (
+          <Tooltip label={t.iconFeed} shortcut="⌘5">
+            <Link
+              href={`/w/${workspaceId}/feed`}
+              aria-label={t.iconFeedAria}
+              className={navItemCls(surfaceActive("feed"), !utilityPillOpen)}
+            >
+              <Megaphone className="size-[17px] shrink-0" />
+              {surfacePill("feed") ? (
+                <span className="whitespace-nowrap">{t.iconFeed}</span>
+              ) : null}
+            </Link>
+          </Tooltip>
+        ) : null}
         {/* Goals board (`/goals`) deliberately has NO nav slot — like Approvals,
             it is attention-routed: the home-dock Autopilot card + the Brain task
             panel are its entry points (docs/architecture/features/goals.md). */}
@@ -542,6 +572,8 @@ export function DocSidebar(props: Props) {
           <StudioSidebarPanel workspaceId={workspaceId} />
         ) : props.activeSurface === "workflow" ? (
           <WorkflowSidebarPanel workspaceId={workspaceId} />
+        ) : props.activeSurface === "feed" ? (
+          <FeedSidebarPanel workspaceId={workspaceId} />
         ) : null}
 
         {props.activeSurface === "p" && (

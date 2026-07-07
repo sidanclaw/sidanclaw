@@ -1,7 +1,11 @@
 "use client";
 
 /**
- * Notion-style left-gutter drag handle for the collaborative page editor.
+ * Notion-style left-gutter drag handle for the collaborative page editor —
+ * and for the skill body editor, which mounts the same component over its
+ * md-restricted non-collab schema (the plugin's Yjs remap paths no-op without
+ * a y-sync state, and the `BlockActionMenu` capability-gates its doc-only
+ * rows; see its module note).
  *
  * Two affordances on one grip (Notion convention):
  *   - **Drag** to reorder a block. The move is a ProseMirror transaction
@@ -61,9 +65,10 @@ export type DocDragHandleProps = {
    *  (`human_block`) comment keyed on the block's id. Absent when comments are
    *  unavailable. */
   onBlockComment?: (blockId: string) => void;
-  workspaceId: string;
-  /** Active page id — backs Copy-link-to-block. */
-  pageId: string;
+  /** Page context backing the menu's Copy-link-to-block. Absent on a
+   *  non-page host (the skill body editor), which hides that row. */
+  workspaceId?: string;
+  pageId?: string;
 };
 
 export function DocDragHandle({

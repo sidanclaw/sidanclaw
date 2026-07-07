@@ -43,6 +43,7 @@ import {
   useMessageStream,
   type ToolUsed,
 } from "@sidanclaw/chat-ui";
+import { chatMarkdownCodeComponents } from "@/components/chrome/chat-code-block";
 import {
   createInspectionSession,
   type BrainPrimitive,
@@ -477,7 +478,10 @@ export function EntryThread({
                     </p>
                   ) : (
                     <div className="chat-markdown text-sm leading-relaxed break-words">
-                      <ChatMarkdown text={turn.text} />
+                      <ChatMarkdown
+                        text={turn.text}
+                        components={chatMarkdownCodeComponents}
+                      />
                     </div>
                   )}
                 </div>

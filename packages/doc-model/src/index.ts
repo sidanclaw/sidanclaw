@@ -73,10 +73,16 @@ export {
   type CustomTemplateCreateInput,
   type ExtractionSpec,
   type ExtractionSection,
+  type ExtractionField,
+  type ExtractionFieldType,
   type BlueprintCaptureKind,
   PAGE_TEMPLATE_CATEGORIES,
+  EXTRACTION_FIELD_TYPES,
   pageTemplateCategorySchema,
   customTemplateCreateInputSchema,
+  extractionSpecSchema,
+  normalizeExtractionSpec,
+  fieldKeyFromHeading,
   withFreshBlockIds,
   // Derives a blueprint's `extraction` spec from authored blocks (each
   // extraction_slot paired with its preceding heading). The editor's
@@ -84,6 +90,18 @@ export {
   // blueprint (extraction != null) instead of a plain skeleton.
   blocksToExtractionSpec,
 } from '@sidanclaw/core/dist/doc/custom-template-types.js'
+
+// Blueprint record helpers — the typed output contract's pure half (field
+// validation, completeness, page projection). Same fs-free leaf discipline.
+export {
+  type BlueprintRecordFields,
+  type BlueprintRecordStatus,
+  type BlueprintEntityRefValue,
+  validateFieldValue,
+  recordCompleteness,
+  formatFieldValueText,
+  blueprintRecordToBlocks,
+} from '@sidanclaw/core/dist/doc/blueprint-record.js'
 
 export {
   pageToYDoc,

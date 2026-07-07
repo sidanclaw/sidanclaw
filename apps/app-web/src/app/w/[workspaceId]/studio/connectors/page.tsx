@@ -29,15 +29,18 @@
  *     `@sidanclaw/shared` dep). Every user-facing string flows through
  *     `useT()`.
  *
- * INFRA NOTE (degraded — connector OAuth): the OAuth connect paths build the
- * provider authorize URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID` /
+ * INFRA NOTE (connector OAuth env): the OAuth connect paths build the provider
+ * authorize URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID` /
  * `NEXT_PUBLIC_NOTION_CLIENT_ID` / `NEXT_PUBLIC_FATHOM_CLIENT_ID` and rely on
  * the server callback routes `/api/auth/callback/{google-connector,notion,
- * fathom}`. Those callbacks ARE ported (workspace-aware via `state`), but the
- * `NEXT_PUBLIC_*` client ids + the matching server secrets are not yet set in
- * app-web's environment. PAT connectors (GitHub) and custom MCP servers
- * need no OAuth and work today. See `degraded` in the chunk report for the
- * exact env vars still required.
+ * fathom}` (workspace-aware via `state`). Each client id must reach the browser
+ * bundle as a real `NEXT_PUBLIC_*` build var: Turborepo strict env mode strips
+ * bare vars like `GOOGLE_CLIENT_ID`, so the `next.config.ts` env mapping only
+ * lands when that var is declared in `sidanclaw/turbo.json` build.env (or a
+ * real `NEXT_PUBLIC_*` var is set in the Vercel project). Missing it ships an
+ * empty `client_id` (Google `Error 400: invalid_request`). PAT connectors
+ * (GitHub) and custom MCP servers need no OAuth. See
+ * docs/architecture/platform/deployment.md → "Turbo strict env mode".
  *
  * Rendered inside the Studio full-page layout, NOT the doc three-column
  * page shell (consolidation §9 #5).
@@ -67,6 +70,8 @@ import { OFFICIAL_OAUTH_SCOPES, type ConnectorAuthType } from "@sidanclaw/shared
 import { BUILTIN_PRIMITIVE_CONNECTOR_IDS } from "@sidanclaw/shared/connector-registry";
 import { useT } from "@/lib/i18n/client";
 import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expose";
+import { buildConnectorState } from "@/lib/connector-oauth-state";
+import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
 import {
   buildCustomConnectorPayload,
   type ConnectorAuthFormError,
@@ -883,7 +888,6 @@ function ConnectorsList() {
   async function handleConnect(c: Connector, opts?: { addAnother?: boolean }) {
     const id = c.id;
     const rid = rowId(c);
-    const addState = opts?.addAnother ? ":add" : "";
     setConnecting(rid);
 
     // PAT connectors — show inline token input instead of connecting immediately
@@ -904,15 +908,17 @@ function ConnectorsList() {
 
     // Notion OAuth — separate flow (different auth URL, no scopes). The
     // workspaceId is threaded through `state` so the server callback can
-    // redirect back to this workspace-scoped route.
+    // redirect back to this workspace-scoped route. `armConnectorOauthState`
+    // mints a CSRF nonce into `state` + a companion cookie the callback checks.
     if (id === "notion") {
+      const nonce = armConnectorOauthState();
       const redirectUri = `${window.location.origin}/api/auth/callback/notion`;
       const sp = new URLSearchParams({
         client_id: NOTION_CLIENT_ID,
         redirect_uri: redirectUri,
         response_type: "code",
         owner: "user",
-        state: `notion${addState}:${workspaceId}`,
+        state: buildConnectorState({ connector: "notion", workspaceId, createNew: !!opts?.addAnother, nonce }),
       });
       window.location.href = `https://api.notion.com/v1/oauth/authorize?${sp}`;
       return;
@@ -920,13 +926,14 @@ function ConnectorsList() {
 
     // Fathom OAuth — single coarse `public_api` scope, refresh-token rotation.
     if (id === "fathom") {
+      const nonce = armConnectorOauthState();
       const redirectUri = `${window.location.origin}/api/auth/callback/fathom`;
       const sp = new URLSearchParams({
         client_id: FATHOM_CLIENT_ID,
         redirect_uri: redirectUri,
         response_type: "code",
         scope: "public_api",
-        state: `fathom${addState}:${workspaceId}`,
+        state: buildConnectorState({ connector: "fathom", workspaceId, createNew: !!opts?.addAnother, nonce }),
       });
       window.location.href = `${FATHOM_AUTHORIZE_URL}?${sp}`;
       return;
@@ -938,6 +945,7 @@ function ConnectorsList() {
     // fresh instance instead of overwriting the first).
     const scopes = OAUTH_SCOPES_WITH_EMAIL[id];
     if (scopes) {
+      const nonce = armConnectorOauthState();
       const redirectUri = `${window.location.origin}/api/auth/callback/google-connector`;
       const sp = new URLSearchParams({
         client_id: GOOGLE_CLIENT_ID,
@@ -946,7 +954,7 @@ function ConnectorsList() {
         scope: scopes.join(" "),
         access_type: "offline",
         prompt: "consent",
-        state: `${id}${addState}:${workspaceId}`,
+        state: buildConnectorState({ connector: id, workspaceId, createNew: !!opts?.addAnother, nonce }),
       });
       window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${sp}`;
       return;

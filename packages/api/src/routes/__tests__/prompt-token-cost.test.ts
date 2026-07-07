@@ -98,7 +98,15 @@ describe('[COMP:prompt/token-cost] Per-turn input token cost — realistic user 
     // description growth was kept flat by moving the full contract text onto
     // proposeWorkflow only (create/update carry a pointer). Fresh-user
     // baseline measured at ~4083.
-    expect(m.promptTokens).toBeLessThan(4_200)
+    // 2026-07-07 (evening): bumped 4_200 → 4_600 — the send-step incident
+    // fixes grew the chat surface intentionally: Layer-1 action-claim
+    // grounding (side-effect claims need a tool-result witness; user dispute
+    // ⇒ re-verify, never re-assert) + runWorkflow/getWorkflowRun descriptions
+    // stating "step completed ≠ side-effect happened, read the step output" +
+    // proposeWorkflow's no-pre-asserted-outcomes authoring rule. All three are
+    // load-bearing honesty prose (docs/plans/assistant-ability-audit.md §3);
+    // fresh-user baseline measured at ~4451.
+    expect(m.promptTokens).toBeLessThan(4_600)
     expect(m.promptTokens).toBeGreaterThan(2_000)
     expect(m.totalTokens).toBeGreaterThan(2_800)
     expect(m.totalTokens).toBeLessThan(6_000)

@@ -1,6 +1,6 @@
 ---
 name: investor-update-monthly-digest
-description: Monthly investor-update producer — condense the workspace's last month of company activity into a master digest, then personalize per-investor against `target_investor` edges, save each as a `workspace_files` draft tagged `draft` + `investor:<id>`. Operator reviews drafts and approves sends; on approval `gmailSendMessage` sends each (with the connector-action audit shipped 2026-05-21). Use via a monthly scheduled workflow, or when the operator says "draft the investor update", "what should we tell investors this month?".
+description: Monthly investor-update producer — condense the workspace's last month of company activity into a master digest, then personalize per-investor against `target_investor` edges, save each as a `workspace_files` draft tagged `draft` + `investor:<id>`. Operator reviews drafts and approves sends; on approval `gmailSendMessage` (only when Gmail is connected) sends each (with the connector-action audit shipped 2026-05-21). Use via a monthly scheduled workflow, or when the operator says "draft the investor update", "what should we tell investors this month?".
 license: MIT
 compatibility: Designed for sidanclaw
 metadata:
@@ -13,14 +13,14 @@ metadata:
 
 # Investor update — monthly digest
 
-Close the investor-relations loop: each month, pull the last 30 days of company activity from the brain, compose a master digest, personalize per investor against their `target_investor` edge attributes, save each as a `workspace_files` draft. The operator reviews, approves; on approval `gmailSendMessage` sends each — the connector-action audit (shipped 2026-05-21) records every send with full IFC + provenance.
+Close the investor-relations loop: each month, pull the last 30 days of company activity from the brain, compose a master digest, personalize per investor against their `target_investor` edge attributes, save each as a `workspace_files` draft. The operator reviews, approves; on approval `gmailSendMessage` (only when Gmail is connected) sends each — the connector-action audit (shipped 2026-05-21) records every send with full IFC + provenance.
 
 Per `docs/historical/decisions-log.md` 2026-05-14:
 
 - **Investor list** = `target_investor` edges (workspace → company/person) per the existing edge vocabulary (`entities/edges.ts:62`).
 - **Per-investor preferences** = `entity_links.attributes JSONB` on the `target_investor` edge per SV(2) "`target_investor` edge attribute convention": `{audience_clearance, preference_summary?, last_digest_episode_id?}`. `audience_clearance` defaults to `'public'` when unset (safe).
 - **Drafts** = `workspace_files` rows with `tags @> ['draft']` + bi-temporal supersession per SV(2) "Drafts as workspace_files". Each iteration = a `staged_write` approval.
-- **Lock-in / send** = `gmailSendMessage` tool (governed, `requiresConfirmation: true`); the connector-action audit emits a `connector_action` Episode + `connector_actions` audit row per send (per `connector-actions.md` 2026-05-21 status note).
+- **Lock-in / send** = `gmailSendMessage` (only when Gmail is connected) tool (governed, `requiresConfirmation: true`); the connector-action audit emits a `connector_action` Episode + `connector_actions` audit row per send (per `connector-actions.md` 2026-05-21 status note).
 
 The L2 persona (voice, tone, what to mention/omit) lives in the assistant's custom instructions — no IR persona shipped today; the operator can author one paste-ready in `docs/crews/` modeled on the marketing / product-research templates.
 
@@ -186,6 +186,6 @@ This skill closes the original "no recipient personalization" and "no monthly di
 **Why `workspace_files` + `staged_write` here, not `distribution_draft`?** Two different approval shapes for two different user journeys, both legitimate:
 
 - **`distribution_draft`** (`approvals.md` §`distribution_draft`) — the **feed app's reactive draft**: inbound Threads/X mention → app composes a short reply with typed conversation context (`inbound_reply_event_id`) + a `reply`/`post`/`hide` discriminator → operator reviews in the feed UI alongside the original mention → **approve auto-publishes to the platform API** in one click. Single-action publishing is the value.
-- **`workspace_files` + `staged_write`** (per SV(2) 2026-05-14 "Drafts as workspace_files") — the **compositional document draft**: skill composes a long-form artifact (IR digest, research finding, PRD) → operator reviews in the files surface → on approve the file is committed; **a separate explicit tool call** (here `gmailSendMessage`) sends or publishes. Decoupled from the publishing step.
+- **`workspace_files` + `staged_write`** (per SV(2) 2026-05-14 "Drafts as workspace_files") — the **compositional document draft**: skill composes a long-form artifact (IR digest, research finding, PRD) → operator reviews in the files surface → on approve the file is committed; **a separate explicit tool call** (here `gmailSendMessage` (only when Gmail is connected)) sends or publishes. Decoupled from the publishing step.
 
 The IR flow fits the second shape — long compositional bodies, separate send step, no inbound context to render side-by-side — so `workspace_files` is the right substrate. The feed reply flow fits the first shape and should stay on `distribution_draft`.

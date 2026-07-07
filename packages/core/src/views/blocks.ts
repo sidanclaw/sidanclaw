@@ -384,6 +384,19 @@ export type ExtractionSlotBlock = {
   /** What fills this section when the blueprint runs. */
   instruction: string
   outputType?: 'prose' | 'list' | 'table'
+  /**
+   * Contract v2 (typed fields — structural-synthesis.md "The blueprint
+   * object"). All optional so pre-v2 stored blueprints keep parsing; absent ⇒
+   * a `markdown` field keyed by the slugified preceding heading.
+   */
+  fieldKey?: string
+  fieldType?: 'markdown' | 'string' | 'number' | 'date' | 'boolean' | 'enum' | 'entityRef'
+  /** Enum fields: the allowed values. */
+  options?: string[]
+  /** entityRef fields: which brain entity kind the value points at. */
+  entityKind?: 'company' | 'contact' | 'deal' | 'task'
+  /** Required fields gate the record's `complete` status. */
+  required?: boolean
 }
 
 export type Page = {
@@ -460,6 +473,18 @@ const extractionSlotBlockSchema: z.ZodType<ExtractionSlotBlock> = z.object({
   id: blockId,
   instruction: z.string().min(0).max(2000),
   outputType: z.enum(['prose', 'list', 'table']).optional(),
+  fieldKey: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[a-z0-9][a-z0-9_-]*$/)
+    .optional(),
+  fieldType: z
+    .enum(['markdown', 'string', 'number', 'date', 'boolean', 'enum', 'entityRef'])
+    .optional(),
+  options: z.array(z.string().min(1).max(120)).min(2).max(24).optional(),
+  entityKind: z.enum(['company', 'contact', 'deal', 'task']).optional(),
+  required: z.boolean().optional(),
 })
 
 const dataBlockSchema: z.ZodType<DataBlock> = z.object({

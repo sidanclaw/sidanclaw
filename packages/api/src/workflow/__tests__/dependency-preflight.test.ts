@@ -99,7 +99,12 @@ describe('[COMP:workflow/dependency-preflight] preflightConnectorTool', () => {
   it('maps a connector tool to its provider and rejects when the connector is not connected', async () => {
     const { preflightConnectorTool } = createWorkflowDependencyPreflight({ connectorStore: connectorStoreWith({}) })
     const r = await preflightConnectorTool({ userId: USER_ID, toolName: 'githubListPullRequests' })
-    expect(r).toEqual({ ok: false, provider: 'GitHub', reason: expect.stringMatching(/not connected/i) })
+    expect(r).toEqual({
+      ok: false,
+      provider: 'GitHub',
+      reason: expect.stringMatching(/not connected/i),
+      policy: 'allow',
+    })
   })
 
   it('rejects GitHub when the stored PAT is revoked (401 / Bad credentials)', async () => {
@@ -125,7 +130,73 @@ describe('[COMP:workflow/dependency-preflight] preflightConnectorTool', () => {
       connectorStore: connectorStoreWith({ notion: { client_secret: 'tok' } }),
     })
     const r = await preflightConnectorTool({ userId: USER_ID, toolName: 'notionSearch' })
-    expect(r).toEqual({ ok: true, provider: 'Notion' })
+    expect(r).toEqual({ ok: true, provider: 'Notion', policy: 'allow' })
+  })
+
+  // Policy resolution (2026-07-07 send-step incident): an `ask`-policy tool
+  // pinned on an `assistant_call` step can never execute — authoring reads
+  // this `policy` answer and errors, steering to a `tool_call` step (which
+  // pauses in the unified Approvals queue).
+  it('reports the registry defaultPolicy without a settings store (gmailSendMessage = ask)', async () => {
+    const { preflightConnectorTool } = createWorkflowDependencyPreflight({
+      connectorStore: connectorStoreWith({ gmail: { client_secret: 'tok' } }),
+    })
+    const r = await preflightConnectorTool({ userId: USER_ID, toolName: 'gmailSendMessage' })
+    expect(r).toEqual({ ok: true, provider: 'Gmail', policy: 'ask' })
+  })
+
+  it('tightens the default with L1/L2 rows (strictest wins) and threads assistantId to L2', async () => {
+    const calls: Array<{ assistantId: string; toolName: string; serverName: string }> = []
+    const settingsStore = {
+      getPolicy: async (p: { assistantId: string; userId: string; serverName: string; toolName: string }) => {
+        calls.push({ assistantId: p.assistantId, toolName: p.toolName, serverName: p.serverName })
+        // L2 row for our assistant blocks the (default-allow) read tool.
+        return p.assistantId === ASSISTANT_ID ? { policy: 'block' } : null
+      },
+    }
+    const { preflightConnectorTool } = createWorkflowDependencyPreflight({
+      connectorStore: connectorStoreWith({ gmail: { client_secret: 'tok' } }),
+      mcpSettingsStore: settingsStore,
+    })
+    const r = await preflightConnectorTool({
+      userId: USER_ID,
+      toolName: 'gmailListMessages',
+      assistantId: ASSISTANT_ID,
+    })
+    expect(r?.policy).toBe('block')
+    // L1 (app-level) + L2 (per-assistant) both consulted, against the provider server name.
+    expect(calls).toHaveLength(2)
+    expect(calls[1]).toEqual({ assistantId: ASSISTANT_ID, toolName: 'gmailListMessages', serverName: 'gmail' })
+  })
+
+  it('mirrors the runtime rule: L1 allow alone does not loosen an ask default; L1+L2 allow does', async () => {
+    // L1-only allow: the L2 arm falls back to the ask default → strictest = ask.
+    const l1Only = createWorkflowDependencyPreflight({
+      connectorStore: connectorStoreWith({ gmail: { client_secret: 'tok' } }),
+      mcpSettingsStore: {
+        getPolicy: async (p: { assistantId: string }) =>
+          p.assistantId === ASSISTANT_ID ? null : { policy: 'allow' },
+      },
+    })
+    const partial = await l1Only.preflightConnectorTool({
+      userId: USER_ID,
+      toolName: 'gmailSendMessage',
+      assistantId: ASSISTANT_ID,
+    })
+    expect(partial?.policy).toBe('ask')
+
+    // Explicit allow on BOTH levels loosens — exactly what dispatch would do
+    // (`resolveEffectivePolicy`), so authoring must accept it too.
+    const both = createWorkflowDependencyPreflight({
+      connectorStore: connectorStoreWith({ gmail: { client_secret: 'tok' } }),
+      mcpSettingsStore: { getPolicy: async () => ({ policy: 'allow' }) },
+    })
+    const loosened = await both.preflightConnectorTool({
+      userId: USER_ID,
+      toolName: 'gmailSendMessage',
+      assistantId: ASSISTANT_ID,
+    })
+    expect(loosened?.policy).toBe('allow')
   })
 })
 

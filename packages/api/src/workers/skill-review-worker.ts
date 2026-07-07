@@ -27,6 +27,10 @@
  *     degrades to an empty (no-op) cycle.
  *   * Apply-time `skill_manage` error → log `skill_review_action_failed` +
  *     skip that action; cycle continues.
+ *   * Duplicate proposal — a pending approval already covers the target
+ *     skill (or proposed slug) → `skill_manage` reports
+ *     `skipped_pending_approval`; the worker logs
+ *     `skill_review_action_deduped` and spends none of the daily cap.
  *   * LLM plan call throws → log `skill_review_cycle_failed`; the session is
  *     left for the next tick.
  *
@@ -96,6 +100,7 @@ export type SkillReviewEvent =
     }
   | { type: 'session_skipped'; sessionId: string; reason: string }
   | { type: 'lease_skipped'; skillId: string; sessionId: string }
+  | { type: 'action_deduped'; sessionId: string; approvalId: string }
   | { type: 'action_failed'; sessionId: string; reason: string; recoverable: boolean }
   | { type: 'cycle_failed'; sessionId: string; reason: string }
   | { type: 'tick_complete'; reviewed: number; skipped: number; failed: number }
@@ -635,7 +640,7 @@ export async function reviewSession(
       }
 
       try {
-        await applyAction(action, {
+        const applied = await applyAction(action, {
           workspaceId: candidate.workspaceId,
           originatingAssistantId: candidate.assistantId,
           systemActorUserId: candidate.userId,
@@ -644,6 +649,29 @@ export async function reviewSession(
           fileStore: deps.fileStore,
           approvalsStore: deps.approvalsStore,
         })
+        if (applied.actionTaken === 'skipped_pending_approval') {
+          // Dedupe: an equivalent proposal is already awaiting a human
+          // decision. Neither an op (no cap spend) nor a failure — logged
+          // under its own event so the queue-spam regression stays visible.
+          const approvalId = applied.approvalId ?? 'unknown'
+          deps.onEvent?.({
+            type: 'action_deduped',
+            sessionId: candidate.sessionId,
+            approvalId,
+          })
+          await deps.analyticsStore.record({
+            userId: candidate.userId,
+            assistantId: candidate.assistantId,
+            sessionId: candidate.sessionId,
+            eventName: 'skill_review_action_deduped',
+            metadata: {
+              workspace_id: sanitize(candidate.workspaceId),
+              action: sanitize(action.action),
+              approval_id: sanitize(approvalId),
+            },
+          })
+          continue
+        }
         succeeded += 1
         opsThisCycle += 1
         await deps.analyticsStore.record({
@@ -714,7 +742,10 @@ type ApplyActionDeps = {
   approvalsStore: PendingApprovalsStore
 }
 
-async function applyAction(action: SkillReviewAction, deps: ApplyActionDeps): Promise<void> {
+async function applyAction(
+  action: SkillReviewAction,
+  deps: ApplyActionDeps,
+): Promise<{ actionTaken?: string; approvalId?: string }> {
   // The worker reuses the `skill_manage` tool's routing logic by calling
   // its internal action functions directly via store ports. The tool layer
   // is what the LLM sees; the worker is the *only* caller in production,
@@ -752,6 +783,7 @@ async function applyAction(action: SkillReviewAction, deps: ApplyActionDeps): Pr
     const err = (result.data as { error?: string })?.error ?? 'unknown skill_manage error'
     throw new Error(err)
   }
+  return (result.data ?? {}) as { actionTaken?: string; approvalId?: string }
 }
 
 // ── Store-port adapters ────────────────────────────────────────────
@@ -893,6 +925,23 @@ function approvalsPort(approvals: PendingApprovalsStore, approverUserId: string)
         originatingAssistantId: params.originatingAssistantId,
       })
       return { approvalId: row.id }
+    },
+    async findPendingStagedSkillUpdate(params: {
+      workspaceId: string
+      targetSkillId: string
+    }) {
+      const row = await approvals.findPendingStagedSkillUpdate(
+        params.workspaceId,
+        params.targetSkillId,
+      )
+      return row ? { approvalId: row.id } : null
+    },
+    async findPendingStagedSkillCreation(params: { workspaceId: string; slug: string }) {
+      const row = await approvals.findPendingStagedSkillCreation(
+        params.workspaceId,
+        params.slug,
+      )
+      return row ? { approvalId: row.id } : null
     },
   }
 }

@@ -31,6 +31,8 @@ import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import { RANK, isSensitivity } from '../security/sensitivity.js'
 
+import { SPOTLIGHT_RULE, spotlightContent } from './spotlight.js'
+
 // ── Public types ─────────────────────────────────────────────────────
 
 export type ExtractedMemoryDigest = {
@@ -85,7 +87,8 @@ export type SensitivityClassifierOptions = {
 
 const SYSTEM_PROMPT =
   'You are a sensitivity classifier for a knowledge-management system. ' +
-  'Respond with ONE JSON object and nothing else. No markdown fences, no commentary.'
+  'Respond with ONE JSON object and nothing else. No markdown fences, no commentary. ' +
+  SPOTLIGHT_RULE
 
 /** Episode summary cap. Anything longer is rare; the tail rarely changes the verdict. */
 const SUMMARY_CHAR_LIMIT = 2000
@@ -101,6 +104,10 @@ function truncate(s: string, n: number): string {
 }
 
 function buildPrompt(input: SensitivityClassifierInput): string {
+  // The Episode summary and extracted-memory text are derived from untrusted
+  // third-party content, so spotlight them: an injection string carried in the
+  // summary must classify as DATA, not steer the classifier. The markers pair
+  // with SPOTLIGHT_RULE in SYSTEM_PROMPT.
   const memoriesBlock = input.memories.length > 0
     ? input.memories
         .slice(0, MAX_MEMORIES)
@@ -113,10 +120,10 @@ function buildPrompt(input: SensitivityClassifierInput): string {
 The channel that delivered this Episode was rule-classified as: "${input.channelSensitivity}".
 
 Episode summary:
-  "${truncate(input.summary, SUMMARY_CHAR_LIMIT)}"
+${spotlightContent(truncate(input.summary, SUMMARY_CHAR_LIMIT))}
 
 Extracted memories:
-${memoriesBlock}
+${input.memories.length > 0 ? spotlightContent(memoriesBlock) : memoriesBlock}
 
 Output JSON only, matching this exact shape:
 {

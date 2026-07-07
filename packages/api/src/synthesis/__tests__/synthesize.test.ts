@@ -11,6 +11,7 @@ vi.mock('@sidanclaw/core', async (importOriginal) => {
   return { ...actual, queryLoop: queryLoopMock }
 })
 
+import { extractionSpecSchema } from '@sidanclaw/core'
 import {
   synthesizeFromSource,
   type SynthesisSource,
@@ -18,6 +19,7 @@ import {
   type SynthesisTarget,
   type SynthesizeDeps,
 } from '../synthesize.js'
+import type { BlueprintRecord } from '../../db/blueprint-records-store.js'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function* gen(events: any[]) {
@@ -172,5 +174,158 @@ describe('[COMP:api/synthesize] structural-synthesis runner', () => {
     const res = await synthesizeFromSource(SOURCE, BLUEPRINT, TARGET, deps)
     expect(res.truncated).toBe(true)
     expect(res.pageId).toBe('page-new')
+  })
+
+  // ── Record-first fill (document blueprints with a typed contract) ──────
+
+  const DOC_SPEC = extractionSpecSchema.parse({
+    fields: [
+      { key: 'summary', heading: 'Summary', instruction: 'sum it', type: 'markdown', required: true },
+      { key: 'budget', heading: 'Budget', instruction: 'annual', type: 'number' },
+    ],
+    capture: [],
+  })
+  const DOC_BLUEPRINT: SynthesisBlueprint = {
+    kind: 'document',
+    slug: 'tmpl-1',
+    body: 'DOC_BODY_MARKER',
+    title: 'Account brief',
+    spec: DOC_SPEC,
+  }
+
+  function recordDeps() {
+    const ensure = vi.fn().mockResolvedValue({ id: 'rec-row-1' } as BlueprintRecord)
+    const mergeFields = vi.fn().mockResolvedValue(true)
+    const finalize = vi.fn().mockResolvedValue(null)
+    const projectRecordPage = vi.fn().mockResolvedValue(true)
+    return { ensure, mergeFields, finalize, projectRecordPage }
+  }
+
+  it('record path: ensures the record BEFORE the loop, sinks via writeField, no doc tools', async () => {
+    const rec = recordDeps()
+    const { deps, createDraft } = build({
+      blueprintRecordStore: { ensure: rec.ensure, mergeFields: rec.mergeFields, finalize: rec.finalize },
+      projectRecordPage: rec.projectRecordPage,
+    })
+    queryLoopMock.mockImplementation((opts: { tools: Map<string, Tool> }) =>
+      (async function* () {
+        const wf = opts.tools.get('writeField')
+        if (!wf) throw new Error('writeField missing from tool map')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ok = await wf.execute({ key: 'summary', value: 'All good.' } as any, {} as any)
+        expect(ok.isError).not.toBe(true)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const bad = await wf.execute({ key: 'budget', value: 'lots' } as any, {} as any)
+        expect(bad.isError).toBe(true)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const unknown = await wf.execute({ key: 'nope', value: 1 } as any, {} as any)
+        expect(unknown.isError).toBe(true)
+        yield* gen(HAPPY)
+      })(),
+    )
+    const res = await synthesizeFromSource(
+      SOURCE,
+      DOC_BLUEPRINT,
+      { anchorKey: 'recording-synthesis:rec-1', renderPage: false, recordSubject: 'Acme' },
+      deps,
+    )
+
+    // Record ensured before the model loop, on the shared anchor, fields reset.
+    expect(rec.ensure).toHaveBeenCalledTimes(1)
+    expect(rec.ensure.mock.invocationCallOrder[0]).toBeLessThan(queryLoopMock.mock.invocationCallOrder[0])
+    expect(rec.ensure.mock.calls[0][1]).toMatchObject({
+      blueprintId: 'tmpl-1',
+      anchorKey: 'recording-synthesis:rec-1',
+      subject: 'Acme',
+      sourceKind: 'recording',
+      sensitivity: 'confidential',
+      resetFields: true,
+    })
+
+    // Record-only: no page minted, no doc tools in the map.
+    expect(createDraft).not.toHaveBeenCalled()
+    expect(res.pageId).toBeNull()
+    const { tools, systemPrompt } = queryLoopMock.mock.calls[0][0]
+    expect(tools.has('patchPage')).toBe(false)
+    expect(tools.has('writeField')).toBe(true)
+    expect(systemPrompt).toContain('DOC_BODY_MARKER')
+    expect(systemPrompt).toContain('writeField')
+
+    // Only the VALID write merged; completeness from required coverage.
+    expect(rec.mergeFields).toHaveBeenCalledTimes(1)
+    expect(rec.mergeFields).toHaveBeenCalledWith('u-1', 'rec-row-1', { summary: 'All good.' })
+    expect(rec.finalize).toHaveBeenCalledWith('u-1', 'rec-row-1', {
+      status: 'complete',
+      missing: [],
+      pageId: null,
+    })
+    expect(res.recordId).toBe('rec-row-1')
+    expect(res.recordStatus).toBe('complete')
+    expect(rec.projectRecordPage).not.toHaveBeenCalled()
+  })
+
+  it('record path: renders the page projection from the record when the surface renders', async () => {
+    const rec = recordDeps()
+    const { deps, createDraft } = build({
+      blueprintRecordStore: { ensure: rec.ensure, mergeFields: rec.mergeFields, finalize: rec.finalize },
+      projectRecordPage: rec.projectRecordPage,
+    })
+    queryLoopMock.mockImplementation((opts: { tools: Map<string, Tool> }) =>
+      (async function* () {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await opts.tools.get('writeField')!.execute({ key: 'summary', value: 'Done.' } as any, {} as any)
+        yield* gen(HAPPY)
+      })(),
+    )
+    const res = await synthesizeFromSource(
+      SOURCE,
+      DOC_BLUEPRINT,
+      { anchorKey: 'recording-synthesis:rec-1', renderPage: true },
+      deps,
+    )
+    expect(createDraft).toHaveBeenCalledTimes(1)
+    expect(res.pageId).toBe('page-new')
+    expect(rec.projectRecordPage).toHaveBeenCalledTimes(1)
+    const projected = rec.projectRecordPage.mock.calls[0][0]
+    expect(projected.pageId).toBe('page-new')
+    expect(projected.blocks.some((b: { kind: string }) => b.kind === 'heading')).toBe(true)
+    expect(rec.finalize).toHaveBeenCalledWith('u-1', 'rec-row-1', {
+      status: 'complete',
+      missing: [],
+      pageId: 'page-new',
+    })
+  })
+
+  it('record path: a fill missing required fields finalizes incomplete with the missing keys', async () => {
+    const rec = recordDeps()
+    const { deps } = build({
+      blueprintRecordStore: { ensure: rec.ensure, mergeFields: rec.mergeFields, finalize: rec.finalize },
+    })
+    queryLoopMock.mockImplementation(() => gen(HAPPY)) // model writes nothing
+    const res = await synthesizeFromSource(
+      SOURCE,
+      DOC_BLUEPRINT,
+      { anchorKey: 'k', renderPage: false },
+      deps,
+    )
+    expect(res.recordStatus).toBe('incomplete')
+    expect(res.missing).toEqual(['summary'])
+    expect(rec.finalize).toHaveBeenCalledWith('u-1', 'rec-row-1', {
+      status: 'incomplete',
+      missing: ['summary'],
+      pageId: null,
+    })
+  })
+
+  it('legacy (spec-less) path is untouched: no record calls, page authored via doc tools', async () => {
+    const rec = recordDeps()
+    const { deps } = build({
+      blueprintRecordStore: { ensure: rec.ensure, mergeFields: rec.mergeFields, finalize: rec.finalize },
+    })
+    const res = await synthesizeFromSource(SOURCE, BLUEPRINT, TARGET, deps)
+    expect(rec.ensure).not.toHaveBeenCalled()
+    expect(res.recordId).toBeNull()
+    expect(res.recordStatus).toBeNull()
+    expect(queryLoopMock.mock.calls[0][0].tools.has('patchPage')).toBe(true)
   })
 })

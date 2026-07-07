@@ -51,6 +51,10 @@ export {
   episodeEnvelopeSchema,
 } from './schemas.js'
 
+// Ingest-tier prompt-injection defense — spotlight untrusted content so
+// extraction / sensitivity prompts treat it as data, not instructions.
+export * from './spotlight.js'
+
 // New modules wired by coordinator after WS-3 W3a-W3d wave.
 export * from './engine.js'
 export * from './filters.js'

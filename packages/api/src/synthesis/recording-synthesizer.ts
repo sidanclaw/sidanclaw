@@ -27,8 +27,13 @@ import {
   type WorkspaceDirectoryStore,
 } from '@sidanclaw/core'
 import { createSearchRecordingTool } from '../recordings/recording-search-tool.js'
-import { synthesizeFromSource, type SynthesisBlueprint } from './synthesize.js'
+import {
+  createRecordPageProjector,
+  synthesizeFromSource,
+  type SynthesisBlueprint,
+} from './synthesize.js'
 import { extractionToBlueprintBody } from './blueprint-from-template.js'
+import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 
 export type RecordingSynthesizerDeps = {
@@ -53,6 +58,8 @@ export type RecordingSynthesizerDeps = {
   ) => Promise<{ body: string; title?: string } | null>
   /** Resolve a "document" blueprint — a page template carrying an extraction spec. */
   pageTemplateStore?: PageTemplateStore
+  /** Record persistence (migration 307) — document fills run record-first when wired. */
+  blueprintRecordStore?: BlueprintRecordStore
 }
 
 export type RecordingSynthesisArgs = {
@@ -119,6 +126,7 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
           slug: tmpl.id,
           body: extractionToBlueprintBody(tmpl.name, tmpl.extraction),
           title: tmpl.name,
+          spec: tmpl.extraction,
         }
       }
     }
@@ -181,7 +189,13 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
         sensitivity: args.sensitivity,
       },
       blueprint,
-      { anchorKey: `recording-synthesis:${args.recordingId}` },
+      {
+        anchorKey: `recording-synthesis:${args.recordingId}`,
+        // Recording fills always render the brief page (per-surface default);
+        // the record rides underneath as the typed artifact.
+        renderPage: true,
+        recordSubject: `${blueprint.title ?? titleFor(args.blueprintSlug)} recording ${args.recordingId.slice(0, 8)}`,
+      },
       {
         provider: deps.provider,
         model: deps.model,
@@ -189,6 +203,8 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
         buildDocTools,
         brainWriteTools,
         savedViewStore: deps.savedViewStore,
+        blueprintRecordStore: deps.blueprintRecordStore,
+        projectRecordPage: createRecordPageProjector(deps.docPageStore),
         usageStore: deps.usageStore,
         computeCostUsd: deps.computeCostUsd,
       },

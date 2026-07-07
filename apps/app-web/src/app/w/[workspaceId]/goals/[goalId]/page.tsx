@@ -27,7 +27,7 @@ import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { getGoalDetail, type DoneWhenNode, type GoalDetail } from "@/lib/api/goals";
 import { cn } from "@/lib/utils";
-import { STATUS_BADGE } from "../status-badge";
+import { STATUS_BADGE } from "@/components/doc/panels/goal-status-badge";
 
 type AcceptanceLabels = {
   subtasks: string;
@@ -67,7 +67,10 @@ export default function GoalDetailPage({
   const t = useT();
   const labels = t.goalsPage.detail;
   const { workspaceId, goalId } = use(params);
-  const listHref = `/w/${workspaceId}/goals`;
+  // Back to the Autopilot board — now a doc-shell panel tab, not a standalone
+  // route (the `/goals` route redirects here too, but link straight to the
+  // panel to skip the hop). See docs/architecture/features/doc.md → "Top bar".
+  const listHref = `/w/${workspaceId}/p?panel=goals`;
 
   const [goal, setGoal] = useState<GoalDetail | null | undefined>(undefined);
 

@@ -200,3 +200,44 @@ describe('[COMP:api/worker-runs-store] loadForSession', () => {
     expect(values).toEqual(['sess-1'])
   })
 })
+
+describe('[COMP:api/worker-runs-store] listRecentForWorkspace', () => {
+  it('selects summary columns for a workspace, newest-first, with a clamped limit', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          id: '77777777-7777-7777-7777-777777777777',
+          status: 'completed',
+          description: 'd1',
+          prompt: 'p1',
+          sessionId: 'sess-9',
+          createdAt: new Date('2026-07-07T08:00:00Z'),
+          updatedAt: new Date('2026-07-07T08:05:00Z'),
+        },
+      ],
+      rowCount: 1,
+    } as never)
+    const rows = await store.listRecentForWorkspace('ws-1', 20)
+    const [sql, values] = mockQuery.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain('FROM worker_runs')
+    expect(sql).toContain('WHERE workspace_id = $1')
+    expect(sql).toContain('ORDER BY created_at DESC')
+    expect(sql).toContain('LIMIT $2')
+    // Summary read — never walks the heavy JSONB history / result body.
+    expect(sql).not.toContain('history_json')
+    expect(sql).not.toContain('result')
+    expect(values).toEqual(['ws-1', 20])
+    expect(rows[0]).toMatchObject({
+      id: '77777777-7777-7777-7777-777777777777',
+      status: 'completed',
+      sessionId: 'sess-9',
+    })
+  })
+
+  it('defensively clamps an over-cap limit to 50', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await store.listRecentForWorkspace('ws-1', 999)
+    const [, values] = mockQuery.mock.calls[0] as [string, unknown[]]
+    expect(values).toEqual(['ws-1', 50])
+  })
+})

@@ -22,6 +22,8 @@ import type {
   PageWorkflowRunSummary,
   RunQueueStore,
   WorkflowDefinition,
+  WorkflowLifecycleRow,
+  WorkflowLifecycleState,
   WorkflowModelAlias,
   WorkflowRecord,
   WorkflowRunOutcome,
@@ -55,6 +57,12 @@ const WORKFLOW_SELECT = `
   max_turns           AS "maxTurns",
   research_mode       AS "researchMode",
   name_manually_set   AS "nameManuallySet",
+  lifecycle_state     AS "lifecycleState",
+  lifecycle_transitioned_at AS "lifecycleTransitionedAt",
+  lifecycle_reason    AS "lifecycleReason",
+  pinned,
+  digested_at         AS "digestedAt",
+  digest_verdict      AS "digestVerdict",
   created_at          AS "createdAt",
   updated_at          AS "updatedAt"
 `
@@ -75,6 +83,12 @@ type WorkflowRow = {
   maxTurns: number | null
   researchMode: boolean
   nameManuallySet: boolean
+  lifecycleState: WorkflowLifecycleState
+  lifecycleTransitionedAt: Date | null
+  lifecycleReason: string | null
+  pinned: boolean
+  digestedAt: Date | null
+  digestVerdict: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -124,6 +138,12 @@ function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
     maxTurns: row.maxTurns,
     researchMode: row.researchMode,
     nameManuallySet: row.nameManuallySet,
+    lifecycleState: row.lifecycleState,
+    lifecycleTransitionedAt: row.lifecycleTransitionedAt,
+    lifecycleReason: row.lifecycleReason,
+    pinned: row.pinned,
+    digestedAt: row.digestedAt,
+    digestVerdict: row.digestVerdict,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -181,11 +201,14 @@ export function createDbWorkflowStore(): WorkflowStore {
       )
       return result.rows[0] ? rowToWorkflow(result.rows[0]) : null
     },
-    async list(userId, workspaceId) {
+    async list(userId, workspaceId, opts) {
+      // Archived workflows are hidden from every default listing (mig 308);
+      // surfaces that render the archived section opt in explicitly.
+      const archivedFilter = opts?.includeArchived ? '' : `AND lifecycle_state <> 'archived'`
       const result = await queryWithRLS<WorkflowRow>(
         userId,
         `SELECT ${WORKFLOW_SELECT} FROM workflows
-         WHERE workspace_id = $1
+         WHERE workspace_id = $1 ${archivedFilter}
          ORDER BY updated_at DESC`,
         [workspaceId],
       )
@@ -210,6 +233,14 @@ export function createDbWorkflowStore(): WorkflowStore {
       if (fields.maxTurns !== undefined) { sets.push(`max_turns = $${idx}`); values.push(fields.maxTurns); idx++ }
       if (fields.researchMode !== undefined) { sets.push(`research_mode = $${idx}`); values.push(fields.researchMode); idx++ }
       if (fields.nameManuallySet !== undefined) { sets.push(`name_manually_set = $${idx}`); values.push(fields.nameManuallySet); idx++ }
+      if (fields.pinned !== undefined) { sets.push(`pinned = $${idx}`); values.push(fields.pinned); idx++ }
+      if (fields.lifecycleState !== undefined) {
+        // The user-facing restore path (mig 308). Stamps the transition and
+        // clears the sweep's reason so the row reads clean again.
+        sets.push(`lifecycle_state = $${idx}`); values.push(fields.lifecycleState); idx++
+        sets.push('lifecycle_transitioned_at = now()')
+        sets.push('lifecycle_reason = NULL')
+      }
 
       if (sets.length === 0) {
         // Nothing to patch — read back current state.
@@ -219,6 +250,14 @@ export function createDbWorkflowStore(): WorkflowStore {
           [id],
         )
         return cur.rows[0] ? rowToWorkflow(cur.rows[0]) : null
+      }
+
+      if (fields.lifecycleState === undefined) {
+        // Any real user edit is activity: un-stale the row immediately
+        // instead of waiting for the next sweep tick (mig 308). Archived
+        // rows stay archived until an explicit restore. Appended only when
+        // a real patch runs, so an empty-fields update stays a pure read.
+        sets.push(`lifecycle_state = CASE WHEN lifecycle_state = 'stale' THEN 'active' ELSE lifecycle_state END`)
       }
 
       values.push(id)
@@ -538,8 +577,8 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       // outcome, excluding the run currently executing. `finished_at DESC
       // NULLS LAST` orders by terminal time; `started_at` breaks ties and
       // covers any terminal row whose finished_at was never stamped.
-      const result = await query<{ outcome: WorkflowRunOutcome | null }>(
-        `SELECT outcome FROM workflow_runs
+      const result = await query<{ id: string; outcome: WorkflowRunOutcome | null }>(
+        `SELECT id, outcome FROM workflow_runs
           WHERE workflow_id = $1
             AND id <> $2
             AND status IN ('completed', 'failed', 'timeout')
@@ -547,7 +586,36 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
           LIMIT 1`,
         [workflowId, excludeRunId],
       )
-      return result.rows[0]?.outcome ?? null
+      const row = result.rows[0]
+      if (!row?.outcome) return row?.outcome ?? null
+      // Blueprint output-contract: when that run saved a blueprint RECORD,
+      // surface its typed fields as `lastRun.output.*` (+ `outputStatus` so a
+      // condition can gate on completeness). Two producers stamp the run id:
+      // a direct `saveBlueprintRecord` in the consult (source_kind='workflow')
+      // and the research-synthesis arm of an anchored research step (the
+      // engine stamps its SOURCE kind, 'research', with sourceRef=runId) —
+      // match both. Read-time enrichment keeps the core executor
+      // record-agnostic and works for any historical run. Failure degrades to
+      // the plain outcome.
+      try {
+        const rec = await query<{ fields: Record<string, unknown>; status: string }>(
+          `SELECT fields, status FROM blueprint_records
+            WHERE source_kind IN ('workflow', 'research') AND source_id = $1
+            ORDER BY updated_at DESC
+            LIMIT 1`,
+          [row.id],
+        )
+        if (rec.rows[0]) {
+          return {
+            ...row.outcome,
+            output: rec.rows[0].fields ?? {},
+            outputStatus: rec.rows[0].status,
+          } as WorkflowRunOutcome
+        }
+      } catch (err) {
+        console.warn('[workflow-store] lastRun.output enrichment failed:', err)
+      }
+      return row.outcome
     },
     async listRunsForPage(userId, pageId, opts) {
       const limit = Math.min(opts?.limit ?? 20, 100)
@@ -1224,4 +1292,130 @@ export async function pauseWorkflowSystem(
       WHERE id = $1`,
     [workflowId, reason],
   )
+}
+
+// ── workflow lifecycle sweep (mig 308) ──────────────────────────────────
+// System-level reads/writes for the lifecycle sweep worker
+// (packages/api/src/workers/workflow-lifecycle-worker.ts). The worker has
+// no acting user; the policy lives in @sidanclaw/core `decideLifecycle`.
+// [COMP:workflow/lifecycle]
+
+type LifecycleSweepRow = {
+  id: string
+  workspaceId: string
+  createdBy: string
+  name: string
+  description: string | null
+  trigger: WorkflowTrigger | null
+  enabled: boolean
+  pinned: boolean
+  lifecycleState: WorkflowLifecycleState
+  lifecycleTransitionedAt: Date | null
+  digestedAt: Date | null
+  createdAt: Date
+  updatedAt: Date
+  lastRunAt: Date | null
+  runCount: number
+  hasLiveFire: boolean
+}
+
+/**
+ * Every workflow with the aggregates the lifecycle policy needs: last run
+ * start + total run count (lateral over `idx_workflow_runs_workflow`) and
+ * whether any enabled `scheduled_jobs` row still points at the workflow
+ * (`hasLiveFire` — a pending future fire or wait continuation). One query,
+ * all workspaces; the sweep worker partitions per workspace itself.
+ */
+export async function listLifecycleSweepRowsSystem(): Promise<
+  Array<WorkflowLifecycleRow & { createdBy: string }>
+> {
+  const result = await query<LifecycleSweepRow>(
+    `SELECT w.id,
+            w.workspace_id              AS "workspaceId",
+            w.created_by                AS "createdBy",
+            w.name,
+            w.description,
+            w.trigger,
+            w.enabled,
+            w.pinned,
+            w.lifecycle_state           AS "lifecycleState",
+            w.lifecycle_transitioned_at AS "lifecycleTransitionedAt",
+            w.digested_at               AS "digestedAt",
+            w.created_at                AS "createdAt",
+            w.updated_at                AS "updatedAt",
+            r."lastRunAt",
+            COALESCE(r."runCount", 0)::int AS "runCount",
+            EXISTS (
+              SELECT 1 FROM scheduled_jobs j
+               WHERE j.workflow_id = w.id AND j.enabled = true
+            ) AS "hasLiveFire"
+       FROM workflows w
+       LEFT JOIN LATERAL (
+         SELECT MAX(started_at) AS "lastRunAt", COUNT(*) AS "runCount"
+           FROM workflow_runs WHERE workflow_id = w.id
+       ) r ON true`,
+  )
+  return result.rows.map((row) => ({
+    ...row,
+    trigger: row.trigger ?? { kind: 'manual' },
+    runCount: Number(row.runCount),
+  }))
+}
+
+/**
+ * Apply one sweep transition. Archival also disables the workflow so no
+ * trigger path (webhook lookup, event finder, scheduled fire) can start a
+ * run on a retired row; restore is the PATCH `lifecycleState: 'active'`
+ * path in `createDbWorkflowStore().update`, which re-enables explicitly.
+ */
+export async function applyLifecycleTransitionSystem(
+  workflowId: string,
+  state: WorkflowLifecycleState,
+  reason: string | null,
+): Promise<void> {
+  await query(
+    `UPDATE workflows
+        SET lifecycle_state = $2,
+            lifecycle_reason = $3,
+            lifecycle_transitioned_at = now(),
+            enabled = CASE WHEN $2 = 'archived' THEN false ELSE enabled END
+      WHERE id = $1`,
+    [workflowId, state, reason],
+  )
+}
+
+/**
+ * Stamp the digest pass's verdict on the reviewed rows. Idempotence anchor:
+ * the digest batch selects `digested_at IS NULL`, so each workflow is
+ * reviewed at most once. (This bumps `updated_at` via the table trigger —
+ * harmless: stale-row reactivation is run-only, see `touchedSinceTransition`.)
+ */
+export async function markWorkflowsDigestedSystem(
+  workflowIds: string[],
+  verdicts: Map<string, string>,
+): Promise<void> {
+  if (workflowIds.length === 0) return
+  const ids: string[] = []
+  const verdictValues: string[] = []
+  for (const id of workflowIds) {
+    ids.push(id)
+    verdictValues.push(verdicts.get(id) ?? 'not_repeatable')
+  }
+  await query(
+    `UPDATE workflows w
+        SET digested_at = now(), digest_verdict = v.verdict
+       FROM unnest($1::uuid[], $2::text[]) AS v(id, verdict)
+      WHERE w.id = v.id`,
+    [ids, verdictValues],
+  )
+}
+
+/**
+ * Hard delete for the sweep's one-off retirement path (archived one-shot
+ * workflows past the delete grace). `workflow_runs` cascade via FK — the
+ * caller emits the audit event carrying a summary snapshot first.
+ */
+export async function deleteWorkflowSystem(workflowId: string): Promise<boolean> {
+  const result = await query(`DELETE FROM workflows WHERE id = $1`, [workflowId])
+  return result.rowCount !== null && result.rowCount > 0
 }

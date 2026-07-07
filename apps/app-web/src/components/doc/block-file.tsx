@@ -24,17 +24,14 @@ import { useEffect, useRef, useState } from "react";
 import { useT, format } from "@/lib/i18n/client";
 import { authFetch } from "@/lib/auth-fetch";
 import { hasPendingMediaUpload, takeMediaUpload } from "./doc-media-uploads";
+import {
+  durableReadUrlFor,
+  resolveFileRefUrl,
+  type FileRef,
+} from "./doc-file-url";
 import { UploadSpinner } from "./upload-spinner";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-
-type FileRef = {
-  bucket: string;
-  path: string;
-  mimeType: string;
-  sizeBytes: number;
-  name: string;
-};
 
 type FileBlock = {
   kind: "file";
@@ -51,16 +48,6 @@ type Props = {
   onChange?: (patch: Partial<FileBlock>) => void;
   onAction?: (actionId: string, params?: Record<string, unknown>) => void;
 };
-
-function signedReadUrlFor(ref: FileRef, workspaceId: string): string | null {
-  if (ref.bucket === "workspace_files") {
-    return `${API_URL}/api/doc-files/${workspaceId}/${encodeURIComponent(ref.path)}`;
-  }
-  if (ref.bucket === "file_cache") {
-    return `${API_URL}/api/files/${encodeURIComponent(ref.path)}/preview`;
-  }
-  return null;
-}
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -115,6 +102,33 @@ export function BlockFile({ block, workspaceId, readOnly, onChange }: Props) {
   const [uploading, setUploading] = useState(() => hasPendingMediaUpload(block.id));
   const [uploadingName, setUploadingName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Resolved download URL. Durable `workspace_files` refs resolve synchronously;
+  // a legacy `file_cache` ref needs an async signed-URL mint (WS3 #8), filled
+  // in by the effect below.
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(() =>
+    block.ref ? durableReadUrlFor(block.ref, workspaceId) : null,
+  );
+
+  // Resolve the ref's browser URL (durable synchronous; legacy `file_cache`
+  // via signed mint). Guarded against out-of-order settles + unmount.
+  useEffect(() => {
+    if (!block.ref) {
+      setResolvedUrl(null);
+      return;
+    }
+    const durable = durableReadUrlFor(block.ref, workspaceId);
+    if (durable) {
+      setResolvedUrl(durable);
+      return;
+    }
+    let cancelled = false;
+    void resolveFileRefUrl(block.ref, workspaceId).then((url) => {
+      if (!cancelled) setResolvedUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [block.ref, workspaceId]);
 
   // Drag-drop / paste hand-off: `doc-media-paste.ts` inserts this empty block
   // and stashes the dropped file under `block.id`. Claim it on mount and run
@@ -214,7 +228,7 @@ export function BlockFile({ block, workspaceId, readOnly, onChange }: Props) {
     );
   }
 
-  const url = signedReadUrlFor(block.ref, workspaceId);
+  const url = resolvedUrl;
   const meta = format(t.mediaBlock.fileMeta, {
     size: formatBytes(block.ref.sizeBytes),
   });

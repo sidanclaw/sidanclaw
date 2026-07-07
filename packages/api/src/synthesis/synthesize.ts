@@ -20,18 +20,30 @@
 // docs/architecture/brain/structural-synthesis.md.
 
 import { randomUUID } from 'node:crypto'
+import { z } from 'zod'
 import {
+  buildTool,
+  buildUndoEntry,
+  blueprintRecordToBlocks,
   queryLoop,
+  recordCompleteness,
   resolveResearchBudget,
+  validateFieldValue,
   type AssistantKind,
+  type Block,
+  type BlueprintRecordFields,
+  type DocPageStore,
+  type ExtractionSpec,
   type LLMProvider,
   type Message,
+  type Ops,
   type ResearchDepthConfig,
   type SavedViewStore,
   type TokenUsage,
   type Tool,
   type UsageStore,
 } from '@sidanclaw/core'
+import type { BlueprintRecord, BlueprintRecordStore } from '../db/blueprint-records-store.js'
 
 export type SynthesisSourceKind = 'recording' | 'brain' | 'research'
 
@@ -60,6 +72,14 @@ export type SynthesisBlueprint = {
   body: string
   /** Seed title for the brief page. */
   title?: string
+  /**
+   * The typed contract (document blueprints). Present + a record store wired ⇒
+   * the fill runs RECORD-FIRST: `writeField` is the loop's sink, the record is
+   * the artifact, and the page (when this surface renders one) is projected
+   * from the record afterwards. Absent (skill-body blueprints) ⇒ the legacy
+   * page-authoring flow, unchanged.
+   */
+  spec?: ExtractionSpec | null
 }
 
 export type SynthesisTarget = {
@@ -67,11 +87,26 @@ export type SynthesisTarget = {
   pageId?: string | null
   /** Stable cross-run identity for idempotent find-or-create (saved_views.anchor_key). */
   anchorKey: string
+  /**
+   * Whether this surface renders the page projection (default true — recording
+   * fills and the Generate UI keep their pages). False ⇒ record-only: no page
+   * is created or written. Ignored on the legacy (spec-less) path, which is
+   * page-authoring by definition.
+   */
+  renderPage?: boolean
+  /** What the record is ABOUT (seeds `blueprint_records.subject`). Defaults to the blueprint title. */
+  recordSubject?: string
 }
 
 export type SynthesisResult = {
-  /** The brief page (null only if page creation itself failed). */
+  /** The brief page (null when this surface renders no page, or page creation failed). */
   pageId: string | null
+  /** The blueprint record (null on the legacy spec-less path). */
+  recordId: string | null
+  /** Required-coverage outcome of the record (null on the legacy path). */
+  recordStatus: 'complete' | 'incomplete' | null
+  /** Required field keys the fill could not ground (empty on the legacy path). */
+  missing: string[]
   /** The model's closing plain-text receipt. */
   summary: string
   toolCallCount: number
@@ -94,6 +129,18 @@ export type SynthesizeDeps = {
   /** Brain-write tools (saveCompany / saveContact / saveDeal / saveTask). */
   brainWriteTools: Map<string, Tool>
   savedViewStore: Pick<SavedViewStore, 'createDraft' | 'findIdByAnchorKey'>
+  /**
+   * The record persistence (migration 307). Wired + a typed `spec` on the
+   * blueprint ⇒ record-first fill. Absent ⇒ legacy page-authoring (kept so
+   * tests / partial deploys degrade to the old behavior instead of failing).
+   */
+  blueprintRecordStore?: Pick<BlueprintRecordStore, 'ensure' | 'mergeFields' | 'finalize'>
+  /**
+   * Write the record's page projection (full-replace under CAS + undo).
+   * Build with `createRecordPageProjector(docPageStore)`. Required for the
+   * record path to render; absent ⇒ record-only even when `renderPage`.
+   */
+  projectRecordPage?: (params: { userId: string; pageId: string; blocks: Block[] }) => Promise<boolean>
   /** COGS metering (fire-and-forget); omit to skip. Only `recordUsage` is used. */
   usageStore?: Pick<UsageStore, 'recordUsage'>
   /** Cost-of-the-extra-pass calculator; omit → COGS rows record 0. */
@@ -118,6 +165,7 @@ function buildSystemPrompt(
   blueprint: SynthesisBlueprint,
   source: SynthesisSource,
   sourceToolName: string,
+  mode: { recordPath: boolean; renderPage: boolean },
 ): string {
   // Three sources, three gather + citation disciplines. The PROVENANCE handle
   // differs per kind, so the "where to cite" instruction tracks the source: a
@@ -137,6 +185,25 @@ function buildSystemPrompt(
     gatherLine = `- Read the gathered research with \`${sourceToolName}\` — draft ONLY from those findings; do not add facts they do not contain.`
     citeLine = `- Cite the source each claim came from (the URL / source named in the findings); if the findings do not cover a section, say so rather than guessing.`
   }
+  if (mode.recordPath) {
+    // Record-first: the typed record is the deliverable; the page (when this
+    // surface renders one) is projected FROM the record after the loop, so the
+    // model never authors a page here.
+    return [
+      blueprint.body,
+      '',
+      '---',
+      '## How to run this synthesis',
+      `The deliverable is the blueprint RECORD — its typed fields. Save each field with \`writeField\` (one call per field, exactly the keys the blueprint lists). A field the source cannot ground stays unwritten; never invent a value.`,
+      mode.renderPage
+        ? `- A readable page is generated from your saved fields automatically afterwards — do not try to author a page.`
+        : `- No page is rendered for this run; the saved fields ARE the output.`,
+      gatherLine,
+      `- Write durable records with the save tools (company / contacts / deal / tasks) and inherit sensitivity \`${source.sensitivity}\` on every write.`,
+      citeLine,
+      `- Do not ask the user questions — this runs unattended. When the fields are saved and the records are written, reply with a one-line receipt and stop.`,
+    ].join('\n')
+  }
   return [
     blueprint.body,
     '',
@@ -151,13 +218,16 @@ function buildSystemPrompt(
   ].join('\n')
 }
 
-function kickoff(source: SynthesisSource, sourceToolName: string): string {
+function kickoff(source: SynthesisSource, sourceToolName: string, recordPath: boolean): string {
   const noun =
     source.kind === 'recording'
       ? 'this recording'
       : source.kind === 'brain'
         ? 'this account'
         : 'the research findings'
+  if (recordPath) {
+    return `Fill the blueprint fields for ${noun} with \`writeField\`. Use \`${sourceToolName}\` to pull what you need.`
+  }
   return `Synthesize the brief for ${noun} into the page prepared for you. Use \`${sourceToolName}\` to pull what you need.`
 }
 
@@ -204,45 +274,86 @@ export async function synthesizeFromSource(
   target: SynthesisTarget,
   deps: SynthesizeDeps,
 ): Promise<SynthesisResult> {
-  // 1. Page-first + idempotent: reuse an explicit pageId, else the anchor's
-  //    existing page, else create one. The (workspace_id, anchor_key) partial
-  //    unique index converges a concurrent race on 23505 → re-read the winner.
-  let pageId = target.pageId ?? null
-  if (!pageId) {
-    pageId = await deps.savedViewStore.findIdByAnchorKey(source.userId, source.workspaceId, target.anchorKey)
-  }
-  if (!pageId) {
-    try {
-      const draft = await deps.savedViewStore.createDraft({
-        userId: source.userId,
-        workspaceId: source.workspaceId,
-        name: blueprint.title ?? titleFromSlug(blueprint.slug),
-        nameOrigin: 'placeholder', // auto-title can refine from content later
-        // `saved_views.entity` is a closed enum; a document page defaults the
-        // legacy column to 'tasks' (the block content is authoritative).
-        entity: 'tasks',
-        viewType: 'table',
-        binding: { entity: 'tasks', viewType: 'table' },
-        page: { blocks: [] },
-        anchorKey: target.anchorKey,
-        originPrompt: `synthesis: ${blueprint.slug}`,
-      })
-      pageId = draft.id
-    } catch (err) {
-      pageId = await deps.savedViewStore.findIdByAnchorKey(source.userId, source.workspaceId, target.anchorKey)
-      if (!pageId) throw err
-    }
+  // The RECORD path: a typed contract + a record store ⇒ the record is the
+  // artifact and `writeField` the sink; the page (when rendered) is projected
+  // from the record after the loop. Without either, the legacy page-authoring
+  // flow runs untouched (skill-body blueprints, older deploys, engine tests).
+  const spec = blueprint.kind === 'document' ? (blueprint.spec ?? null) : null
+  const recordStore = spec ? deps.blueprintRecordStore : undefined
+  const recordPath = Boolean(spec && recordStore)
+  const renderPage = !recordPath || target.renderPage !== false
+
+  // 0. Record-first (record path): find-or-create the record on the SAME
+  //    anchor the page uses, so even a no-op or timed-out run leaves a typed
+  //    artifact and a re-fill converges on one row (fresh fills reset fields).
+  let record: BlueprintRecord | null = null
+  if (recordPath && spec && recordStore) {
+    record = await recordStore.ensure(source.userId, {
+      workspaceId: source.workspaceId,
+      blueprintId: blueprint.kind === 'document' ? blueprint.slug : null,
+      specSnapshot: spec.fields,
+      subject: target.recordSubject ?? blueprint.title ?? titleFromSlug(blueprint.slug),
+      anchorKey: target.anchorKey,
+      sourceKind: source.kind,
+      sourceId: source.sourceId,
+      sensitivity: source.sensitivity,
+      resetFields: true,
+    })
   }
 
-  // 2. Tool map: page-write (pinned to the just-created brief page) ∪ brain-write
-  //    ∪ the source tool. Confirmations stripped — this is an unattended run.
+  // 1. Page-first + idempotent (skipped entirely on a record-only run): reuse
+  //    an explicit pageId, else the anchor's existing page, else create one.
+  //    The (workspace_id, anchor_key) partial unique index converges a
+  //    concurrent race on 23505 → re-read the winner.
+  let pageId = target.pageId ?? null
+  if (renderPage) {
+    if (!pageId) {
+      pageId = await deps.savedViewStore.findIdByAnchorKey(source.userId, source.workspaceId, target.anchorKey)
+    }
+    if (!pageId) {
+      try {
+        const draft = await deps.savedViewStore.createDraft({
+          userId: source.userId,
+          workspaceId: source.workspaceId,
+          name: blueprint.title ?? titleFromSlug(blueprint.slug),
+          nameOrigin: 'placeholder', // auto-title can refine from content later
+          // `saved_views.entity` is a closed enum; a document page defaults the
+          // legacy column to 'tasks' (the block content is authoritative).
+          entity: 'tasks',
+          viewType: 'table',
+          binding: { entity: 'tasks', viewType: 'table' },
+          page: { blocks: [] },
+          anchorKey: target.anchorKey,
+          originPrompt: `synthesis: ${blueprint.slug}`,
+        })
+        pageId = draft.id
+      } catch (err) {
+        pageId = await deps.savedViewStore.findIdByAnchorKey(source.userId, source.workspaceId, target.anchorKey)
+        if (!pageId) throw err
+      }
+    }
+  } else {
+    pageId = null
+  }
+
+  // 2. Tool map. Record path: `writeField` (the typed sink) ∪ brain-write ∪
+  //    the source tool — NO free-form page writes. Legacy path: page-write
+  //    (pinned to the brief page) ∪ brain-write ∪ source. Confirmations
+  //    stripped — this is an unattended run.
+  const written: Map<string, unknown> = new Map()
   const tools = new Map<string, Tool>()
-  for (const [name, t] of deps.buildDocTools(pageId)) tools.set(name, unattended(t))
+  if (recordPath && spec && recordStore && record) {
+    const writeField = buildWriteFieldTool(spec, record, recordStore, source.userId, written)
+    tools.set(writeField.name, writeField)
+  } else if (pageId) {
+    for (const [name, t] of deps.buildDocTools(pageId)) tools.set(name, unattended(t))
+  }
   for (const [name, t] of deps.brainWriteTools) tools.set(name, unattended(t))
   tools.set(deps.sourceTool.name, deps.sourceTool)
 
   // 3. Bounded server-side loop. The blueprint recipe IS the system prompt
-  //    (executed, not nudged); the page is pinned via context.docViewId.
+  //    (executed, not nudged); on the legacy path the page is pinned via
+  //    context.docViewId.
   const budget = resolveResearchBudget(deps.budget, SYNTHESIS_BUDGET_FALLBACK)
   const sessionId = randomUUID()
   const abort = new AbortController()
@@ -255,8 +366,13 @@ export async function synthesizeFromSource(
     for await (const event of queryLoop({
       provider: deps.provider,
       model: deps.model,
-      systemPrompt: buildSystemPrompt(blueprint, source, deps.sourceTool.name),
-      messages: [{ role: 'user', content: kickoff(source, deps.sourceTool.name) }] as Message[],
+      systemPrompt: buildSystemPrompt(blueprint, source, deps.sourceTool.name, {
+        recordPath,
+        renderPage,
+      }),
+      messages: [
+        { role: 'user', content: kickoff(source, deps.sourceTool.name, recordPath) },
+      ] as Message[],
       tools,
       context: {
         userId: source.userId,
@@ -267,7 +383,7 @@ export async function synthesizeFromSource(
         channelId: source.sourceId,
         workspaceId: source.workspaceId,
         assistantKind: source.assistantKind,
-        docViewId: pageId, // pins patchPage / getCurrentPage / renderView to the brief page
+        docViewId: pageId ?? undefined, // pins patchPage / getCurrentPage / renderView (legacy path)
         abortSignal: abort.signal,
         activeCapabilities: new Set(['crm', 'tasks']),
       },
@@ -285,8 +401,8 @@ export async function synthesizeFromSource(
       }
     }
   } catch (err) {
-    // A wall-clock timeout surfaces as an AbortError; the page-first artifact
-    // survives, so return it as a partial rather than throwing.
+    // A wall-clock timeout surfaces as an AbortError; the record/page-first
+    // artifact survives, so return it as a partial rather than throwing.
     if (abort.signal.aborted) {
       truncated = true
     } else {
@@ -296,5 +412,132 @@ export async function synthesizeFromSource(
     clearTimeout(timer)
   }
 
-  return { pageId, summary: summary.trim(), toolCallCount, truncated }
+  // 4. Record path: finalize completeness, then project the page from the
+  //    record (full-replace) when this surface renders. Projection failures
+  //    degrade — the record is the artifact; the page is only its view.
+  let recordStatus: 'complete' | 'incomplete' | null = null
+  let missing: string[] = []
+  if (recordPath && spec && recordStore && record) {
+    const values: BlueprintRecordFields = Object.fromEntries(written)
+    const completeness = recordCompleteness(spec.fields, values)
+    recordStatus = completeness.status
+    missing = completeness.missing
+    if (renderPage && pageId && deps.projectRecordPage) {
+      try {
+        const blocks = blueprintRecordToBlocks(spec.fields, values, () => randomUUID())
+        if (truncated) {
+          blocks.push({
+            kind: 'text',
+            id: randomUUID(),
+            variant: 'muted',
+            text: 'This fill hit its budget before finishing; the record may be partial.',
+          })
+        }
+        await deps.projectRecordPage({ userId: source.userId, pageId, blocks })
+      } catch (err) {
+        console.warn('[synthesis] page projection failed (record kept):', err)
+      }
+    }
+    await recordStore.finalize(source.userId, record.id, {
+      status: completeness.status,
+      missing: completeness.missing,
+      pageId,
+    })
+  }
+
+  return {
+    pageId,
+    recordId: record?.id ?? null,
+    recordStatus,
+    missing,
+    summary: summary.trim(),
+    toolCallCount,
+    truncated,
+  }
+}
+
+/**
+ * The typed sink of a record-first fill: validate one value against its
+ * contract field, flush it onto the record (incremental — a timed-out run
+ * keeps everything already written), and tell the model what required keys
+ * remain. Keys outside the contract are rejected; the model physically cannot
+ * widen the record.
+ */
+function buildWriteFieldTool(
+  spec: ExtractionSpec,
+  record: BlueprintRecord,
+  store: Pick<BlueprintRecordStore, 'mergeFields'>,
+  userId: string,
+  written: Map<string, unknown>,
+): Tool {
+  const keyList = spec.fields
+    .map((f) => `"${f.key}" (${f.type}${f.required ? ', required' : ''})`)
+    .join(', ')
+  return buildTool({
+    name: 'writeField',
+    description:
+      `Save one blueprint field onto the record. Fields: ${keyList}. ` +
+      'One call per field; re-calling a key overwrites it. Value shapes: markdown/string → text; number → number; date → "YYYY-MM-DD"; boolean → true/false; enum → one of the allowed options; entityRef → { "name": "...", "entityId"?: "..." }.',
+    inputSchema: z.object({
+      key: z.string().min(1).max(64).describe('The field key, exactly as the blueprint lists it.'),
+      value: z.any().describe('The field value, shaped per the field type.'),
+    }),
+    isConcurrencySafe: false,
+    async execute(input) {
+      const needle = input.key.trim()
+      const field =
+        spec.fields.find((f) => f.key === needle) ??
+        spec.fields.find((f) => f.key === needle.toLowerCase())
+      if (!field) {
+        return {
+          data: { error: `No field "${input.key}". Valid keys: ${spec.fields.map((f) => f.key).join(', ')}` },
+          isError: true,
+        }
+      }
+      const validated = validateFieldValue(field, input.value)
+      if (!validated.ok) {
+        return { data: { error: validated.error }, isError: true }
+      }
+      written.set(field.key, validated.value)
+      await store.mergeFields(userId, record.id, { [field.key]: validated.value })
+      const remainingRequired = spec.fields
+        .filter((f) => f.required && !written.has(f.key))
+        .map((f) => f.key)
+      return { data: { saved: field.key, remainingRequired } }
+    },
+  })
+}
+
+/**
+ * Build the page projector a record-first fill uses: full-replace the page's
+ * blocks with the record projection under the store's version CAS, storing a
+ * real undo (the inverse ops restore the prior blocks). One retry on a version
+ * race; a second conflict skips the projection — the record already holds the
+ * data, and the next fill re-projects.
+ */
+export function createRecordPageProjector(
+  docPageStore: Pick<DocPageStore, 'getVersionedPage' | 'applyPatch'>,
+): (params: { userId: string; pageId: string; blocks: Block[] }) => Promise<boolean> {
+  return async ({ userId, pageId, blocks }) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const current = await docPageStore.getVersionedPage(userId, pageId)
+      if (!current) return false
+      const forwardOps: Ops = [
+        ...current.page.blocks.map((b) => ({ op: 'delete' as const, blockId: b.id })),
+        // Anchor-less adds append in order — builds the projection top-to-bottom.
+        ...blocks.map((b) => ({ op: 'add' as const, block: b })),
+      ]
+      const undo = buildUndoEntry(current.page, forwardOps, {}, current.version + 1)
+      const applied = await docPageStore.applyPatch({
+        userId,
+        pageId,
+        expectedVersion: current.version,
+        nextPage: { blocks },
+        undo,
+      })
+      if (applied) return true
+    }
+    console.warn('[synthesis] page projection skipped after version conflicts:', pageId)
+    return false
+  }
 }

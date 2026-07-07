@@ -148,6 +148,8 @@ function makeApp(opts: {
   autoTitle?: { provider?: unknown; docPageStore?: unknown }
   /** Custom page templates store (migration 281). Omit → routes return 503. */
   pageTemplateStore?: unknown
+  /** Blueprint records store (migration 307). Omit → records routes return 503. */
+  blueprintRecordStore?: unknown
 }): { app: express.Express; stores: Stores } {
   const resolvedRole = 'role' in opts ? opts.role ?? null : 'member'
   const stores: Stores = {
@@ -179,6 +181,9 @@ function makeApp(opts: {
         : {}),
       ...(opts.pageTemplateStore
         ? { pageTemplateStore: opts.pageTemplateStore as never }
+        : {}),
+      ...(opts.blueprintRecordStore
+        ? { blueprintRecordStore: opts.blueprintRecordStore as never }
         : {}),
     }),
   )
@@ -268,6 +273,102 @@ describe('[COMP:api/views-routes] custom page templates', () => {
       `/api/workspaces/${WORKSPACE_ID}/page-templates/${TEMPLATE_ID}`,
     )
     expect(res.status).toBe(404)
+  })
+})
+
+describe('[COMP:api/views-routes] blueprint records', () => {
+  const BLUEPRINT_ID = '00000000-0000-0000-0000-0000000000bb'
+  const RECORD_ID = '00000000-0000-0000-0000-0000000000cc'
+  const RECORD = {
+    id: RECORD_ID,
+    workspaceId: WORKSPACE_ID,
+    blueprintId: BLUEPRINT_ID,
+    specSnapshot: [
+      { key: 'summary', heading: 'Summary', instruction: 's', type: 'markdown', required: true },
+    ],
+    subject: 'Acme',
+    anchorKey: `generate-synthesis:${WORKSPACE_ID}:${BLUEPRINT_ID}:acme`,
+    fields: { summary: 'All good.' },
+    status: 'complete' as const,
+    missing: [] as string[],
+    sourceKind: 'workflow' as const,
+    sourceId: 'run-1',
+    sensitivity: 'internal',
+    pageId: null,
+    createdBy: USER_ID,
+    createdAt: '2026-07-07T00:00:00.000Z',
+    updatedAt: '2026-07-07T00:00:00.000Z',
+  }
+  function fakeRecordStore() {
+    return {
+      ensure: vi.fn(),
+      mergeFields: vi.fn(),
+      finalize: vi.fn().mockResolvedValue(null),
+      getById: vi.fn().mockResolvedValue(RECORD),
+      getByAnchor: vi.fn(),
+      getLatestForSource: vi.fn(),
+      getLatestBySubject: vi.fn(),
+      listForBlueprint: vi.fn().mockResolvedValue([RECORD]),
+    }
+  }
+
+  it('GET records returns 503 when the store is not wired', async () => {
+    const { app } = makeApp({ userId: USER_ID })
+    const res = await request(app).get(
+      `/api/workspaces/${WORKSPACE_ID}/blueprints/${BLUEPRINT_ID}/records`,
+    )
+    expect(res.status).toBe(503)
+  })
+
+  it('GET records lists a blueprint\'s records for a member (403 for non-members)', async () => {
+    const store = fakeRecordStore()
+    const { app } = makeApp({ userId: USER_ID, blueprintRecordStore: store })
+    const res = await request(app).get(
+      `/api/workspaces/${WORKSPACE_ID}/blueprints/${BLUEPRINT_ID}/records`,
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.records).toHaveLength(1)
+    expect(res.body.records[0]).toMatchObject({ id: RECORD_ID, subject: 'Acme', status: 'complete' })
+    expect(store.listForBlueprint).toHaveBeenCalledWith(USER_ID, WORKSPACE_ID, BLUEPRINT_ID)
+
+    const { app: nonMember } = makeApp({ userId: USER_ID, role: null, blueprintRecordStore: store })
+    const denied = await request(nonMember).get(
+      `/api/workspaces/${WORKSPACE_ID}/blueprints/${BLUEPRINT_ID}/records`,
+    )
+    expect(denied.status).toBe(403)
+  })
+
+  it('POST open-page mints the projection on the record anchor and links it back', async () => {
+    const store = fakeRecordStore()
+    const docPageStore = {
+      getVersionedPage: vi.fn().mockResolvedValue({ page: { blocks: [] }, version: 3, title: 'Acme', nameOrigin: 'placeholder' }),
+      applyPatch: vi.fn().mockResolvedValue({ newVersion: 4 }),
+    }
+    const { app, stores } = makeApp({
+      userId: USER_ID,
+      blueprintRecordStore: store,
+      autoTitle: { docPageStore },
+    })
+    stores.savedViewStore.findIdByAnchorKey.mockResolvedValue(null)
+    stores.savedViewStore.createDraft.mockResolvedValue({ id: 'page-9' } as SavedView)
+
+    const res = await request(app).post(
+      `/api/workspaces/${WORKSPACE_ID}/blueprint-records/${RECORD_ID}/page`,
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.pageId).toBe('page-9')
+    // Page minted on the RECORD's own anchor (converges with any later fill).
+    expect(stores.savedViewStore.createDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ anchorKey: RECORD.anchorKey, name: 'Acme' }),
+    )
+    // The projection wrote the record's blocks, and the record linked the page.
+    expect(docPageStore.applyPatch).toHaveBeenCalledTimes(1)
+    expect(docPageStore.applyPatch.mock.calls[0][0].nextPage.blocks.length).toBeGreaterThan(0)
+    expect(store.finalize).toHaveBeenCalledWith(USER_ID, RECORD_ID, {
+      status: 'complete',
+      missing: [],
+      pageId: 'page-9',
+    })
   })
 })
 

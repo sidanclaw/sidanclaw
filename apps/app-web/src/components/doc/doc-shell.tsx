@@ -36,8 +36,16 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
-import { docPagePath, isCaptureRequest, pageIdFromPathname } from "@/lib/doc-page-url";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import {
+  docEntryPath,
+  isCaptureRequest,
+  pageIdFromPathname,
+  panelFromSearch,
+  panelFromTabEntry,
+  panelTabEntry,
+  type PanelId,
+} from "@/lib/doc-page-url";
 import {
   activePageId,
   back,
@@ -96,6 +104,8 @@ import { TemplateGallery } from "./template-gallery";
 import { SaveAsTemplateDialog, type SaveAsTemplateInput } from "./save-as-template-dialog";
 import { templateExtractionFromBlocks } from "@/lib/blueprints";
 import { SuggestedView } from "./suggested-view";
+import { ApprovalsPanel } from "./panels/approvals-panel";
+import { AutopilotPanel } from "./panels/autopilot-panel";
 import { requestChatSeed, type ChatSeed } from "@/lib/chat-seed";
 import { docChatRelay } from "@/lib/doc-chat-relay";
 import { isAuthRedirectInFlight } from "@/lib/auth-fetch";
@@ -134,11 +144,20 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   const workspace = useWorkspaceContext();
   const router = useRouter();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   // The active page id is the canonical `/p/<pageId>` path segment — NOT a
   // `?viewId=` query. The shell is mounted at `/w/<id>/p`, and the proxy
   // 301-redirects the legacy `/doc?viewId=` form to `/p/<id>`, so writing
   // a query URL would bounce through a hard redirect and drop the selection.
   const urlViewId = pageIdFromPathname(pathname);
+  // A panel tab (Approvals / Autopilot) rides on `/p?panel=<id>` — the pane
+  // renders the panel instead of a page, keeping the tab strip + sidebar. A
+  // panel URL never has a `[pageId]` segment, so `urlViewId` is null here.
+  const urlPanel = panelFromSearch(searchParams?.toString());
+  // The single "what does the active tab point at" value the tab strip mirrors:
+  // a panel entry (`panel:<id>`), a page id, or null (the Suggested-for-you
+  // home). Page id and panel are mutually exclusive by construction.
+  const urlEntry = urlPanel ? panelTabEntry(urlPanel) : urlViewId;
 
   // Sidebar lists + page-mutation handlers live in the hoisted provider
   // (`DocSidebarDataProvider`, mounted by the workspace layout). The centre
@@ -257,51 +276,56 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // flyout is likewise owned by the provider + rendered by `WorkspaceChrome`.
 
   // ── Tab strip + per-tab browse history — the top "layer" (Row 1) ──────
-  // The active tab's current page is the source of truth for which page is
-  // shown; it is mirrored into the `/p/<pageId>` URL by the sync effect below,
-  // and the existing pathname-keyed fetch loads the body. Seeded once from the
-  // URL; session-scoped (survives soft nav, resets on reload). `doc-tabs.ts`.
+  // The active tab's current ENTRY is the source of truth for what the pane
+  // shows — a page id, a panel sentinel (`panel:<id>`, Approvals / Autopilot),
+  // or null (the Suggested-for-you home). It is mirrored into the URL
+  // (`/p/<id>` or `/p?panel=<id>`) by the sync effect below, and the
+  // pathname/query-keyed reads load the body. Seeded once from the URL;
+  // session-scoped (survives soft nav, resets on reload). `doc-tabs.ts` treats
+  // every entry as an opaque string, so panel entries flow through unchanged.
   const [tabsState, setTabsState] = useState<TabsState>(() =>
-    initTabs(urlViewId),
+    initTabs(urlEntry),
   );
-  const tabsActivePage = activePageId(tabsState);
-  const tabsActivePageRef = useRef(tabsActivePage);
-  tabsActivePageRef.current = tabsActivePage;
-  // Latest pathname, read by the tabs → URL effect for COMPARISON only (never
-  // as a trigger — see below). Updated every render so the effect sees the
-  // committed URL when it runs.
-  const pathnameRef = useRef(pathname);
-  pathnameRef.current = pathname;
+  const tabsActiveEntry = activePageId(tabsState);
+  const tabsActiveEntryRef = useRef(tabsActiveEntry);
+  tabsActiveEntryRef.current = tabsActiveEntry;
+  // Latest URL-derived entry, read by the tabs → URL effect for COMPARISON only
+  // (never as a trigger — see below). Updated every render so the effect sees
+  // the committed URL when it runs.
+  const urlEntryRef = useRef(urlEntry);
+  urlEntryRef.current = urlEntry;
 
-  // tabs → URL: mirror the active tab's current page into the canonical path.
-  // Triggered ONLY by the active page (the tab side owns this direction); it
-  // reads `pathname` through a ref purely to no-op once they already match.
+  // tabs → URL: mirror the active tab's current entry into the canonical URL.
+  // Triggered ONLY by the active entry (the tab side owns this direction); it
+  // reads the URL entry through a ref purely to no-op once they already match.
   //
-  // `pathname` must NOT be a dependency. If it were, an EXTERNAL url change —
+  // The URL entry must NOT be a dependency. If it were, an EXTERNAL url change —
   // the editor's "/"→Page `router.push`, floating-chat's `router.replace`, a
   // deep link, browser back/forward — would re-fire this effect in the render
-  // where `urlViewId` has advanced but `tabsActivePage` still lags by one
+  // where `urlEntry` has advanced but `tabsActiveEntry` still lags by one
   // commit. It would then `router.replace` the URL back to the stale active
-  // page, while the URL → tabs effect simultaneously adopts the new id, leaving
+  // entry, while the URL → tabs effect simultaneously adopts the new one, leaving
   // the two a half-step out of phase forever: the page and its child page
-  // ping-pong endlessly. Reacting to the active page alone lets the URL → tabs
+  // ping-pong endlessly. Reacting to the active entry alone lets the URL → tabs
   // effect own external changes and this effect own tab-driven ones; both guard
   // on equality, so they converge.
   useEffect(() => {
-    const target = docPagePath(workspaceId, tabsActivePage);
-    if (pathnameRef.current !== target) router.replace(target);
-  }, [tabsActivePage, workspaceId, router]);
+    if (urlEntryRef.current !== tabsActiveEntry) {
+      router.replace(docEntryPath(workspaceId, tabsActiveEntry));
+    }
+  }, [tabsActiveEntry, workspaceId, router]);
 
-  // URL → tabs: reconcile a path change from OUTSIDE the tab actions — a
+  // URL → tabs: reconcile a URL change from OUTSIDE the tab actions — a
   // chat-created draft auto-navigation (`floating-chat` calls `router.replace`
-  // directly), a page link, a deep link followed in-session. Reacting to
-  // `urlViewId` alone (latest active page read via the ref) keeps a tab
-  // switch's not-yet-synced URL from being mistaken for an external change;
-  // both effects guard on equality, so they converge with no ping-pong.
+  // directly), a page link, a `?panel=` deep link, a redirect from the legacy
+  // `/approvals` / `/goals` routes, a deep link followed in-session. Reacting to
+  // `urlEntry` alone (latest active entry read via the ref) keeps a tab switch's
+  // not-yet-synced URL from being mistaken for an external change; both effects
+  // guard on equality, so they converge with no ping-pong.
   useEffect(() => {
-    if (urlViewId === tabsActivePageRef.current) return;
-    setTabsState((s) => (urlViewId ? openPage(s, urlViewId) : blankActiveTab(s)));
-  }, [urlViewId]);
+    if (urlEntry === tabsActiveEntryRef.current) return;
+    setTabsState((s) => (urlEntry ? openPage(s, urlEntry) : blankActiveTab(s)));
+  }, [urlEntry]);
 
   const [activeError, setActiveError] = useState<string | null>(null);
   // Centre-pane errors (build / full-width / clearance) route through the
@@ -672,6 +696,20 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
       setTabsState(blankActiveTab);
     }
   }
+
+  // Open a panel (Approvals / Autopilot) in a NEW tab and focus it — the home
+  // dock's needs-you cards call this. Deduped: if a tab already shows the
+  // panel, focus THAT tab instead of spawning a duplicate. The tabs → URL
+  // effect then mirrors the active entry to `/p?panel=<id>`, and the render
+  // branch below paints the panel in the centre pane.
+  const openPanelInNewTab = useCallback((panel: PanelId) => {
+    const entry = panelTabEntry(panel);
+    setTabsState((s) => {
+      const existing = s.tabs.find((tb) => tabPageId(tb) === entry);
+      if (existing) return switchTab(s, existing.key);
+      return openPage(newTab(s), entry);
+    });
+  }, []);
 
   // ── Active-page bridge ─────────────────────────────────────────────────
   // Register the centre-pane handles the hoisted provider's mutation handlers
@@ -1071,12 +1109,29 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   );
 
   // Resolve each open tab to its display label/icon for the top-layer strip.
-  // The active tab prefers the freshest `activeView` metadata; the others read
-  // the sidebar row list; a blank tab resolves to null → a "New tab" chip.
+  // A panel tab (`panel:<id>`) resolves to its fixed label + glyph; the active
+  // page tab prefers the freshest `activeView` metadata; the others read the
+  // sidebar row list; a blank tab resolves to null → a "New tab" chip.
   const tabViews = useMemo<TabView[]>(() => {
     const byId = new Map(allRows.map((r) => [r.id, r] as const));
+    const panelLabel: Record<PanelId, string> = {
+      approvals: t.topbarPanelApprovals,
+      goals: t.topbarPanelAutopilot,
+    };
     return tabsState.tabs.map((tab) => {
-      const pageId = tabPageId(tab);
+      const entry = tabPageId(tab);
+      const panel = panelFromTabEntry(entry);
+      if (panel) {
+        return {
+          key: tab.key,
+          pageId: null,
+          panel,
+          isActive: tab.key === tabsState.activeKey,
+          title: panelLabel[panel],
+          icon: null,
+        };
+      }
+      const pageId = entry;
       const meta =
         pageId && activeView?.id === pageId
           ? activeView
@@ -1094,7 +1149,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         nameOrigin: meta?.nameOrigin,
       };
     });
-  }, [tabsState, allRows, activeView]);
+  }, [tabsState, allRows, activeView, t.topbarPanelApprovals, t.topbarPanelAutopilot]);
 
   return (
     <div
@@ -1140,16 +1195,27 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
             {topError}
           </div>
         )}
-        {!urlViewId && !activeError && (
+        {/* Panel tab (Approvals / Autopilot) — takes precedence over the
+            Suggested home (a panel URL has no `[pageId]`, so `urlViewId` is
+            null and the home branch would otherwise match). The panel owns its
+            own header + scrolling; we give it a filled flex column to sit in. */}
+        {urlPanel ? (
+          <div className="flex min-h-0 flex-1 flex-col">
+            {urlPanel === "approvals" ? <ApprovalsPanel /> : <AutopilotPanel />}
+          </div>
+        ) : null}
+        {!urlPanel && !urlViewId && !activeError && (
           <div className="flex-1 min-h-0 overflow-y-auto">
             {/* Home IS the assistant's full-width "Suggested for you" surface;
                 its slim build bar (onBuild) keeps the type-a-prompt page-build
-                flow that the old centered hero used to own. Spec:
+                flow that the old centered hero used to own. The needs-you cards
+                open Approvals / Autopilot as panel tabs (onOpenPanel). Spec:
                 docs/architecture/features/home-dock.md. */}
             <SuggestedView
               workspaceId={workspaceId}
               assistantId={assistantId}
               userName={user.name}
+              onOpenPanel={openPanelInNewTab}
               onBuild={(text) =>
                 handleBuildPage(text, {
                   model: "pro",
@@ -1160,7 +1226,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
             />
           </div>
         )}
-        {activeError && (
+        {!urlPanel && activeError && (
           <div className="m-6 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {activeError}
           </div>

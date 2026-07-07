@@ -159,7 +159,10 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
     // / the forwarding path. See docs/plans/scheduling-authoring-unification.md.
     hiddenFromModel: true,
     name: 'createScheduledJob',
-    description: 'DEPRECATED — prefer `createWorkflow` with `trigger: { kind: "schedule", schedule, timezone?, delivery: { channel }, policy? }`, which creates the reminder (a 1-step scheduled workflow) in ONE call. This tool builds the identical 1-step scheduled workflow under the hood and is retained for back-compat; never pair it with createWorkflow/scheduleWorkflow for the same reminder. Create a scheduled job. Supports one-time (type="once" with ISO datetime) and recurring (daily/weekly/monthly/cron). Use "once" for reminders like "in 5 minutes". IMPORTANT: Before computing dates for "today", "tomorrow", "next Monday", etc., use the current date from User Context. If unsure, call getTime first. Never guess the date. ALWAYS confirm the schedule with the user before creating. When the result includes a relativeTime field, mention it (e.g. "I\'ll remind you in 3 hours") so the user can catch timezone mistakes. When deliveryChannel differs from the current channel, tell the user where the reminder will be sent (e.g. "I\'ll send it via Telegram").\n\nDelivery target: the result includes a `deliveryTarget.label` naming the EXACT chat and Telegram forum topic the job will post to (e.g. \'Telegram · group "GM Bro" · topic "Research"\'). Surface it verbatim so the user can confirm the destination — do NOT hedge about whether topic-level delivery works; it does, and the label proves it.\n\nTimezone: usually omit. The user\'s current timezone is auto-detected from their request context, so bare times like "remind me at 2pm" bind correctly. Only pass timezone when the user explicitly names a zone ("2pm Hong Kong time").\n\nPolicy fields (silentUntilFire, nagIntervalMins, nagUntilKeyword): set these instead of saving a free-text preference memory when the user attaches a behavioural rule to the job. silentUntilFire=true tells the system not to pre-announce or echo the upcoming fire in unrelated turns. nagIntervalMins + nagUntilKeyword together implement "remind every N min until they reply <keyword>" without the model having to chain follow-up jobs by hand.',
+    // Hidden legacy verb — never read by the model (hiddenFromModel); kept
+    // callable for back-compat and the forwarding path. The workflow surface
+    // (createWorkflow with a schedule trigger) replaced it. See createWorkflow.
+    description: 'Hidden legacy verb — kept callable for back-compat; the workflow surface replaced it. See createWorkflow.',
     inputSchema: z.object({
       schedule: scheduleSchema,
       timezone: z.string().optional().describe('IANA timezone, e.g., Asia/Tokyo. Omit unless the user explicitly named a zone — the tool defaults to the user\'s current timezone.'),
@@ -403,7 +406,10 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
     // policy). Kept callable for back-compat. Scheduling = a workflow trigger.
     hiddenFromModel: true,
     name: 'updateScheduledJob',
-    description: 'Update a scheduled job (schedule, instructions, delivery channel, timezone mode, enable/disable, or policy fields). The job keeps its existing timezone unless you explicitly change it. When the response includes a relativeTime field, mention it so the user can catch timezone mistakes (e.g. "I\'ll run it in 3 hours").\n\nDelivery channel: setting deliveryChannel to telegram/slack/whatsapp while the user is chatting on that channel re-pins the job to the EXACT current chat and Telegram forum topic — captured automatically from the session, no chat/topic id needed or accepted. The result echoes a `deliveryTarget.label` naming the resolved group/topic (surface it so the user can confirm), and a confirmation ping is posted into that channel so the user sees exactly where the update will land. This is the correct way to answer "send my scheduled update to this Telegram topic instead": call updateScheduledJob with deliveryChannel:"telegram" from within that topic. Do not claim topic-level delivery is unsupported or needs extra configuration — it is captured automatically.\n\nMode semantics:\n- "local" (default) — the job is pinned to a specific timezone. On travel, the user is offered the choice to rebase, keep, or float.\n- "user" — the job follows the user\'s current timezone. Useful for "remind me each morning" style reminders that should track the user wherever they are. When flipping a job to "user", pass mode="user" and omit timezone — the tool syncs it to the user\'s current tz automatically.\n\nPolicy fields (silentUntilFire, nagIntervalMins, nagUntilKeyword): use this tool — NOT saveMemory — when the user attaches a behavioural rule to an existing job. e.g. "don\'t mention the pill before 2pm" → set silentUntilFire=true. "nag every 15 min until I say done" → set nagIntervalMins=15, nagUntilKeyword="done". Storing these as memories instead pollutes the per-turn memory index.\n\nTo clear nag fields, pass null explicitly: { nagIntervalMins: null, nagUntilKeyword: null }.',
+    // Hidden legacy verb — never read by the model (hiddenFromModel); kept
+    // callable for back-compat. The workflow surface (updateWorkflow patching
+    // the trigger + enabled) replaced it. See createWorkflow.
+    description: 'Hidden legacy verb — kept callable for back-compat; the workflow surface replaced it. See createWorkflow.',
     inputSchema: z.object({
       jobId: z.string().describe('Job ID to update'),
       schedule: scheduleSchema.optional(),
@@ -583,7 +589,10 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
     // readers. Scheduling = a workflow trigger, not a separate "scheduled job".
     hiddenFromModel: true,
     name: 'searchScheduledJobs',
-    description: 'Search scheduled jobs with filters and pagination. Covers the current user\'s own jobs PLUS every workflow trigger in the current workspace, including triggers created by other members (a workflow trigger fires a shared workflow, so any member can see and manage it; teammates\' personal reminders stay private — ownedByMe distinguishes the two). Defaults to enabled-only and capped at 20 results — pass `enabled: false` to also include paused / disabled jobs, or omit `enabled` entirely to include both. Use `text` for case-insensitive substring matching against the instructions, `schedule` to filter to one of "recurring" / "once", and `cursor` to page through results larger than `limit` (hard max 50).',
+    // Hidden legacy verb — never read by the model (hiddenFromModel); kept
+    // callable for back-compat and internal readers. The workflow surface
+    // (listWorkflows / getWorkflow) replaced it. See createWorkflow.
+    description: 'Hidden legacy verb — kept callable for back-compat; the workflow surface replaced it. See createWorkflow.',
     inputSchema: z.object({
       text: z.string().optional().describe('Case-insensitive substring match against instructions.'),
       enabled: z.boolean().optional().describe('Filter by enabled state. Defaults to true.'),
@@ -695,7 +704,10 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
     // 2026-06-15). Kept callable for back-compat. Scheduling = a workflow trigger.
     hiddenFromModel: true,
     name: 'deleteScheduledJob',
-    description: 'Delete a scheduled job. Works on your own jobs and on workflow triggers in the current workspace, including ones created by other members (a runaway trigger must be stoppable by any member). Teammates\' personal reminders cannot be touched.',
+    // Hidden legacy verb — never read by the model (hiddenFromModel); kept
+    // callable for back-compat. The workflow surface (updateWorkflow to pause /
+    // drop the schedule) replaced it. See createWorkflow.
+    description: 'Hidden legacy verb — kept callable for back-compat; the workflow surface replaced it. See createWorkflow.',
     inputSchema: z.object({
       jobId: z.string().describe('Job ID to delete'),
     }),

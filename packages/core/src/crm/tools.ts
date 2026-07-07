@@ -5,6 +5,7 @@ import type { AccessContext } from '../security/access-context.js'
 import { researchWriteFloor } from '../security/sensitivity.js'
 import { unionCompartments } from '../security/compartments.js'
 import { buildTool, type Tool } from '../tools/types.js'
+import { tolerantInt } from '../tools/schema-tolerance.js'
 import {
   applyExplicitCloses,
   applyExplicitLinks,
@@ -235,6 +236,62 @@ function eventCtx(context: { userId: string; assistantId: string; sessionId: str
   }
 }
 
+// ── Dedupe-merge visibility (Tier B, write-gating-decision-brief.md §3) ──
+//
+// saveContact / saveCompany upsert: the store silently dedupe-merges into
+// an existing active row (same email/name) instead of inserting. The tool
+// result must SURFACE that branch so a merge into the wrong record is
+// visible in the turn (no gate — supersede is chain-restorable, but a
+// SILENT merge is the risk). `CrmStore.createContact/createCompany` return
+// a plain record with no merged flag, so we detect the merge tool-side
+// without a store-contract change: snapshot the exact-identity candidate
+// ids the store would dedupe against BEFORE the save (same access
+// projection), then check whether the saved row's id was pre-existing.
+// A fresh insert always mints a new id, so id ∈ snapshot ⇒ merged.
+
+/** Ids of active contacts whose email OR name exactly matches (case-insensitive) — the store's dedupe keys. */
+async function existingContactMatchIds(
+  store: CrmStore,
+  ctx: AccessContext,
+  identity: { name: string; email?: string | null },
+): Promise<Set<string>> {
+  const ids = new Set<string>()
+  const email = identity.email?.trim().toLowerCase()
+  const name = identity.name.trim().toLowerCase()
+  try {
+    // listContacts filters name/email by ILIKE substring — query the exact
+    // term, then keep only exact (case-insensitive) matches on the field the
+    // store dedupes on (email first, else name).
+    if (email) {
+      const byEmail = await store.listContacts(ctx, { query: identity.email!, limit: 100 })
+      for (const r of byEmail) if ((r.email ?? '').trim().toLowerCase() === email) ids.add(r.id)
+    }
+    const byName = await store.listContacts(ctx, { query: identity.name, limit: 100 })
+    for (const r of byName) if (r.name.trim().toLowerCase() === name) ids.add(r.id)
+  } catch {
+    // Best-effort: a failed pre-scan just means we can't prove a merge, so
+    // the result falls back to "Created" — never blocks the save.
+  }
+  return ids
+}
+
+/** Ids of active companies whose name exactly matches (case-insensitive) — the store's dedupe key. */
+async function existingCompanyMatchIds(
+  store: CrmStore,
+  ctx: AccessContext,
+  name: string,
+): Promise<Set<string>> {
+  const ids = new Set<string>()
+  const norm = name.trim().toLowerCase()
+  try {
+    const rows = await store.listCompanies(ctx, { query: name, limit: 100 })
+    for (const r of rows) if (r.name.trim().toLowerCase() === norm) ids.add(r.id)
+  } catch {
+    // Best-effort — see existingContactMatchIds.
+  }
+  return ids
+}
+
 // ── Row formatters ──────────────────────────────────────────────────
 
 // Every projection emits `entity_id` alongside `id`. `id` is the
@@ -422,7 +479,8 @@ export function createCrmTools(
     requiresCapability: 'crm',
     description:
       'Upsert a contact in the current workspace. Dedupes on email first (case-insensitive), falling back to display name — an existing active contact with the same email or name is superseded with merged tags (union), non-empty phone / email / company_id (incoming wins), and external_ref (shallow merge). Dedupe and reads are scoped to entities visible to you: a same-name contact another member keeps private is never merged into — you get your own row. Use updateContact when you have an explicit id and need to patch other fields. ' +
-      'Pass company_id only after listCompanies confirms the company exists in this workspace; cross-workspace links are rejected by the DB. ' +
+      'When asked to save a contact, call saveContact FIRST with whatever fields you have — name and email alone are enough; company_id is optional. Never let a company lookup or company creation block the contact save: save the contact, then link the company afterwards (via updateContact) once its id is known. ' +
+      'If you do pass company_id, it must be an existing company in this workspace (use listCompanies to confirm); cross-workspace links are rejected by the DB. ' +
       'Pass `links` to record relationship edges from this contact (e.g. cofounder_of a company, attended an event, mentioned in a deal). Use the `entityId` returned from prior saveCompany / saveContact / saveDeal / createEntity calls (or read from list*).',
     inputSchema: z.object({
       name: z.string().min(1).max(256).describe('Full display name (e.g. "Sam Lee").'),
@@ -430,7 +488,7 @@ export function createCrmTools(
       phone: z.string().max(64).optional(),
       company_id: idShape.optional().describe('UUID of an existing company in this workspace. Omit if unknown or unaffiliated. Setting this auto-writes a works_at edge — do NOT also pass a duplicate works_at in `links`.'),
       tags: tagShape.optional(),
-      external_ref: externalRefShape.optional().describe('Reserved for sync-engine round-tripping ({provider, id, url}). Leave empty unless mirroring an existing Attio/HubSpot record.'),
+      external_ref: externalRefShape.optional().describe('Reserved for sync-engine round-tripping ({provider, id, url}). Leave empty unless mirroring a record from an external system.'),
       links: explicitLinksField,
     }),
     async execute(input, context) {
@@ -450,20 +508,28 @@ export function createCrmTools(
       )
       if (reject) return reject
 
+      const dedupeCtx = ctxFor({
+        userId: context.userId,
+        assistantId: context.assistantId,
+        workspaceId: context.workspaceId!,
+        assistantKind: context.assistantKind,
+        clearance: context.clearance,
+        compartments: context.compartments,
+      })
+      // Snapshot the ids the store's upsert-dedupe would target, BEFORE the
+      // write, so the merge branch is visible in the result (Tier B).
+      const priorMatchIds = await existingContactMatchIds(store, dedupeCtx, {
+        name: input.name,
+        email: input.email ?? null,
+      })
+
       try {
         const contact = await store.createContact({
           userId: context.userId,
           workspaceId: context.workspaceId!,
           // Scope the upsert-dedupe to entities this caller can read —
           // never merge into another principal's invisible row.
-          access: ctxFor({
-            userId: context.userId,
-            assistantId: context.assistantId,
-            workspaceId: context.workspaceId!,
-            assistantKind: context.assistantKind,
-            clearance: context.clearance,
-            compartments: context.compartments,
-          }),
+          access: dedupeCtx,
           name: input.name,
           email: input.email ?? null,
           phone: input.phone ?? null,
@@ -493,9 +559,13 @@ export function createCrmTools(
           links: contact.entityId ? input.links : undefined,
         })
         const entitySuffix = contact.entityId ? `, entityId=${contact.entityId}` : ''
+        const merged = priorMatchIds.has(contact.id)
+        const verb = merged
+          ? `Merged into existing contact [${contact.id}${entitySuffix}]: ${contact.name}`
+          : `Created contact [${contact.id}${entitySuffix}]: ${contact.name}`
         return {
           data:
-            `Created contact [${contact.id}${entitySuffix}]: ${contact.name}` +
+            verb +
             formatLinksSummary(linksSummary) +
             formatSuggestions(suggestions),
         }
@@ -546,7 +616,7 @@ export function createCrmTools(
       query: z.string().min(1).max(128).optional().describe('ILIKE substring on name and email.'),
       tag: z.string().min(1).max(64).optional(),
       company_id: idShape.optional(),
-      limit: z.coerce.number().int().min(1).max(100).optional().default(25),
+      limit: tolerantInt({ min: 1, max: 100 }).optional().default(25),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -708,18 +778,23 @@ export function createCrmTools(
       )
       if (reject) return reject
 
+      const dedupeCtx = ctxFor({
+        userId: context.userId,
+        assistantId: context.assistantId,
+        workspaceId: context.workspaceId!,
+        assistantKind: context.assistantKind,
+        clearance: context.clearance,
+        compartments: context.compartments,
+      })
+      // Snapshot the dedupe-target ids before the write (Tier B merge
+      // visibility) — see saveContact.
+      const priorMatchIds = await existingCompanyMatchIds(store, dedupeCtx, input.name)
+
       const company = await store.createCompany({
         userId: context.userId,
         workspaceId: context.workspaceId!,
         // Same dedupe scoping as saveContact — see that call site.
-        access: ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-        }),
+        access: dedupeCtx,
         name: input.name,
         domain: input.domain ?? null,
         tags: input.tags,
@@ -747,9 +822,13 @@ export function createCrmTools(
         links: company.entityId ? input.links : undefined,
       })
       const entitySuffix = company.entityId ? `, entityId=${company.entityId}` : ''
+      const merged = priorMatchIds.has(company.id)
+      const verb = merged
+        ? `Merged into existing company [${company.id}${entitySuffix}]: ${company.name}`
+        : `Created company [${company.id}${entitySuffix}]: ${company.name}`
       return {
         data:
-          `Created company [${company.id}${entitySuffix}]: ${company.name}` +
+          verb +
           formatLinksSummary(linksSummary) +
           formatSuggestions(suggestions),
       }
@@ -792,7 +871,7 @@ export function createCrmTools(
     inputSchema: z.object({
       query: z.string().min(1).max(128).optional().describe('ILIKE substring on name and domain.'),
       tag: z.string().min(1).max(64).optional(),
-      limit: z.coerce.number().int().min(1).max(100).optional().default(25),
+      limit: tolerantInt({ min: 1, max: 100 }).optional().default(25),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -919,7 +998,7 @@ export function createCrmTools(
     description:
       'Create a new deal in the current workspace. A deal is a sales-pipeline opportunity (lead → qualified → proposal → negotiation → won/lost). ' +
       'Stage defaults to `lead` if omitted. At least one of `contact_id` or `company_id` is required — a deal must be linked to who it\'s with. ' +
-      'Amount is in dollars (NUMERIC), not cents — pass 50000 for $50k. close_date is a calendar date in YYYY-MM-DD format. ' +
+      'Amount is a number of dollars, not cents — pass 50000 for $50k. close_date is a calendar date in YYYY-MM-DD format. ' +
       'To change stage later, use advanceDealStage (the canonical stage-transition verb), not updateDeal.',
     inputSchema: z
       .object({
@@ -1020,7 +1099,7 @@ export function createCrmTools(
       stage: stageEnum.or(z.array(stageEnum)).optional(),
       contact_id: idShape.optional(),
       company_id: idShape.optional(),
-      limit: z.coerce.number().int().min(1).max(100).optional().default(25),
+      limit: tolerantInt({ min: 1, max: 100 }).optional().default(25),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -1152,7 +1231,7 @@ export function createCrmTools(
     requiresCapability: 'crm',
     description:
       'Move a deal to a new pipeline stage. Valid stages: lead, qualified, proposal, negotiation, won, lost. ' +
-      'This is the canonical verb for stage transitions — use it instead of updateDeal so the brain has a clean cut-point for stage-change events (when sync ships, this is what pushes to Attio/HubSpot).',
+      'This is the canonical verb for stage transitions - use it instead of updateDeal so the brain has a clean cut-point for stage-change events.',
     inputSchema: z.object({
       id: idShape,
       stage: stageEnum,

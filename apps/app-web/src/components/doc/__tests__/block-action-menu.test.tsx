@@ -1,0 +1,150 @@
+// @vitest-environment jsdom
+/**
+ * [COMP:app-web/block-action-menu] Block menu — capability gating.
+ *
+ * The SAME menu serves the full doc surface and the skill body editor's
+ * md-restricted schema, so what it offers must derive from the mounted
+ * editor's capabilities, not the host: Turn-into lists only
+ * schema-representable kinds, Color needs the `color`/`bgColor` DocAttrs,
+ * Copy-link needs the workspace+page context. Both hosts are exercised with
+ * REAL editors (the pure gates are covered in block-actions.test.ts; this
+ * pins the rendered rows).
+ */
+
+import { describe, expect, it, afterEach } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { Editor, type AnyExtension } from "@tiptap/core";
+import { I18nProvider } from "@/lib/i18n/client";
+import { en } from "@/lib/i18n/dictionaries/en";
+import type { Dictionary } from "@/lib/i18n/dictionaries/en";
+import { skillBodySchemaExtensions } from "@/lib/skill-markdown";
+import { browserDocExtensions } from "../doc-schema";
+import { BlockActionMenu } from "../block-action-menu";
+import type { BlockTarget } from "../block-actions";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const dict = en as unknown as Dictionary;
+const ba = en.docPage.blockActions;
+const slashItems = en.docPage.slashMenu.items;
+
+let root: Root | null = null;
+let host: HTMLElement | null = null;
+let editor: Editor | null = null;
+let editorEl: HTMLElement | null = null;
+let anchor: HTMLElement | null = null;
+
+afterEach(() => {
+  if (root) act(() => root!.unmount());
+  root = null;
+  editor?.destroy();
+  editor = null;
+  editorEl?.remove();
+  editorEl = null;
+  host?.remove();
+  host = null;
+  anchor?.remove();
+  anchor = null;
+});
+
+function mountMenu(opts: { extensions: AnyExtension[]; pageContext?: boolean }) {
+  editorEl = document.createElement("div");
+  document.body.appendChild(editorEl);
+  editor = new Editor({
+    element: editorEl,
+    extensions: opts.extensions,
+    content: {
+      type: "doc",
+      content: [
+        { type: "paragraph", content: [{ type: "text", text: "hi" }] },
+      ],
+    },
+  });
+  const target: BlockTarget = { node: editor.state.doc.child(0), pos: 0 };
+  anchor = document.createElement("div");
+  document.body.appendChild(anchor);
+  host = document.createElement("div");
+  document.body.appendChild(host);
+  root = createRoot(host);
+  act(() => {
+    root!.render(
+      <I18nProvider locale="en" dict={dict}>
+        <BlockActionMenu
+          editor={editor!}
+          getTarget={() => target}
+          anchorEl={anchor}
+          onClose={() => {}}
+          {...(opts.pageContext ? { workspaceId: "w1", pageId: "p1" } : {})}
+        />
+      </I18nProvider>,
+    );
+  });
+}
+
+/** The portalled menu root (the component portals to document.body). */
+function menuEl(): HTMLElement {
+  const el = document.querySelector<HTMLElement>('[data-popover="block-actions"]');
+  expect(el).not.toBeNull();
+  return el!;
+}
+
+function rowLabels(): string[] {
+  return Array.from(
+    menuEl().querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+  ).map((b) => b.textContent ?? "");
+}
+
+/** Open a hover submenu (React derives mouseenter from a bubbling mouseover). */
+function openSubmenu(label: string) {
+  const row = Array.from(
+    menuEl().querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+  ).find((b) => (b.textContent ?? "").includes(label));
+  expect(row).not.toBeUndefined();
+  act(() => {
+    row!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+  });
+}
+
+describe("[COMP:app-web/block-action-menu] capability gating", () => {
+  it("doc host: full menu — Turn-into catalogue, Color, Copy link", () => {
+    mountMenu({ extensions: browserDocExtensions(), pageContext: true });
+    const labels = rowLabels();
+    expect(labels.some((l) => l.includes(ba.turnInto))).toBe(true);
+    expect(labels.some((l) => l.includes(ba.color))).toBe(true);
+    expect(labels.some((l) => l.includes(ba.copyLink))).toBe(true);
+    expect(labels.some((l) => l.includes(ba.duplicate))).toBe(true);
+    expect(labels.some((l) => l.includes(ba.delete))).toBe(true);
+
+    openSubmenu(ba.turnInto);
+    const kinds = Array.from(
+      menuEl().querySelectorAll('[role="menuitemradio"]'),
+    ).map((b) => b.textContent ?? "");
+    expect(kinds).toHaveLength(12);
+    expect(kinds.some((l) => l.includes(slashItems.heading_4))).toBe(true);
+    expect(kinds.some((l) => l.includes(slashItems.to_do))).toBe(true);
+  });
+
+  it("skill host (md schema, no page context): Turn-into filtered, no Color, no Copy link", () => {
+    mountMenu({ extensions: [...skillBodySchemaExtensions] });
+    const labels = rowLabels();
+    expect(labels.some((l) => l.includes(ba.turnInto))).toBe(true);
+    expect(labels.some((l) => l.includes(ba.color))).toBe(false);
+    expect(labels.some((l) => l.includes(ba.copyLink))).toBe(false);
+    // Comment never shows without an onComment handler.
+    expect(labels.some((l) => l.includes(ba.comment))).toBe(false);
+    expect(labels.some((l) => l.includes(ba.duplicate))).toBe(true);
+    expect(labels.some((l) => l.includes(ba.delete))).toBe(true);
+
+    openSubmenu(ba.turnInto);
+    const kinds = Array.from(
+      menuEl().querySelectorAll('[role="menuitemradio"]'),
+    ).map((b) => b.textContent ?? "");
+    // paragraph, h1-3, bulleted, numbered, quote, code — the md set.
+    expect(kinds).toHaveLength(8);
+    expect(kinds.some((l) => l.includes(slashItems.heading_4))).toBe(false);
+    expect(kinds.some((l) => l.includes(slashItems.to_do))).toBe(false);
+    expect(kinds.some((l) => l.includes(slashItems.callout))).toBe(false);
+    expect(kinds.some((l) => l.includes(slashItems.toggle))).toBe(false);
+  });
+});

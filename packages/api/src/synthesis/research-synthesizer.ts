@@ -39,6 +39,8 @@ import {
 import { createFindingsSourceTool } from './findings-source-tool.js'
 import { synthesizeFromSource, type SynthesisBlueprint } from './synthesize.js'
 import { extractionToBlueprintBody } from './blueprint-from-template.js'
+import { createRecordPageProjector } from './synthesize.js'
+import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 
 export type ResearchSynthesizerDeps = {
@@ -62,6 +64,8 @@ export type ResearchSynthesizerDeps = {
   ) => Promise<{ body: string; title?: string } | null>
   /** Resolve a "document" blueprint — a page template carrying an extraction spec. */
   pageTemplateStore?: PageTemplateStore
+  /** Record persistence (migration 307) — document fills run record-first when wired. */
+  blueprintRecordStore?: BlueprintRecordStore
 }
 
 export type ResearchSynthesisArgs = {
@@ -135,6 +139,7 @@ export function createResearchSynthesizer(deps: ResearchSynthesizerDeps): Resear
           slug: tmpl.id,
           body: extractionToBlueprintBody(tmpl.name, tmpl.extraction),
           title: tmpl.name,
+          spec: tmpl.extraction,
         }
       }
     }
@@ -188,7 +193,14 @@ export function createResearchSynthesizer(deps: ResearchSynthesizerDeps): Resear
         sensitivity,
       },
       blueprint,
-      { pageId: args.pageId, anchorKey: `research-synthesis:${args.pageId}` },
+      {
+        pageId: args.pageId,
+        anchorKey: `research-synthesis:${args.pageId}`,
+        // A research fill reaches here only page-anchored (the executor resolved
+        // the anchor upstream), so the page projection renders.
+        renderPage: true,
+        recordSubject: args.sourceRef ?? `page ${args.pageId}`,
+      },
       {
         provider: deps.provider,
         model: deps.model,
@@ -196,6 +208,8 @@ export function createResearchSynthesizer(deps: ResearchSynthesizerDeps): Resear
         buildDocTools,
         brainWriteTools,
         savedViewStore: deps.savedViewStore,
+        blueprintRecordStore: deps.blueprintRecordStore,
+        projectRecordPage: createRecordPageProjector(deps.docPageStore),
         usageStore: deps.usageStore,
         computeCostUsd: deps.computeCostUsd,
       },

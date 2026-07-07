@@ -36,9 +36,15 @@ import {
   type WorkspaceDirectoryStore,
 } from '@sidanclaw/core'
 import { createBrainSourceTool } from './brain-source-tool.js'
-import { synthesizeFromSource, type SynthesisBlueprint } from './synthesize.js'
+import {
+  createRecordPageProjector,
+  synthesizeFromSource,
+  type SynthesisBlueprint,
+} from './synthesize.js'
 import { extractionToBlueprintBody } from './blueprint-from-template.js'
+import { blueprintSubjectAnchorKey } from './blueprint-record-tools.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
+import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
 
 export type GenerateSynthesizerDeps = {
   provider: LLMProvider
@@ -62,6 +68,8 @@ export type GenerateSynthesizerDeps = {
   ) => Promise<{ body: string; title?: string } | null>
   /** Resolve a "document" blueprint — a page template carrying an extraction spec. */
   pageTemplateStore?: PageTemplateStore
+  /** Record persistence (migration 307) — document fills run record-first when wired. */
+  blueprintRecordStore?: BlueprintRecordStore
 }
 
 export type GenerateSynthesisArgs = {
@@ -87,12 +95,21 @@ export type GenerateSynthesisArgs = {
    * draft fills THAT page; otherwise found-or-created by the subject anchor key.
    */
   pageId?: string | null
+  /**
+   * Whether this surface renders the page projection. Default true (the
+   * Generate UI and recording paths keep their pages). Record-only callers
+   * (in-chat fill, workflow output bindings) pass false.
+   */
+  renderPage?: boolean
 }
 
 /** The callback a chat "generate" tool / route invokes to draft from the brain. */
-export type GenerateSynthesizeFn = (
-  args: GenerateSynthesisArgs,
-) => Promise<{ pageId: string | null } | null>
+export type GenerateSynthesizeFn = (args: GenerateSynthesisArgs) => Promise<{
+  pageId: string | null
+  recordId?: string | null
+  recordStatus?: 'complete' | 'incomplete' | null
+  missing?: string[]
+} | null>
 
 /** Episode sensitivity is 4-value (`private` exists); the actor clearance ladder is 3-value. */
 function clearanceOf(sensitivity: string): Sensitivity {
@@ -106,11 +123,12 @@ function titleFor(slug: string, subject: string, name?: string): string {
   return `${blueprintName} - ${subject}`.slice(0, 200)
 }
 
-/** Stable, collision-resistant anchor key for a (workspace, blueprint, subject) draft. */
-function anchorKeyFor(workspaceId: string, slug: string, subject: string): string {
-  const subjectKey = subject.trim().toLowerCase().replace(/\s+/g, '-').slice(0, 80)
-  return `generate-synthesis:${workspaceId}:${slug}:${subjectKey}`
-}
+/**
+ * Stable, collision-resistant anchor key for a (workspace, blueprint, subject)
+ * draft — shared with the direct-save tool so a generate fill and a
+ * `saveBlueprintRecord` for the same subject converge on one record + page.
+ */
+const anchorKeyFor = blueprintSubjectAnchorKey
 
 /**
  * Build the GENERATE synthesizer. Returns `null` when the blueprint slug resolves
@@ -151,6 +169,7 @@ export function createGenerateSynthesizer(deps: GenerateSynthesizerDeps): Genera
           slug: tmpl.id,
           body: extractionToBlueprintBody(tmpl.name, tmpl.extraction),
           title: titleFor(tmpl.id, args.subject, tmpl.name),
+          spec: tmpl.extraction,
         }
       }
     }
@@ -218,6 +237,8 @@ export function createGenerateSynthesizer(deps: GenerateSynthesizerDeps): Genera
       {
         pageId: args.pageId ?? null,
         anchorKey: anchorKeyFor(args.workspaceId, blueprint.slug, args.subject),
+        renderPage: args.renderPage ?? true,
+        recordSubject: args.subject,
       },
       {
         provider: deps.provider,
@@ -226,6 +247,8 @@ export function createGenerateSynthesizer(deps: GenerateSynthesizerDeps): Genera
         buildDocTools,
         brainWriteTools,
         savedViewStore: deps.savedViewStore,
+        blueprintRecordStore: deps.blueprintRecordStore,
+        projectRecordPage: createRecordPageProjector(deps.docPageStore),
         usageStore: deps.usageStore,
         computeCostUsd: deps.computeCostUsd,
       },

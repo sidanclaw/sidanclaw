@@ -134,8 +134,19 @@ describe('[COMP:api/generate-synthesizer] createGenerateSynthesizer', () => {
       getById: vi.fn().mockResolvedValue({
         id: 'tmpl-1',
         name: 'SOW',
+        // The real store normalizes stored JSONB to the typed v2 contract on
+        // read — the mock hands back what `getById` actually returns.
         extraction: {
-          sections: [{ heading: 'Scope', instruction: 'What we will do', outputType: 'prose' }],
+          fields: [
+            {
+              key: 'scope',
+              heading: 'Scope',
+              instruction: 'What we will do',
+              type: 'markdown',
+              required: false,
+              outputType: 'prose',
+            },
+          ],
           capture: ['company'],
         },
       }),

@@ -19,6 +19,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { reviewSession, selectCandidateSessions, type SkillReviewLLM } from '../skill-review-worker.js'
 import { query } from '../../db/client.js'
+import { createSkillManageTool } from '@sidanclaw/core'
 
 // We mock the `query` import so the worker's analytics + session-touch DB
 // calls don't hit a real DB. Vitest's auto-mock keeps the API simple.
@@ -50,6 +51,8 @@ vi.mock('@sidanclaw/core', async (importOriginal) => {
         approvalsStore: {
           async createStagedSkillUpdate() { return { approvalId: 'a' } },
           async createStagedSkillCreation() { return { approvalId: 'a' } },
+          async findPendingStagedSkillUpdate() { return null },
+          async findPendingStagedSkillCreation() { return null },
         },
         enablementStore: { async enableForOriginating() {} },
       }).inputSchema,
@@ -375,6 +378,59 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
     expect(analytics.recorded.map((e) => e.eventName)).not.toContain('skill_review_action_succeeded')
     // The cycle is clean (no applied action, no failure).
     expect(outcome).toBe('reviewed')
+  })
+
+  it('logs `skill_review_action_deduped` and spends no cap when the tool skips a duplicate proposal', async () => {
+    const analytics = makeAnalyticsStore()
+    const skillId = '00000000-0000-0000-0000-0000000000d9'
+    const workspaceSkillStore = makeWorkspaceSkillStore({
+      skills: [{ rowId: skillId, name: 'X', description: 'd', content: 'c', state: 'active' }],
+    })
+    const { fileStore, approvalsStore } = makeMinimalDeps()
+    const llm = makeLLM({
+      actions: [{ action: 'patch_skill', skillId, patch: { newContent: 'AGAIN' } }],
+    })
+
+    // The tool reports the dedupe skip for this cycle's single action.
+    vi.mocked(createSkillManageTool).mockReturnValueOnce({
+      name: 'skill_manage',
+      description: 'mocked',
+      inputSchema: undefined,
+      isConcurrencySafe: false,
+      isReadOnly: false,
+      requiresConfirmation: false,
+      execute: vi.fn(async () => ({
+        data: {
+          actionTaken: 'skipped_pending_approval',
+          targetSkillId: skillId,
+          approvalId: 'existing-1',
+        },
+      })),
+    } as never)
+
+    const events: string[] = []
+    const outcome = await reviewSession(CANDIDATE, {
+      workspaceSkillStore,
+      fileStore,
+      approvalsStore,
+      analyticsStore: analytics as unknown as import('@sidanclaw/core').AnalyticsStore,
+      reviewLLM: llm,
+      leaseHolderId: 'lease-1',
+      leaseMinutes: 5,
+      dailyOpCap: 10,
+      now: () => new Date(),
+      onEvent: (e) => events.push(e.type),
+    })
+
+    const names = analytics.recorded.map((e) => e.eventName)
+    expect(names).toContain('skill_review_action_deduped')
+    // A dedupe skip is neither an op (no cap spend) nor a failure.
+    expect(names).not.toContain('skill_review_action_succeeded')
+    expect(names).not.toContain('skill_review_action_failed')
+    expect(events).toContain('action_deduped')
+    expect(outcome).toBe('reviewed')
+    // The lease is still released.
+    expect(workspaceSkillStore.releaseCalls).toEqual([skillId])
   })
 
   it('honors mid-cycle cap — stops applying further actions once cap is reached', async () => {

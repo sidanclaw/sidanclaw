@@ -242,6 +242,9 @@ export type WorkflowDefinition = {
 
 // ── Records ───────────────────────────────────────────────────────────────
 
+/** Mig 308 — the retirement ladder. Archived rows are hidden by default. */
+export type WorkflowLifecycleState = "active" | "stale" | "archived";
+
 export type WorkflowSummary = {
   id: string;
   workspaceId: string;
@@ -252,6 +255,12 @@ export type WorkflowSummary = {
   pausedReason?: string | null;
   trigger: WorkflowTrigger;
   stepCount: number;
+  /** Mig 308 — sweep-maintained; `stale` badges the card, `archived` hides it. */
+  lifecycleState?: WorkflowLifecycleState;
+  /** Mig 308 — human-readable cause of the current lifecycle state. */
+  lifecycleReason?: string | null;
+  /** Mig 308 — the lifecycle-sweep veto flag. */
+  pinned?: boolean;
   updatedAt: string;
   lastRunAt?: string | null;
 };
@@ -293,6 +302,12 @@ export type WorkflowFull = {
   maxTurns: number | null;
   /** Mig 196. When true, executor injects the `deep` research budget. */
   researchMode: boolean;
+  /** Mig 308 — sweep-maintained retirement ladder position. */
+  lifecycleState?: WorkflowLifecycleState;
+  /** Mig 308 — human-readable cause of the current lifecycle state. */
+  lifecycleReason?: string | null;
+  /** Mig 308 — the lifecycle-sweep veto flag. */
+  pinned?: boolean;
   /** Present on GET detail. The real firing rows; see WorkflowTriggerJob. */
   triggerJobs?: WorkflowTriggerJob[];
   createdAt: string;
@@ -358,12 +373,45 @@ export type ApprovalOutcome = "approved" | "rejected";
 
 export async function listWorkflows(
   workspaceId: string,
+  opts?: { includeArchived?: boolean },
 ): Promise<WorkflowSummary[]> {
   const q = new URLSearchParams({ workspaceId });
+  // Mig 308 — the server hides archived workflows unless asked; the Workflow
+  // page asks so it can render the collapsed Archived section.
+  if (opts?.includeArchived) q.set("state", "all");
   const res = await authFetch(`${API_URL}/api/workflows?${q.toString()}`);
   if (!res.ok) return [];
   const data = (await res.json()) as { workflows?: WorkflowSummary[] };
   return Array.isArray(data.workflows) ? data.workflows : [];
+}
+
+/** Mig 308 — restore an archived/stale workflow to `active` (re-enables it). */
+export async function restoreWorkflow(workflowId: string): Promise<boolean> {
+  const res = await authFetch(
+    `${API_URL}/api/workflows/${encodeURIComponent(workflowId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lifecycleState: "active" }),
+    },
+  );
+  return res.ok;
+}
+
+/** Mig 308 — toggle the lifecycle-sweep veto flag. */
+export async function setWorkflowPinned(
+  workflowId: string,
+  pinned: boolean,
+): Promise<boolean> {
+  const res = await authFetch(
+    `${API_URL}/api/workflows/${encodeURIComponent(workflowId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned }),
+    },
+  );
+  return res.ok;
 }
 
 export async function getWorkflowFull(workflowId: string): Promise<WorkflowFull | null> {
@@ -524,6 +572,10 @@ export type UpdateWorkflowInput = {
   modelAlias?: WorkflowModelAlias;
   maxTurns?: number | null;
   researchMode?: boolean;
+  /** Mig 308 — lifecycle-sweep veto flag. */
+  pinned?: boolean;
+  /** Mig 308 — restore only: `'active'` is the single accepted value. */
+  lifecycleState?: "active";
 };
 
 export type UpdateWorkflowResult =

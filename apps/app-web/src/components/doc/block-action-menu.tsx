@@ -16,6 +16,18 @@
  * `human_block` thread (no inline mark). The divider — the only other
  * block-level atom — stays minimal (colouring / commenting a rule is moot).
  *
+ * The menu is **capability-gated**, not doc-page-hardwired, so restricted
+ * hosts (the skill body editor's md-only StarterKit schema) reuse it as-is:
+ * Turn-into lists only the kinds `editorTurnIntoKinds` finds representable in
+ * THIS editor's schema (an unfiltered list would throw on `toggleTaskList`
+ * where task lists aren't registered, or no-op on `setHeading` past the
+ * configured levels); Color shows only when the node type declares the
+ * `color`/`bgColor` attrs (`blockDeclaresColor` — plain StarterKit nodes
+ * don't, and `setNodeMarkup` silently drops undeclared attrs); Copy-link
+ * needs the `workspaceId`+`pageId` page context (a markdown-string host has
+ * no page to deep-link into). The full doc schema passes every gate, so the
+ * doc surface renders the complete menu unchanged.
+ *
  * Rendered through a portal to `document.body`: the grip lives inside the drag
  * handle's tippy popup (a transformed ancestor), which would trap a `fixed`
  * child — so the menu escapes to the body and positions itself against the
@@ -53,10 +65,12 @@ import { BLOCK_HASH_PREFIX, docBlockHash } from "@/lib/doc-page-url";
 import { TURN_INTO_ITEMS, type TurnIntoKind } from "./turn-into-menu";
 import {
   applyTurnIntoAt,
+  blockDeclaresColor,
   canHoldCaret,
   clearBlockColor,
   deleteBlockSelectionOrAt,
   duplicateBlockAt,
+  editorTurnIntoKinds,
   ensureBlockId,
   selectBlockText,
   setBlockColor,
@@ -143,8 +157,11 @@ export type BlockActionMenuProps = {
    *  whole-block (`human_block`) comment keyed on the block's id (minted here if
    *  absent). Absent when comments are unavailable. */
   onBlockComment?: (blockId: string) => void;
-  workspaceId: string;
-  pageId: string;
+  /** Page context backing "Copy link to block". Absent on a non-page host
+   *  (the skill body editor — a markdown string, no deep-linkable page), which
+   *  hides the row instead of minting a link that resolves to nothing. */
+  workspaceId?: string;
+  pageId?: string;
 };
 
 export function BlockActionMenu({
@@ -239,6 +256,16 @@ export function BlockActionMenu({
   // Comment for AI: text blocks anchor a precise range (`onComment`); embeds
   // anchor the whole block (`onBlockComment`, a `human_block` thread).
   const showComment = (!!onComment && hasText) || (!!onBlockComment && isEmbed);
+  // ── Capability gates — the menu offers what THIS editor can do ──────────
+  // The same menu serves the full doc surface and restricted hosts (the skill
+  // body editor's md-only schema), so each doc-schema-dependent section keys
+  // off a capability, not the host: Turn-into lists only schema-representable
+  // kinds, Color needs the node to declare the `color`/`bgColor` attrs, and
+  // Copy-link needs a page to deep-link into.
+  const schemaKinds = editorTurnIntoKinds(editor);
+  const turnIntoItems = TURN_INTO_ITEMS.filter((it) => schemaKinds.has(it.id));
+  const colorable = (caretBlock || isEmbed) && blockDeclaresColor(node);
+  const canCopyLink = Boolean(workspaceId && pageId);
 
   /** Run a mutating action on the LIVE target, then close. */
   const act = (fn: (target: BlockTarget) => void) => () => {
@@ -249,7 +276,7 @@ export function BlockActionMenu({
 
   const onCopyLink = () => {
     const tg = getTarget();
-    if (!tg || typeof window === "undefined") return;
+    if (!tg || !workspaceId || !pageId || typeof window === "undefined") return;
     const id = ensureBlockId(editor, tg.pos);
     if (!id) return; // node type can't carry a blockId — don't mint a dead link
     const hashHref = `${BLOCK_HASH_PREFIX}${id}`;
@@ -317,7 +344,7 @@ export function BlockActionMenu({
       onMouseDown={(e) => e.preventDefault()}
       className="z-[60] w-60 rounded-md border border-border bg-popover py-1 text-sm shadow-lg"
     >
-      {isTextblock || isEmbed ? (
+      {(isTextblock || isEmbed) && turnIntoItems.length > 0 ? (
         <SubmenuRow
           icon={Type}
           label={ba.turnInto}
@@ -325,7 +352,7 @@ export function BlockActionMenu({
           onOpen={() => openSub("turn")}
           onClose={scheduleCloseSub}
         >
-          {TURN_INTO_ITEMS.map((it) => {
+          {turnIntoItems.map((it) => {
             const Ic = it.icon;
             const active = currentKind === it.id;
             return (
@@ -345,7 +372,7 @@ export function BlockActionMenu({
         </SubmenuRow>
       ) : null}
 
-      {caretBlock || isEmbed ? (
+      {colorable ? (
         <SubmenuRow
           icon={Palette}
           label={ba.color}
@@ -393,14 +420,16 @@ export function BlockActionMenu({
 
       <Divider />
 
-      <MenuButton onClick={onCopyLink} keepFocus>
-        {copied ? (
-          <Check className="h-4 w-4 flex-shrink-0 text-primary" aria-hidden />
-        ) : (
-          <Link2 className="h-4 w-4 flex-shrink-0 text-muted-foreground" aria-hidden />
-        )}
-        <span className="flex-1 truncate">{copied ? ba.copied : ba.copyLink}</span>
-      </MenuButton>
+      {canCopyLink ? (
+        <MenuButton onClick={onCopyLink} keepFocus>
+          {copied ? (
+            <Check className="h-4 w-4 flex-shrink-0 text-primary" aria-hidden />
+          ) : (
+            <Link2 className="h-4 w-4 flex-shrink-0 text-muted-foreground" aria-hidden />
+          )}
+          <span className="flex-1 truncate">{copied ? ba.copied : ba.copyLink}</span>
+        </MenuButton>
+      ) : null}
 
       <MenuButton onClick={act((tg) => duplicateBlockAt(editor, tg.pos))}>
         <CopyPlus className="h-4 w-4 flex-shrink-0 text-muted-foreground" aria-hidden />

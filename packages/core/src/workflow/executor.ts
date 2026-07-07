@@ -858,10 +858,16 @@ async function dispatchAssistantCall(
     // recurring workflow saves only new facts). See
     // docs/architecture/features/workflow.md → "assistant_call memory continuity".
     workflowId: ctx.workflow.id,
-    // Blueprint to fill on a research step (structural-synthesis P4). The callee
-    // executor runs the research fan-out as the gather, then synthesizes this
-    // blueprint into the anchored page. Absent → free-form authoring.
+    // Blueprint binding (output contract). On a research+anchored step the
+    // callee executor runs the fan-out as the gather and synthesizes this
+    // blueprint (record + page). On any OTHER step it is the step's OUTPUT
+    // blueprint: the callee is directed to persist its deliverable as this
+    // blueprint's typed record. Absent → free-form.
     blueprintId: step.blueprintId,
+    // Run identity for the record provenance chain: records saved during this
+    // consult stamp source_id=<runId>, which is what the next run's
+    // `{{lastRun.output.<key>}}` reads.
+    workflowRunId: ctx.run.id,
     caller: {
       workspaceId: ctx.run.workspaceId,
       assistantId: ctx.primaryAssistantId,

@@ -457,6 +457,18 @@ export type WorkflowStepRunStatus = (typeof WORKFLOW_STEP_RUN_STATUSES)[number]
 // → claimNextPendingRunSystem and docs → "Event run queue".
 export type WorkflowTriggerKind = 'manual' | 'schedule' | 'event'
 
+/**
+ * Mig 308. The workflow lifecycle ladder — `active` → `stale` (idle past the
+ * staleness window) → `archived` (hidden from default listings, restorable).
+ * Maintained by the lifecycle sweep worker; a PATCH writing `'active'` is the
+ * restore path. See docs/architecture/features/workflow-lifecycle.md.
+ */
+export const WORKFLOW_LIFECYCLE_STATES = ['active', 'stale', 'archived'] as const
+export type WorkflowLifecycleState = (typeof WORKFLOW_LIFECYCLE_STATES)[number]
+
+/** Mig 308. Digest-pass verdicts stamped on `workflows.digest_verdict`. */
+export type WorkflowDigestVerdict = 'skill_candidate' | 'not_repeatable'
+
 // ── Records ─────────────────────────────────────────────────────────────
 
 /** Workflow-level model alias — matches the per-assistant column vocabulary. */
@@ -498,6 +510,23 @@ export type WorkflowRecord = {
    * the name once this flips.
    */
   nameManuallySet: boolean
+  /**
+   * Mig 308. Lifecycle ladder position. Archived rows are excluded from
+   * default listings (web grid, sidebar, chat `listWorkflows`) and restored
+   * via PATCH `lifecycleState: 'active'`. Maintained by the lifecycle sweep
+   * worker — see docs/architecture/features/workflow-lifecycle.md.
+   */
+  lifecycleState: WorkflowLifecycleState
+  /** Mig 308. When `lifecycleState` last changed. Null = never left `active`. */
+  lifecycleTransitionedAt: Date | null
+  /** Mig 308. Human-readable cause of the current state (mirrors `pausedReason`). */
+  lifecycleReason: string | null
+  /** Mig 308. User veto — a pinned workflow is exempt from every lifecycle sweep. */
+  pinned: boolean
+  /** Mig 308. When the digest pass reviewed this workflow. Null = not yet. */
+  digestedAt: Date | null
+  /** Mig 308. `'skill_candidate' | 'not_repeatable'` once digested. */
+  digestVerdict: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -538,6 +567,17 @@ export type WorkflowRunOutcome = {
   state: Record<string, unknown>
   /** ISO timestamp the run terminated. */
   finishedAt: string
+  /**
+   * The run's blueprint-record output (`{{lastRun.output.<key>}}`) — the
+   * typed fields of the record the run saved under its bound blueprint.
+   * Enriched at READ time by the run store (join on
+   * `blueprint_records.source_id = runId`), never composed by the executor,
+   * so historical runs gain it retroactively. Absent when the run saved no
+   * record. See structural-synthesis.md → "The record".
+   */
+  output?: Record<string, unknown>
+  /** The record's completeness (`complete` | `incomplete`) — gate handoffs on it. */
+  outputStatus?: string
 }
 
 /**
@@ -602,7 +642,17 @@ export type WorkflowStore = {
 
   getById(userId: string, id: string): Promise<WorkflowRecord | null>
 
-  list(userId: string, workspaceId: string): Promise<WorkflowRecord[]>
+  /**
+   * Workspace listing. Archived workflows are EXCLUDED by default (mig 308)
+   * so every consumer — web grid, sidebar panel, chat `listWorkflows`, home
+   * signals — hides retired automations for free; pass `includeArchived`
+   * from the surfaces that render the archived section.
+   */
+  list(
+    userId: string,
+    workspaceId: string,
+    opts?: { includeArchived?: boolean },
+  ): Promise<WorkflowRecord[]>
 
   /**
    * Patch any subset of name / description / definition / enabled / trigger /
@@ -628,6 +678,14 @@ export type WorkflowStore = {
       maxTurns: number | null
       researchMode: boolean
       nameManuallySet: boolean
+      /**
+       * Mig 308. `'active'` restores a stale/archived workflow (stamps
+       * `lifecycle_transitioned_at`, clears `lifecycle_reason`). Routes only
+       * ever write `'active'` — degradation is the sweep worker's job.
+       */
+      lifecycleState: WorkflowLifecycleState
+      /** Mig 308. The lifecycle-sweep veto flag. */
+      pinned: boolean
     }>,
   ): Promise<WorkflowRecord | null>
 

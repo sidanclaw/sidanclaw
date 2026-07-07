@@ -25,6 +25,9 @@ export {
   type PageWorkflowRunSummary,
   RESERVED_OUTCOME_VAR_NAMES,
   type ReservedOutcomeVarName,
+  WORKFLOW_LIFECYCLE_STATES,
+  type WorkflowLifecycleState,
+  type WorkflowDigestVerdict,
   type WorkflowStepRunRecord,
   type WorkflowStore,
   type WorkflowRunStore,
@@ -137,3 +140,17 @@ export {
   type GenerateWorkflowTitleParams,
   type GenerateWorkflowTitleResult,
 } from './auto-title.js'
+
+export {
+  WORKFLOW_LIFECYCLE_DEFAULTS,
+  isRecurringTrigger,
+  lastActivityAt,
+  touchedSinceTransition,
+  isArmedListener,
+  isOneOffWorkflow,
+  decideLifecycle,
+  pickDigestBatch,
+  type WorkflowLifecycleConfig,
+  type WorkflowLifecycleRow,
+  type WorkflowLifecycleDecision,
+} from './lifecycle.js'

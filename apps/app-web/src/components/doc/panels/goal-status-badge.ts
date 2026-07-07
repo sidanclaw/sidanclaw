@@ -1,8 +1,9 @@
 /**
- * Goal status → badge classes. Shared by the goals board (`page.tsx`) and the
- * goal detail page (`[goalId]/page.tsx`) so the status chip reads identically on
- * both. Keyed on the closed `GoalStatus` union, so adding a status is a compile
- * error here until a colour is chosen.
+ * Goal status → badge classes. Shared by the Autopilot board panel
+ * (`autopilot-panel.tsx`) and the goal detail page
+ * (`app/w/[workspaceId]/goals/[goalId]/page.tsx`) so the status chip reads
+ * identically on both. Keyed on the closed `GoalStatus` union, so adding a
+ * status is a compile error here until a colour is chosen.
  *
  * [COMP:app-web/goals-board]
  */

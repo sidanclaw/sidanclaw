@@ -684,3 +684,167 @@ describe('[COMP:engine/tool-executor-approval-refactor] tool_invocation approval
     expect(port).not.toHaveBeenCalled()
   })
 })
+
+// ── Posture A: autonomous approvals-row fallback (no resolver) ──
+// write-gating-decision-brief.md §4 — a needs-confirmation tool on an
+// autonomous path (no confirmationResolver) MUST NOT execute. With the
+// createToolInvocationApproval port present it PARKS (approvals row +
+// honest tool result); with no port either it hard-REJECTS.
+
+describe('[COMP:engine/tool-executor-approval-refactor] autonomous approvals-row fallback', () => {
+  it('parks (not rejects) a needs-confirmation tool when the port is present and no resolver', async () => {
+    type PortFn = NonNullable<ToolContext['createToolInvocationApproval']>
+    const port = vi.fn<PortFn>(async () => 'approval_auto_1')
+
+    const context: ToolContext = {
+      ...ctx,
+      channelType: 'workflow', // autonomous — no live human
+      createToolInvocationApproval: port,
+    }
+    const tools = new Map<string, Tool>([
+      ['sensitiveTool', makeConfirmationTool({ displayLines: ['merge X <- Y'] })],
+    ])
+    const executor = createToolExecutor({
+      tools,
+      context,
+      loopDetector: createLoopDetector(),
+      // NO confirmationResolver — this is the autonomous path.
+    })
+
+    executor.addTool('call_1', 'sensitiveTool', { hello: 'world' })
+    const results = await drainResults(executor)
+
+    // The approvals row was persisted with the enriched preview lines.
+    expect(port).toHaveBeenCalledTimes(1)
+    const portArg = port.mock.calls[0]![0]
+    expect(portArg.toolName).toBe('sensitiveTool')
+    expect(portArg.toolInput).toEqual({ hello: 'world' })
+    expect(portArg.displayLines).toEqual(['merge X <- Y'])
+
+    // The tool did NOT execute (no 'sensitiveTool:ok'); it parked with an
+    // honest isError result that names the approval id and the queue.
+    expect(results).toHaveLength(1)
+    const r = results[0] as Extract<ContentBlock, { type: 'tool_result' }>
+    expect(r.isError).toBe(true)
+    expect(String(r.content)).not.toContain('sensitiveTool:ok')
+    expect(String(r.content)).toContain('PARKED FOR APPROVAL')
+    expect(String(r.content)).toContain('approval_auto_1')
+    expect(String(r.content)).toContain('merge X <- Y')
+  })
+
+  it('fires onAwaitingApproval with the parked call for the durability checkpoint', async () => {
+    type PortFn = NonNullable<ToolContext['createToolInvocationApproval']>
+    const port = vi.fn<PortFn>(async () => 'approval_auto_2')
+    type AwaitFn = NonNullable<Parameters<typeof createToolExecutor>[0]['onAwaitingApproval']>
+    const onAwaitingApproval = vi.fn<AwaitFn>()
+
+    const context: ToolContext = {
+      ...ctx,
+      channelType: 'assistant-call',
+      createToolInvocationApproval: port,
+    }
+    const tools = new Map<string, Tool>([
+      ['sensitiveTool', makeConfirmationTool({ displayLines: ['line A'] })],
+    ])
+    const executor = createToolExecutor({
+      tools,
+      context,
+      loopDetector: createLoopDetector(),
+      onAwaitingApproval,
+    })
+
+    executor.addTool('call_1', 'sensitiveTool', { a: 1 })
+    await drainResults(executor)
+
+    expect(onAwaitingApproval).toHaveBeenCalledTimes(1)
+    const ev = onAwaitingApproval.mock.calls[0]![0]
+    expect(ev.approvalId).toBe('approval_auto_2')
+    expect(ev.toolCallId).toBe('call_1')
+    expect(ev.toolName).toBe('sensitiveTool')
+    expect(ev.describeText).toBe('line A')
+  })
+
+  it('hard-rejects (fail-closed) when neither a resolver nor the port is present', async () => {
+    const tools = new Map<string, Tool>([['sensitiveTool', makeConfirmationTool()]])
+    const executor = createToolExecutor({
+      tools,
+      context: { ...ctx, channelType: 'workflow' }, // no port, no resolver
+      loopDetector: createLoopDetector(),
+    })
+
+    executor.addTool('call_1', 'sensitiveTool', {})
+    const results = await drainResults(executor)
+
+    expect(results).toHaveLength(1)
+    const r = results[0] as Extract<ContentBlock, { type: 'tool_result' }>
+    expect(r.isError).toBe(true)
+    expect(String(r.content)).not.toContain('sensitiveTool:ok')
+    expect(String(r.content)).toContain('no confirmation channel is available')
+    expect(String(r.content)).toContain('NOT executed')
+  })
+
+  it('rejects fail-closed when the port throws — never falls through to execute', async () => {
+    type PortFn = NonNullable<ToolContext['createToolInvocationApproval']>
+    const port = vi.fn<PortFn>(async () => {
+      throw new Error('db down')
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const context: ToolContext = {
+      ...ctx,
+      channelType: 'workflow',
+      createToolInvocationApproval: port,
+      // No resolver — autonomous path.
+    }
+    const tools = new Map<string, Tool>([['sensitiveTool', makeConfirmationTool()]])
+    const executor = createToolExecutor({
+      tools,
+      context,
+      loopDetector: createLoopDetector(),
+    })
+
+    executor.addTool('call_1', 'sensitiveTool', {})
+    const results = await drainResults(executor)
+
+    expect(port).toHaveBeenCalledTimes(1)
+    // Fail-CLOSED (unlike the interactive path's fail-OPEN): the tool did
+    // NOT execute; it fell through to the hard rejection.
+    const r = results[0] as Extract<ContentBlock, { type: 'tool_result' }>
+    expect(r.isError).toBe(true)
+    expect(String(r.content)).not.toContain('sensitiveTool:ok')
+    expect(String(r.content)).toContain('no confirmation channel is available')
+    expect(warnSpy).toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+
+  it('leaves the interactive resolver path unchanged when a resolver IS present (ignores the port fallback)', async () => {
+    type PortFn = NonNullable<ToolContext['createToolInvocationApproval']>
+    const port = vi.fn<PortFn>(async () => 'approval_interactive')
+
+    const context: ToolContext = {
+      ...ctx,
+      channelType: 'web', // interactive
+      createToolInvocationApproval: port,
+    }
+    const tools = new Map<string, Tool>([['sensitiveTool', makeConfirmationTool()]])
+    const executor = createToolExecutor({
+      tools,
+      context,
+      loopDetector: createLoopDetector(),
+      confirmationResolver: makeResolverThatAllows(), // human says allow
+    })
+
+    executor.addTool('call_1', 'sensitiveTool', {})
+    const results = await drainResults(executor)
+
+    // The interactive branch (resolver present) ran: the tool executed
+    // after the allow, and did NOT take the autonomous "parked" path.
+    expect(results).toHaveLength(1)
+    expect(results[0]).toMatchObject({ toolUseId: 'call_1', content: 'sensitiveTool:ok' })
+    const r = results[0] as Extract<ContentBlock, { type: 'tool_result' }>
+    expect(String(r.content)).not.toContain('PARKED FOR APPROVAL')
+    // The port was still used (interactive branch persists a row too), but
+    // exactly once, and the tool ran — proving no double-park.
+    expect(port).toHaveBeenCalledTimes(1)
+  })
+})

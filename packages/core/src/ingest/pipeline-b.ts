@@ -65,6 +65,7 @@ import {
   classifySensitivity,
   type SensitivityClassification,
 } from './sensitivity-classifier.js'
+import { SPOTLIGHT_RULE, spotlightContent } from './spotlight.js'
 import type { PlatformEngagementMetrics, SourceKind } from './types.js'
 
 // ── Public types ─────────────────────────────────────────────────────
@@ -391,7 +392,8 @@ const CONTENT_CHAR_LIMIT = 128 * 1024
 
 const SYSTEM_PROMPT =
   'You are the extraction step of a knowledge-management pipeline. ' +
-  'Output ONE JSON object and nothing else. No markdown fences. No commentary.'
+  'Output ONE JSON object and nothing else. No markdown fences. No commentary. ' +
+  SPOTLIGHT_RULE
 
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s
@@ -404,14 +406,17 @@ function buildExtractionPrompt(
 ): string {
   const allowedEdges = EDGE_TYPES.join(' | ')
   const allowedEphemeralReasons = EPHEMERAL_REASONS.join(' | ')
+  // The content is untrusted third-party text — spotlight it so an embedded
+  // "ignore previous instructions" string lands as DATA, not a command. The
+  // markers pair with SPOTLIGHT_RULE in SYSTEM_PROMPT. Spotlight the truncated
+  // text (what actually reaches the model) so the collision-free nonce is
+  // derived over the exact bytes present in the prompt.
   return `Source: ${episode.sourceKind}
 Occurred at: ${episode.occurredAt.toISOString()}
 Channel sensitivity: ${episode.sensitivity}
 
 Content:
-"""
-${truncate(content, CONTENT_CHAR_LIMIT)}
-"""
+${spotlightContent(truncate(content, CONTENT_CHAR_LIMIT))}
 
 You are extracting structured knowledge from this content. Memory is the LAST resort, not the default. Run every observation through the precedence ladder below and emit it at the FIRST tier that fits.
 
@@ -599,6 +604,59 @@ async function recordExtractionUsage(
   } catch (err) {
     console.warn(
       `[pipeline-b] extraction usage recording failed for episode ${episode.id}:`,
+      err instanceof Error ? err.message : err,
+    )
+  }
+}
+
+/**
+ * Attribute the 4-tier resolver's LLM disambiguation call (`writeEntity`
+ * third pass, `resolver.ts` → `disambiguateWithLLM`) as ingest overhead.
+ * This is a SECOND LLM call in the same Pipeline B flow as extraction —
+ * same episode, same billing party — but a distinct purpose (entity
+ * disambiguation), so it carries its own `triggerKey`
+ * (`pipeline_b_entity_resolution`) for per-trigger rollups while sharing
+ * the `overhead:extraction` billing bucket. It rides the extraction
+ * source deliberately: `overhead:entity-resolution` is not yet in the
+ * `usage_tracking.source` CHECK constraint (latest is migration 309), and
+ * emitting an undeclared source would 23514-fail every LLM-tier resolve
+ * silently — the exact failure class migration 305 closed. See
+ * docs/architecture/brain/ingest-pipeline.md → "Resolver LLM metering"
+ * for the punchlisted migration that would give it a dedicated source.
+ *
+ * Only the `llm` tier produces usage; exact/canonical/fuzzy tiers resolve
+ * locally and carry none. Best-effort like `recordExtractionUsage`:
+ * absent store / missing usage skip; a store failure logs and never
+ * breaks ingestion.
+ */
+async function recordResolverUsage(
+  deps: PipelineBDeps,
+  episode: PipelineBEpisode,
+  usage: TokenUsage | null | undefined,
+  model: string | undefined,
+): Promise<void> {
+  if (!deps.usage || !usage) return
+  const userId = episode.createdByUserId || episode.userId
+  if (!userId) return
+  const usageModel = model ?? deps.entityResolver?.llm?.model ?? deps.model
+  try {
+    await deps.usage.recordUsage({
+      userId,
+      assistantId: episode.assistantId ?? '',
+      workspaceId: episode.workspaceId,
+      sessionId: null,
+      model: usageModel,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
+      actualCostUsd: calculateCost(usageModel, usage),
+      source: 'overhead:extraction',
+      triggerKey: 'pipeline_b_entity_resolution',
+    })
+  } catch (err) {
+    console.warn(
+      `[pipeline-b] resolver usage recording failed for episode ${episode.id}:`,
       err instanceof Error ? err.message : err,
     )
   }
@@ -1410,6 +1468,13 @@ async function writeEntity(
         fuzzyThreshold: deps.entityResolver.fuzzyThreshold ?? 0.92,
         llm: deps.entityResolver.llm,
       })
+      // Meter the resolver's LLM disambiguation spend the moment it's
+      // known — `usage`/`model` are only present on the `llm` tier (both
+      // `resolved` and `ambiguous` variants carry them). Record before
+      // branching so an ambiguous/no-match outcome is billed too.
+      if ('usage' in resolved) {
+        await recordResolverUsage(deps, episode, resolved.usage, resolved.model)
+      }
       if (resolved.status === 'resolved'
         && (resolved.tier === 'fuzzy' || resolved.tier === 'llm')) {
         const match = candidates.find((c) => c.id === resolved.entityId)

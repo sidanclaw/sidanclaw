@@ -292,9 +292,92 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     // ── END WU-6.5 INTEGRATION POINT ──
 
     if (needsConfirmation && !options.confirmationResolver) {
-      // 'ask' tool in a context with no confirmation infrastructure
-      // (e.g. scheduled jobs, inter-assistant callees). Reject — never
-      // silently bypass user confirmation.
+      // 'ask' tool on an autonomous path with no live confirmation
+      // channel (scheduled jobs → workflow executor, workflow steps,
+      // inter-assistant callees). Two sub-cases, both fail-closed (the
+      // tool NEVER executes here — that's the Posture A invariant,
+      // docs/plans/write-gating-decision-brief.md §4):
+      //
+      //   (a) The dispatcher wired `createToolInvocationApproval`
+      //       (WU-6.3 port). Park the call: persist a
+      //       `pending_approvals kind='tool_invocation'` row the owner
+      //       resolves out-of-band, and return an honest "parked for
+      //       approval" result (isError so the model REPORTS it, never
+      //       narrates success). The workflow/A2A run's Approvals queue
+      //       surfaces the row — same lane a `tool_call` step already uses.
+      //
+      //   (b) No port either (smoke tests, bare worker contexts). Reject
+      //       exactly as before — never silently bypass confirmation.
+      if (options.context.createToolInvocationApproval) {
+        // Enrich the parked row with the same human-readable lines the
+        // interactive card shows (e.g. dedupeEntities' merge preview).
+        let displayLines: string[] | undefined
+        if (toolDef.describeConfirmation) {
+          try {
+            const lines = await toolDef.describeConfirmation(t.input, options.context)
+            if (lines && lines.length > 0) displayLines = lines
+          } catch (err) {
+            console.debug(`[tool-executor] describeConfirmation failed for ${t.name}:`, err)
+          }
+        }
+        const expiresAt = new Date(Date.now() + (options.confirmationTimeoutMs ?? 300_000))
+        let approvalId: string | undefined
+        try {
+          approvalId = await options.context.createToolInvocationApproval({
+            toolName: t.name,
+            toolInput: t.input,
+            description: toolDef.description,
+            displayLines,
+            allowPersistentApproval: toolDef.allowPersistentApproval ?? false,
+            expiresAt,
+          })
+        } catch (err) {
+          // Fail-CLOSED: a DB blip on the autonomous path must not run the
+          // write. Fall through to the hard rejection below — unlike the
+          // interactive path (which fails OPEN to the in-memory resolver),
+          // there is no human here to catch a silent execution.
+          console.warn(
+            `[tool-executor] autonomous approval row creation failed for ${t.name}; rejecting fail-closed:`,
+            err,
+          )
+        }
+
+        if (approvalId) {
+          // Durability checkpoint — same event the interactive branch
+          // fires, so a Cloud Run restart mid-approval replays correctly.
+          if (options.onAwaitingApproval) {
+            options.onAwaitingApproval({
+              approvalId,
+              toolCallId: t.id,
+              toolName: t.name,
+              toolInput: t.input,
+              describeText:
+                displayLines && displayLines.length > 0
+                  ? displayLines.join('\n')
+                  : toolDef.description,
+              expiresAt,
+            })
+          }
+          const preview =
+            displayLines && displayLines.length > 0 ? `\n${displayLines.join('\n')}` : ''
+          t.result = {
+            type: 'tool_result',
+            toolUseId: t.id,
+            name: t.name,
+            content:
+              `PARKED FOR APPROVAL: "${t.name}" makes a change that needs a human's OK, and this is an ` +
+              `automated run with nobody to confirm in-line. It was NOT executed — it is waiting in the ` +
+              `workspace Approvals queue (approval id ${approvalId}) for the owner to approve or reject. ` +
+              `Do NOT retry it or claim it is done; tell the user it is pending their approval.${preview}`,
+            isError: true,
+          }
+          t.status = 'completed'
+          wake()
+          return
+        }
+        // approvalId undefined → port threw → fall through to reject.
+      }
+
       t.result = {
         type: 'tool_result',
         toolUseId: t.id,

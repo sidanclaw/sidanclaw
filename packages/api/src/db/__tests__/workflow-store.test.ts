@@ -315,7 +315,9 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
 
   it('getLatestOutcomeForWorkflowSystem reads the latest TERMINAL run, excluding the current one, no RLS (mig 279)', async () => {
     const outcome = { status: 'completed', summary: 's', logs: [], blockers: [], todo: [], state: {}, finishedAt: '2026-06-22T00:00:00Z' }
-    mockQuery.mockResolvedValueOnce({ rows: [{ outcome }], rowCount: 1 } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'run-prior', outcome }], rowCount: 1 } as never)
+    // No blueprint record for that run → the plain outcome comes back.
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     const got = await runs.getLatestOutcomeForWorkflowSystem('wf-1', 'run-current')
     const [sql, values] = mockQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain("status IN ('completed', 'failed', 'timeout')")
@@ -323,6 +325,28 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
     expect(sql).toContain('ORDER BY finished_at DESC NULLS LAST, started_at DESC')
     expect(values).toEqual(['wf-1', 'run-current'])
     expect(got).toEqual(outcome)
+  })
+
+  it("getLatestOutcomeForWorkflowSystem enriches lastRun with the run's blueprint-record output", async () => {
+    const outcome = { status: 'completed', summary: 's', logs: [], blockers: [], todo: [], state: {}, finishedAt: '2026-06-22T00:00:00Z' }
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'run-prior', outcome }], rowCount: 1 } as never)
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ fields: { summary: 'typed', budget: 12 }, status: 'complete' }],
+      rowCount: 1,
+    } as never)
+    const got = await runs.getLatestOutcomeForWorkflowSystem('wf-1', 'run-current')
+    // The record query joins on the PRIOR run's id — this is what
+    // `{{lastRun.output.<key>}}` resolves from. Both run-stamped producers
+    // match: direct saves ('workflow') and the research-synthesis arm
+    // ('research', whose sourceRef is the runId on workflow-origin fills).
+    const [recSql, recValues] = mockQuery.mock.calls[1] as [string, unknown[]]
+    expect(recSql).toContain("source_kind IN ('workflow', 'research') AND source_id = $1")
+    expect(recValues).toEqual(['run-prior'])
+    expect(got).toMatchObject({
+      summary: 's',
+      output: { summary: 'typed', budget: 12 },
+      outputStatus: 'complete',
+    })
   })
 
   it('getLatestOutcomeForWorkflowSystem returns null when there is no prior terminal run', async () => {

@@ -25,7 +25,11 @@ import { listUsableWorkspaceConnectors } from '../connectors/usable-connectors.j
 import { effectiveReadClearance, effectiveReadCompartments } from '../db/workspace-store.js'
 import * as github from '../github/client.js'
 import type { AccessContext, Sensitivity } from '@sidanclaw/core'
-import { normalisePath } from '@sidanclaw/core'
+import { splitFrontmatterBlock, resolveRepoFilePath } from '../knowledge/repo-files.js'
+
+// Re-exported for existing consumers/tests; the implementations moved to
+// `../knowledge/repo-files.ts` so the assistant repo writer shares them.
+export { splitFrontmatterBlock, resolveRepoFilePath } from '../knowledge/repo-files.js'
 
 /**
  * The GitHub calls the edit-proposal flow makes. Injectable so the route
@@ -349,6 +353,17 @@ async function createGithubKnowledgeSource(opts: {
         // docs/architecture/features/knowledge-base.md → "Workspace credential scoping".
         connectorInstanceId,
       })
+
+      // Inline write-capability probe so a just-created source is writable
+      // for the assistant KB tools immediately instead of after the first
+      // sync tick (≤15 min). Best-effort — the tick re-probes regardless.
+      try {
+        const perms = await github.getRepoPermissions(pat, repoOwner, repoName)
+        await knowledgeStore.updateSourceWriteAccess(source.id, perms.push)
+      } catch (probeErr) {
+        console.warn('[knowledge] create-time write-access probe failed:', probeErr instanceof Error ? probeErr.message : String(probeErr))
+      }
+
       res.status(201).json({
         ...source,
         validation: {
@@ -899,42 +914,10 @@ export function knowledgeRoutes({
   return router
 }
 
-// ── Edit-proposal helpers (module-level, pure) ─────────────────
-
-/**
- * Split a raw markdown file into its verbatim frontmatter block (including
- * both `---` fences and the trailing newline) and the body. The DB stores
- * the frontmatter-STRIPPED body, so a proposal splices the edited body
- * under the file's existing frontmatter byte-for-byte — sensitivity, tags,
- * and any custom metadata survive an edit untouched.
- */
-export function splitFrontmatterBlock(raw: string): { frontmatter: string; body: string } {
-  const match = raw.match(/^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*\r?\n?/)
-  if (!match) return { frontmatter: '', body: raw }
-  return { frontmatter: match[0], body: raw.slice(match[0].length) }
-}
-
-/**
- * Locate the repo file backing an entry path. `normalisePath` strips both
- * `.md` and a trailing `/index`, so `products/vault` may live at
- * `products/vault.md` OR `products/vault/index.md` — the only reliable
- * mapping is probing the actual tree: pick the `.md` blob under
- * `rootPath` whose normalised relative path equals the entry path.
- */
-export function resolveRepoFilePath(
-  treePaths: string[],
-  rootPath: string,
-  entryPath: string,
-): string | null {
-  const prefix = rootPath.replace(/\/+$/, '')
-  for (const p of treePaths) {
-    if (!p.endsWith('.md')) continue
-    if (prefix && !p.startsWith(prefix)) continue
-    const relative = prefix ? p.slice(prefix.length).replace(/^\//, '') : p
-    if (normalisePath(relative) === entryPath) return p
-  }
-  return null
-}
+// ── Edit-proposal helpers ──────────────────────────────────────
+// `splitFrontmatterBlock` / `resolveRepoFilePath` live in
+// `../knowledge/repo-files.ts` (shared with the assistant repo writer)
+// and are re-exported at the top of this file.
 
 /** Branch-name-safe slug from an entry path's last segment. */
 function branchSlug(entryPath: string): string {

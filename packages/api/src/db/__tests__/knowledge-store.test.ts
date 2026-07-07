@@ -383,3 +383,42 @@ describe('[COMP:api/knowledge-store] per-assistant source scoping', () => {
     })
   })
 })
+
+describe('[COMP:api/kb-write-capability] source write-access cache', () => {
+  it('updateSourceWriteAccess persists the probe result with a checked-at stamp', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    await store.updateSourceWriteAccess('src1', true)
+    const sql = mockQuery.mock.calls[0][0] as string
+    expect(sql).toContain('SET write_access = $1')
+    expect(sql).toContain('write_access_checked_at = now()')
+    expect(mockQuery.mock.calls[0][1]).toEqual([true, 'src1'])
+  })
+
+  it('source reads carry the cached probe columns', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await store.listSourcesForAssistant('a1')
+    const sql = mockQuery.mock.calls[0][0] as string
+    expect(sql).toContain('write_access AS "writeAccess"')
+    expect(sql).toContain('write_access_checked_at AS "writeAccessCheckedAt"')
+  })
+
+  it('updateManualEntryContent is body-only and refuses repo-synced rows in the predicate', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'e1', path: 'notes/x' }], rowCount: 1 } as never)
+    const updated = await store.updateManualEntryContent('t1', 'e1', 'New body')
+    expect(updated).toEqual({ id: 'e1', path: 'notes/x' })
+    const sql = mockQuery.mock.calls[0][0] as string
+    expect(sql).toContain('SET content = $1')
+    expect(sql).toContain('source_id IS NULL')
+    expect(sql).toContain('workspace_id = $3')
+    // Body-only: no other column assignments besides updated_at.
+    expect(sql).not.toContain('tags =')
+    expect(sql).not.toContain('sensitivity =')
+    expect(mockQuery.mock.calls[0][1]).toEqual(['New body', 'e1', 't1'])
+  })
+
+  it('updateManualEntryContent returns null when the id is not a manual entry in the workspace', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    const updated = await store.updateManualEntryContent('t1', 'repo-entry', 'x')
+    expect(updated).toBeNull()
+  })
+})

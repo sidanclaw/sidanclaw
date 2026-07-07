@@ -320,6 +320,71 @@ describe('[COMP:tools/crm-contacts] saveContact / getContact / listContacts / up
     expect(store.data.contacts).toHaveLength(1)
   })
 
+  // ── Tier B: dedupe-merge visibility (write-gating-decision-brief.md §3) ──
+  // A fresh insert always mints a new id; a dedupe-merge returns an
+  // EXISTING id. The tool snapshots the pre-existing exact-identity ids
+  // before the save and, when the saved id is one of them, surfaces
+  // "Merged into existing" in the result — so a merge is visible in-turn
+  // without a confirmation gate.
+  //
+  // makeFakeStore always inserts, which can never exercise the merge
+  // branch — this variant's createContact dedupe-merges like the real
+  // store (email first, else case-insensitive name): a match UPDATES the
+  // existing row and returns it, so the saved id lands in the tool's
+  // pre-save snapshot.
+  function makeMergeAwareStore(): ReturnType<typeof makeFakeStore> {
+    const store = makeFakeStore()
+    const plainCreate = store.createContact.bind(store)
+    store.createContact = async (params) => {
+      const email = params.email?.toLowerCase()
+      const name = params.name.toLowerCase()
+      const existing =
+        (email ? store.data.contacts.find((c) => c.email?.toLowerCase() === email) : undefined) ??
+        store.data.contacts.find((c) => c.name.toLowerCase() === name)
+      if (existing) {
+        existing.name = params.name
+        if (params.email) existing.email = params.email
+        if (params.phone) existing.phone = params.phone
+        existing.updatedAt = new Date()
+        return { ...existing }
+      }
+      return plainCreate(params)
+    }
+    return store
+  }
+  it('saveContact says "Created" on a fresh insert (no pre-existing match)', async () => {
+    const store = makeMergeAwareStore()
+    const tools = createCrmTools(store)
+    const res = await tools.saveContact.execute({ name: 'Sam Lee', email: 'sam@acme.example' }, ctx)
+    expect(res.isError).toBeFalsy()
+    expect(res.data as string).toContain('Created contact')
+    expect(res.data as string).not.toContain('Merged into existing')
+  })
+
+  it('saveContact says "Merged into existing" when the store dedupe-merges by email', async () => {
+    const store = makeMergeAwareStore()
+    const tools = createCrmTools(store)
+    // First save inserts.
+    await tools.saveContact.execute({ name: 'Sam Lee', email: 'sam@acme.example' }, ctx)
+    // Second save with the same email hits the merge branch.
+    const res = await tools.saveContact.execute(
+      { name: 'Samuel Lee', email: 'sam@acme.example' },
+      ctx,
+    )
+    expect(res.isError).toBeFalsy()
+    expect(res.data as string).toContain('Merged into existing contact')
+    expect(store.data.contacts).toHaveLength(1) // no duplicate row
+  })
+
+  it('saveContact says "Merged into existing" when the store dedupe-merges by name', async () => {
+    const store = makeMergeAwareStore()
+    const tools = createCrmTools(store)
+    await tools.saveContact.execute({ name: 'Sam Lee' }, ctx)
+    const res = await tools.saveContact.execute({ name: 'sam lee', phone: '+852 1' }, ctx)
+    expect(res.isError).toBeFalsy()
+    expect(res.data as string).toContain('Merged into existing contact')
+  })
+
   it('getContact returns full record', async () => {
     const store = makeFakeStore()
     const tools = createCrmTools(store)
@@ -597,6 +662,46 @@ describe('[COMP:crm/cross-entity] cross-entity filters', () => {
     expect(surface).toHaveLength(13)
     for (const tool of surface) {
       expect(tool.requiresCapability).toBe('crm')
+    }
+  })
+
+  // WS2 eval finding: the SUT lifted third-party product names (Attio,
+  // HubSpot) straight out of a field description and recommended them to
+  // users as if they were sidanclaw connectors. Model-visible CRM text
+  // (top-level tool description + every input-field .describe()) must name
+  // no external product — describe capabilities generically instead.
+  it('no CRM tool description names a third-party CRM product', () => {
+    const tools = createCrmTools(makeFakeStore())
+    const surface = [
+      tools.saveContact, tools.getContact, tools.listContacts, tools.updateContact,
+      tools.saveCompany, tools.getCompany, tools.listCompanies, tools.updateCompany,
+      tools.saveDeal, tools.getDeal, tools.listDeals, tools.updateDeal, tools.advanceDealStage,
+    ]
+    // Walk a Zod schema and collect every attached .describe() string, so the
+    // sweep reaches field-level descriptions (where the leak actually was),
+    // not just the top-level tool description.
+    const collectDescriptions = (schema: unknown, out: string[]): void => {
+      if (!schema || typeof schema !== 'object') return
+      const def = (schema as { _def?: Record<string, unknown> })._def
+      if (!def) return
+      if (typeof def.description === 'string') out.push(def.description)
+      const shape = def.shape
+      const shapeObj = typeof shape === 'function' ? (shape as () => Record<string, unknown>)() : shape
+      if (shapeObj && typeof shapeObj === 'object') {
+        for (const child of Object.values(shapeObj as Record<string, unknown>)) collectDescriptions(child, out)
+      }
+      for (const key of ['innerType', 'schema', 'type'] as const) {
+        if (def[key]) collectDescriptions(def[key], out)
+      }
+      if (Array.isArray(def.options)) for (const opt of def.options) collectDescriptions(opt, out)
+    }
+
+    const banned = /attio|hubspot|salesforce|pipedrive/i
+    for (const tool of surface) {
+      const texts: string[] = [tool.description]
+      collectDescriptions(tool.inputSchema, texts)
+      const offender = texts.find((t) => banned.test(t))
+      expect(offender, `${tool.name} description names a third-party CRM product`).toBeUndefined()
     }
   })
 })

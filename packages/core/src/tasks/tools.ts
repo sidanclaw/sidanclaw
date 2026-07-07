@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { AccessContext } from '../security/access-context.js'
 import { unionCompartments } from '../security/compartments.js'
 import { buildTool, type Tool } from '../tools/types.js'
+import { tolerantBoolean, tolerantInt } from '../tools/schema-tolerance.js'
 import {
   applyExplicitCloses,
   applyExplicitLinks,
@@ -287,8 +288,8 @@ export function createTaskTools(
       due_after: isoDateOrDateTime.optional(),
       tag: z.string().min(1).max(64).optional(),
       parent_id: idShape.optional().describe('Pass a parent task id to fetch its sub-tasks.'),
-      include_archived: z.boolean().optional().default(false),
-      limit: z.coerce.number().int().min(1).max(100).optional().default(25),
+      include_archived: tolerantBoolean().optional().default(false),
+      limit: tolerantInt({ min: 1, max: 100 }).optional().default(25),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -349,7 +350,17 @@ export function createTaskTools(
       throw err
     }
     if (!updated) {
-      return { data: `Task ${id} not found in workspace.`, isError: true }
+      // Supersession-aware guidance: every task edit mints a NEW id
+      // (bi-temporal supersession), and the dominant prod failure here was
+      // the model re-editing with a stale id and retrying it into the
+      // 5-strike breaker (11 breaker hits / 43% updateTask failure rate,
+      // 2026-07-07 ability audit §2.2). Tell it exactly how to recover and
+      // explicitly forbid the retry.
+      return {
+        data:
+          `Task ${id} not found in workspace. If you edited this task earlier, that edit returned a NEW task id (every update supersedes the row) — reuse the id from that result, or call listTasks/getTask to re-resolve. Do NOT retry this exact id.`,
+        isError: true,
+      }
     }
     return { ok: true, record: updated, changedFields: Object.keys(fields) }
   }

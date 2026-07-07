@@ -37,7 +37,24 @@ export const pageTemplateCategorySchema = z.enum(PAGE_TEMPLATE_CATEGORIES)
 export const BLUEPRINT_CAPTURE_KINDS = ['company', 'contact', 'deal', 'task'] as const
 export type BlueprintCaptureKind = (typeof BLUEPRINT_CAPTURE_KINDS)[number]
 
-/** One section of a blueprint: a heading plus the instruction that fills it. */
+/**
+ * Typed field kinds a blueprint contract can demand (contract v2). `markdown`
+ * is the v1 prose/list/table section; the rest make the record a real handoff
+ * contract (workflows read values, not prose). See structural-synthesis.md ->
+ * "The blueprint object" and docs/plans/blueprint-output-contract.md §3.
+ */
+export const EXTRACTION_FIELD_TYPES = [
+  'markdown',
+  'string',
+  'number',
+  'date',
+  'boolean',
+  'enum',
+  'entityRef',
+] as const
+export type ExtractionFieldType = (typeof EXTRACTION_FIELD_TYPES)[number]
+
+/** One section of a v1 blueprint (pre-typed wire shape; lifted to a field on parse). */
 export const extractionSectionSchema = z.object({
   heading: z.string().min(1).max(200),
   instruction: z.string().min(1).max(2000),
@@ -46,17 +63,119 @@ export const extractionSectionSchema = z.object({
 export type ExtractionSection = z.infer<typeof extractionSectionSchema>
 
 /**
+ * One field of the blueprint contract: a stable `key` (the handoff address —
+ * `{{lastRun.output.<key>}}`, `getBlueprintRecord` reads), a display heading,
+ * the fill instruction, and a value type. `enum` fields carry `options`;
+ * `entityRef` fields carry `entityKind`. `outputType` survives as the
+ * presentation hint for `markdown` fields.
+ */
+export const extractionFieldSchema = z
+  .object({
+    key: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-z0-9][a-z0-9_-]*$/, 'lowercase slug (a-z, 0-9, -, _)'),
+    heading: z.string().min(1).max(200),
+    instruction: z.string().min(1).max(2000),
+    type: z.enum(EXTRACTION_FIELD_TYPES).default('markdown'),
+    options: z.array(z.string().min(1).max(120)).min(2).max(24).optional(),
+    entityKind: z.enum(BLUEPRINT_CAPTURE_KINDS).optional(),
+    required: z.boolean().default(false),
+    outputType: z.enum(['prose', 'list', 'table']).optional(),
+  })
+  .superRefine((field, ctx) => {
+    if (field.type === 'enum' && !field.options) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'enum fields need `options`' })
+    }
+    if (field.type === 'entityRef' && !field.entityKind) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'entityRef fields need `entityKind`' })
+    }
+  })
+export type ExtractionField = z.infer<typeof extractionFieldSchema>
+
+/** Slugify a heading into a field key; `taken` de-dupes with -2, -3, … suffixes. */
+export function fieldKeyFromHeading(heading: string, taken?: Set<string>): string {
+  const base =
+    heading
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 48) || 'field'
+  if (!taken) return base
+  let key = base
+  for (let i = 2; taken.has(key); i += 1) key = `${base}-${i}`
+  taken.add(key)
+  return key
+}
+
+/**
+ * Lift a v1 spec (`sections`, untyped) into the v2 wire shape (`fields`, typed)
+ * WITHOUT rewriting stored JSONB: every parse boundary runs this, so old rows,
+ * old clients, and the skill-draft LLM (which still emits `sections`) all land
+ * on the same typed contract. v1 sections become `markdown` fields keyed by
+ * their slugified heading.
+ */
+function liftExtractionSpecInput(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
+  const obj = raw as Record<string, unknown>
+  if (!Array.isArray(obj.sections) || Array.isArray(obj.fields)) return raw
+  const taken = new Set<string>()
+  const fields = obj.sections.map((s) => {
+    const sec = (s ?? {}) as Record<string, unknown>
+    const heading = typeof sec.heading === 'string' ? sec.heading : 'Section'
+    return {
+      key: fieldKeyFromHeading(heading, taken),
+      heading,
+      instruction: sec.instruction,
+      type: 'markdown',
+      outputType: sec.outputType ?? 'prose',
+      required: false,
+    }
+  })
+  return { fields, capture: obj.capture }
+}
+
+/**
  * The `extraction` spec that turns a plain page template into a BLUEPRINT — the
- * sections (each a heading + extraction instruction) plus which brain entities to
- * capture. A template with no extraction spec is just a skeleton; add the spec and
- * the synthesis engine can fill it from a source. See
+ * typed field contract (each field a key + heading + fill instruction + type)
+ * plus which brain entities to capture. A template with no extraction spec is
+ * just a skeleton; add the spec and the synthesis engine can fill it from a
+ * source into a `blueprint_records` row (+ an optional page projection). Accepts
+ * the v1 `sections` wire shape and lifts it. See
  * docs/architecture/brain/structural-synthesis.md -> "The blueprint object".
  */
-export const extractionSpecSchema = z.object({
-  sections: z.array(extractionSectionSchema).min(1).max(20),
-  capture: z.array(z.enum(BLUEPRINT_CAPTURE_KINDS)).default([]),
-})
+export const extractionSpecSchema = z.preprocess(
+  liftExtractionSpecInput,
+  z
+    .object({
+      fields: z.array(extractionFieldSchema).min(1).max(30),
+      capture: z.array(z.enum(BLUEPRINT_CAPTURE_KINDS)).default([]),
+    })
+    .superRefine((spec, ctx) => {
+      const seen = new Set<string>()
+      for (const f of spec.fields) {
+        if (seen.has(f.key)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate field key "${f.key}"` })
+        }
+        seen.add(f.key)
+      }
+    }),
+)
 export type ExtractionSpec = z.infer<typeof extractionSpecSchema>
+
+/**
+ * Normalize a stored/foreign extraction value (v1 or v2 JSONB, or null) into
+ * the v2 contract. Store reads run through this so every consumer downstream
+ * of `PageTemplateStore` sees `fields`, never `sections`. Invalid specs
+ * normalize to null (a plain skeleton) rather than throwing — a corrupt spec
+ * must never take down a template list.
+ */
+export function normalizeExtractionSpec(raw: unknown): ExtractionSpec | null {
+  if (raw == null) return null
+  const parsed = extractionSpecSchema.safeParse(raw)
+  return parsed.success ? parsed.data : null
+}
 
 /**
  * A custom template, stored in `workspace_page_templates`. Mirrors a built-in
@@ -140,26 +259,38 @@ export function blocksToExtractionSpec(
   blocks: Block[],
   capture: BlueprintCaptureKind[] = [],
 ): ExtractionSpec | null {
-  const sections: ExtractionSection[] = []
+  const fields: ExtractionField[] = []
+  const taken = new Set<string>()
   let heading: string | null = null
   for (const b of blocks) {
     if (b.kind === 'heading') {
       const t = b.text.trim()
       if (t) heading = t
     } else if (b.kind === 'extraction_slot') {
-      sections.push({
-        heading: heading ?? 'Section',
+      const displayHeading = heading ?? 'Section'
+      const explicitKey = b.fieldKey?.trim()
+      const key =
+        explicitKey && !taken.has(explicitKey)
+          ? (taken.add(explicitKey), explicitKey)
+          : fieldKeyFromHeading(displayHeading, taken)
+      fields.push({
+        key,
+        heading: displayHeading,
         instruction: b.instruction.trim(),
+        type: b.fieldType ?? 'markdown',
+        ...(b.options ? { options: b.options } : {}),
+        ...(b.entityKind ? { entityKind: b.entityKind } : {}),
+        required: b.required ?? false,
         outputType: b.outputType ?? 'prose',
       })
     }
   }
-  return sections.length > 0 ? { sections, capture } : null
+  return fields.length > 0 ? { fields, capture } : null
 }
 
 /**
  * The inverse of {@link blocksToExtractionSpec}: build a blueprint's page skeleton
- * from an extraction spec, one `heading` + `extraction_slot` pair per section.
+ * from an extraction spec, one `heading` + `extraction_slot` pair per field.
  * Used when a spec is minted programmatically (structural-synthesis Phase 2: a
  * skill's `extraction` is turned into a `workspace_page_templates` blueprint on
  * save), so the result opens in the WYSIWYG editor and round-trips back through
@@ -167,13 +298,18 @@ export function blocksToExtractionSpec(
  */
 export function extractionSpecToBlocks(spec: ExtractionSpec): Block[] {
   const blocks: Block[] = []
-  spec.sections.forEach((section, i) => {
-    blocks.push({ kind: 'heading', id: `bp-sec-${i}-h`, level: 2, text: section.heading })
+  spec.fields.forEach((field, i) => {
+    blocks.push({ kind: 'heading', id: `bp-sec-${i}-h`, level: 2, text: field.heading })
     blocks.push({
       kind: 'extraction_slot',
       id: `bp-sec-${i}-s`,
-      instruction: section.instruction,
-      outputType: section.outputType,
+      instruction: field.instruction,
+      outputType: field.outputType,
+      fieldKey: field.key,
+      fieldType: field.type,
+      ...(field.options ? { options: field.options } : {}),
+      ...(field.entityKind ? { entityKind: field.entityKind } : {}),
+      ...(field.required ? { required: true } : {}),
     })
   })
   return blocks

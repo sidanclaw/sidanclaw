@@ -39,7 +39,9 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
+import { isAutonomousToolContext } from '../tools/capability-gate.js'
 import { isBuiltInEntityTypeId } from './doc-built-ins.js'
+import { uuidId } from '../tools/schema-tolerance.js'
 import {
   cellValueSchema,
   entityFilterSchema,
@@ -83,7 +85,7 @@ const dataPatchSchema = z.record(propertyNameSchema, cellValueSchema)
 
 // ── Input / output types ─────────────────────────────────────────────
 
-export type ListEntityTypesInput = { workspaceId: string }
+export type ListEntityTypesInput = { workspaceId?: string }
 export type ListEntityTypesOutput = { types: EntityType[] }
 
 export type CreateEntityTypeInput = {
@@ -149,7 +151,11 @@ export type QueryEntitiesOutput = {
 // ── Zod schemas ──────────────────────────────────────────────────────
 
 const listEntityTypesInputSchema: z.ZodType<ListEntityTypesInput> = z.object({
-  workspaceId: idSchema.describe('Workspace whose entity types to list.'),
+  workspaceId: idSchema
+    .optional()
+    .describe(
+      'Omit this — the current workspace is resolved from context. (Never pass a workspace name or domain; ids are UUIDs.)',
+    ),
 })
 
 const createEntityTypeInputSchema: z.ZodType<CreateEntityTypeInput> = z.object({
@@ -239,7 +245,7 @@ const deleteEntityInputSchema: z.ZodType<DeleteEntityInput> = z.object({
 const queryEntitiesInputSchema: z.ZodType<QueryEntitiesInput> = z.object({
   workspaceId: idSchema,
   entityTypeId: idSchema.describe(
-    'UUID of the user-defined entity type (or a `builtin:*` id once Phase 2 lands the adapter). Phase 1: only user-defined types are queried through this tool — for built-ins use the typed tools (`listTasks`, `crmListContacts`, ...).',
+    'UUID of the user-defined entity type. Only user-defined types are queried through this tool — for built-ins use the typed tools (`listTasks`, `crmListContacts`, ...).',
   ),
   filters: z
     .array(entityFilterSchema)
@@ -309,10 +315,24 @@ export function createListEntityTypesTool(
     isConcurrencySafe: true,
     timeoutMs: 15_000,
 
-    async execute(input) {
+    async execute(input, context) {
+      // Context-first workspace resolution. The model-supplied workspaceId
+      // was the prod failure mode (`{ workspaceId: "fls.com.hk" }` → DB
+      // `invalid input syntax for type uuid`): the model has no legitimate
+      // reason to pick a workspace — this surface is always injected
+      // workspace-bound (see packages/api/src/doc/inject.ts, which gates on
+      // `assistant.workspaceId`). Input stays accepted as a deprecated
+      // fallback for context-less callers only.
+      const workspaceId = context?.workspaceId ?? input.workspaceId
+      if (!workspaceId) {
+        return {
+          data: 'listEntityTypes requires a workspace-bound context.',
+          isError: true,
+        }
+      }
       try {
-        const builtIns = deps.listBuiltInEntityTypes(input.workspaceId)
-        const userDefined = await deps.store.listEntityTypes(input.workspaceId)
+        const builtIns = deps.listBuiltInEntityTypes(workspaceId)
+        const userDefined = await deps.store.listEntityTypes(workspaceId)
         const types: EntityType[] = [...builtIns, ...userDefined]
         return { data: { types } }
       } catch (err) {
@@ -459,6 +479,12 @@ export function createRemovePropertyTool(
     isReadOnly: false,
     isConcurrencySafe: false,
     timeoutMs: 15_000,
+    // Tier-C write-gate (Posture A, docs/plans/write-gating-decision-brief.md
+    // §3): removing a property affects EVERY row of the type. Recoverable
+    // (cell values stay in JSONB), so no interactive prompt — but a
+    // cron/workflow loop rewriting a whole type's schema with no human
+    // present must park in Approvals. Gate only on the autonomous path.
+    resolveConfirmation: async (context) => isAutonomousToolContext(context),
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
@@ -535,6 +561,10 @@ export function createRenamePropertyTool(
     isReadOnly: false,
     isConcurrencySafe: false,
     timeoutMs: 30_000,
+    // Tier-C write-gate (see removeProperty): migrates EVERY row's JSONB
+    // key in one transaction. Reversible (rename back), so interactive
+    // stays silent; the autonomous path gates.
+    resolveConfirmation: async (context) => isAutonomousToolContext(context),
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
@@ -715,6 +745,10 @@ export function createDeleteEntityTool(
     isReadOnly: false,
     isConcurrencySafe: false,
     timeoutMs: 15_000,
+    // Tier-C write-gate (see removeProperty): soft-delete is recoverable
+    // (bytes retained), so interactive stays silent; a headless loop
+    // mass-deleting rows parks in Approvals.
+    resolveConfirmation: async (context) => isAutonomousToolContext(context),
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityId)) {
@@ -750,7 +784,7 @@ export function createQueryEntitiesTool(
       'Use when the user asks a question that needs schema-aware row access — e.g. "show me Recipes with prep_time under 20 minutes sorted by title". ' +
       'For full-text or semantic search over the brain, use `search` instead. For data block rows on a doc page, use `queryDataBlock`. ' +
       '\n\n' +
-      'Built-in ids (`builtin:task`, etc.) are NOT supported by this tool in Phase 1 — use the typed list tools (`listTasks`, `crmListContacts`, ...) which already understand the dedicated tables. ' +
+      'Built-in ids (`builtin:task`, etc.) are NOT supported by this tool — use the typed list tools (`listTasks`, `crmListContacts`, ...) which already understand the dedicated tables. ' +
       '\n\n' +
       'Returns `{ rows: DocEntityInstance[], nextCursor?: string }`.',
     inputSchema: queryEntitiesInputSchema,

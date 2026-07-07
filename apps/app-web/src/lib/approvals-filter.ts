@@ -12,18 +12,22 @@
 import type { ApprovalKind, PendingApprovalRow } from "@/lib/api/approvals";
 
 /**
- * Kinds the unified queue resolves in place. `approvals.ts`
- * `POST /:id/respond` resolves exactly these — `workflow_step` always,
- * `tool_invocation` because `resumeDeps` is wired, and `staged_write`
- * because the staged tool executes server-side on approve (a 502 means
- * the apply failed and the row stays pending for retry). Every other
- * kind 422s with a `nativeSurface` deep-link by design: the queue lists
- * them but defers the action to their originating surface.
+ * Kinds the unified queue resolves in place. The unified
+ * `POST /api/approvals/:id/respond` resolves `workflow_step` (always),
+ * `tool_invocation` (`resumeDeps` wired), and `staged_write` (the staged
+ * tool executes server-side on approve; a 502 keeps the row pending for
+ * retry). The staged_skill_* kinds resolve in place too, but through the
+ * DEDICATED `/api/skills/approvals` endpoints — `respondByKind`
+ * (lib/api/approvals.ts) routes each row. Only `distribution_draft`
+ * (feed) and `question` (chat) still defer to their originating surface
+ * via the `nativeSurface` hint.
  */
 export const ACTIONABLE_KINDS: readonly ApprovalKind[] = [
   "workflow_step",
   "tool_invocation",
   "staged_write",
+  "staged_skill_creation",
+  "staged_skill_update",
 ];
 
 export function isActionable(kind: ApprovalKind): boolean {

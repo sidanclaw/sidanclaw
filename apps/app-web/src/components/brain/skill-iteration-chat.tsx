@@ -40,6 +40,7 @@ import { ArrowUp, Paperclip, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { ChatMarkdown } from "@sidanclaw/chat-ui";
+import { chatMarkdownCodeComponents } from "@/components/chrome/chat-code-block";
 import {
   draftSkillTurn,
   type SkillDraft,
@@ -250,7 +251,10 @@ export function SkillIterationChat({
                   key={turn.id}
                   className="doc-chat-markdown pr-4 text-[13px] leading-relaxed text-foreground/90 [&_p]:my-1.5 [&_ul]:my-1.5 [&_ol]:my-1.5"
                 >
-                  <ChatMarkdown text={turn.content} />
+                  <ChatMarkdown
+                    text={turn.content}
+                    components={chatMarkdownCodeComponents}
+                  />
                 </div>
               ),
             )}

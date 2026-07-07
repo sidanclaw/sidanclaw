@@ -144,6 +144,14 @@ const updateBodySchema = z.object({
   modelAlias: modelAliasSchema.optional(),
   maxTurns: maxTurnsSchema.nullable().optional(),
   researchMode: z.boolean().optional(),
+  /** Mig 308 — lifecycle-sweep veto flag. */
+  pinned: z.boolean().optional(),
+  /**
+   * Mig 308 — RESTORE only. `'active'` is the single accepted value:
+   * degradation (stale/archive/delete) is the sweep worker's job, never
+   * the client's.
+   */
+  lifecycleState: z.literal('active').optional(),
 })
 
 const runBodySchema = z.object({
@@ -328,6 +336,9 @@ function serializeWorkflow(w: import('@sidanclaw/core').WorkflowRecord) {
     maxTurns: w.maxTurns,
     researchMode: w.researchMode,
     nameManuallySet: w.nameManuallySet,
+    lifecycleState: w.lifecycleState,
+    lifecycleReason: w.lifecycleReason,
+    pinned: w.pinned,
     createdAt: w.createdAt.toISOString(),
     updatedAt: w.updatedAt.toISOString(),
   }
@@ -343,6 +354,9 @@ function serializeSummary(w: import('@sidanclaw/core').WorkflowRecord) {
     pausedReason: w.pausedReason,
     trigger: w.trigger,
     stepCount: w.definition.steps.length,
+    lifecycleState: w.lifecycleState,
+    lifecycleReason: w.lifecycleReason,
+    pinned: w.pinned,
     updatedAt: w.updatedAt.toISOString(),
   }
 }
@@ -396,7 +410,10 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     const role = await opts.workspaceStore.getRole(userId, workspaceId)
     if (!role) return notMember(res)
 
-    const rows = await opts.workflowStore.list(userId, workspaceId)
+    // Mig 308 — archived workflows are hidden unless the caller opts in
+    // (`state=all`, the Workflow page's archived section).
+    const includeArchived = req.query.state === 'all'
+    const rows = await opts.workflowStore.list(userId, workspaceId, { includeArchived })
     res.json({ workflows: rows.map(serializeSummary) })
   })
 
@@ -535,6 +552,15 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     if (parsed.data.modelAlias !== undefined) fields.modelAlias = parsed.data.modelAlias
     if (parsed.data.maxTurns !== undefined) fields.maxTurns = parsed.data.maxTurns ?? null
     if (parsed.data.researchMode !== undefined) fields.researchMode = parsed.data.researchMode
+    if (parsed.data.pinned !== undefined) fields.pinned = parsed.data.pinned
+    if (parsed.data.lifecycleState !== undefined) {
+      // Restore (mig 308): archival disabled the workflow, so restoring
+      // re-enables unless the caller explicitly said otherwise.
+      fields.lifecycleState = parsed.data.lifecycleState
+      if (existing.lifecycleState === 'archived' && parsed.data.enabled === undefined) {
+        fields.enabled = true
+      }
+    }
 
     if (parsed.data.definition !== undefined) {
       const definitionParsed = WorkflowDefinitionSchema.safeParse(parsed.data.definition)

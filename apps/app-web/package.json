@@ -28,7 +28,6 @@
     "@tiptap/extension-bubble-menu": "^2.27.2",
     "@tiptap/extension-collaboration": "^2.27.2",
     "@tiptap/extension-collaboration-cursor": "^2.27.2",
-    "@tiptap/extension-drag-handle-react": "^2.27.2",
     "@tiptap/extension-link": "^2.27.2",
     "@tiptap/extension-mention": "^2.27.2",
     "@tiptap/extension-node-range": "2.27.2",

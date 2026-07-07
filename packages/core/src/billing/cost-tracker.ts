@@ -104,7 +104,7 @@ export function calculateCost(model: string, usage: TokenUsage): number {
 // and packages/api/src/billing/credit-gate.ts (overhead never debits credits).
 //
 // The `usage_tracking` `valid_source` CHECK (000_overlay_v1.sql baseline,
-// last extended by migration 305) enshrines these exact strings; keep the
+// last extended by migration 309) enshrines these exact strings; keep the
 // list in sync with the latest migration when adding new subsystems — a
 // source missing from the CHECK makes its INSERTs fail 23514 silently
 // (the exact failure class migration 305 closed for synthesis + goals).
@@ -133,6 +133,8 @@ export const OVERHEAD_SOURCES = [
   'overhead:synthesis',
   'overhead:goal-clarity',
   'overhead:goal-verify',
+  // Migration 309 (2026-07-07): the workflow-lifecycle digest pass.
+  'overhead:workflow-digest',
 ] as const
 
 export type OverheadSource = typeof OVERHEAD_SOURCES[number]

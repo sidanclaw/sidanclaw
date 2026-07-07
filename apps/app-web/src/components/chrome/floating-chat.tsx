@@ -126,6 +126,7 @@ import {
   type ToolUsed,
 } from "@sidanclaw/chat-ui";
 import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
+import { ChatCodeBlock } from "@/components/chrome/chat-code-block";
 import { authFetch } from "@/lib/auth-fetch";
 import { publishBuildActivity } from "@/lib/build-activity";
 import {
@@ -3025,6 +3026,8 @@ function ChatMarkdownWithLinks({
       a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
         <ChatPageLink {...props} workspaceId={workspaceId} onOpenPage={onOpenPage} />
       ),
+      // Fenced code blocks carry a one-click copy affordance.
+      pre: ChatCodeBlock,
     }),
     [workspaceId, onOpenPage],
   );

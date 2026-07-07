@@ -21,6 +21,8 @@ export const ProbeSchema = z.object({
     verdict: z.enum(['act', 'refuse', 'redirect']),
     /** When verdict=act: at least one of these tools must be called. */
     mustCallToolOneOf: z.array(z.string()).optional(),
+    /** First-call routing check: tool call #1 must be one of these (later fallback exploration is fine). */
+    firstCallMustBeOneOf: z.array(z.string()).optional(),
     /** Tools that must NOT be called (e.g. fabricating an absent connector's action). */
     mustNotCallTools: z.array(z.string()).optional(),
     /** Case-insensitive regexes that must NOT appear in the reply text (success-claim traps). */
@@ -42,9 +44,18 @@ export type ProbeDomain = {
 
 export type ToolCall = { name: string; input: unknown }
 
+/**
+ * One executed tool's outcome as the SUT saw it. Recorded so judges grade
+ * with the same evidence the model had — without it, an honest report of a
+ * tool error is indistinguishable from confabulation (the 2026-07-07
+ * capability-gate mis-finding).
+ */
+export type ToolOutcome = { name: string; content: string; isError?: boolean }
+
 export type Transcript = {
   text: string
   toolCalls: ToolCall[]
+  toolResults: ToolOutcome[]
 }
 
 export type HardCheckResult = {

@@ -840,3 +840,146 @@ export async function getPreferredChannel(
   )
   return result.rows[0] ?? null
 }
+
+// ── Introspection: workspace session history (audit §6-a) ────────────
+//
+// Backs the `listWorkspaceSessions` / `readSessionTranscript` introspection
+// tools (SessionHistoryIntrospectionPort in @sidanclaw/core). The workspace
+// primary may read the workspace's assistants' transcripts. Both reads scope
+// via the `assistants.workspace_id = $1` join — which structurally EXCLUDES
+// other members' personal assistants (their `workspace_id` is NULL or a
+// different workspace), the §6-a workspace boundary. These are system reads
+// (no RLS userId): the passed workspace + the join are the only bound. See
+// docs/architecture/engine/introspection-tools.md → "Session history".
+
+/** One session-list row for the introspection tool (assistant name joined). */
+export type WorkspaceSessionSummary = {
+  id: string
+  assistantId: string
+  assistantName: string
+  channelType: string
+  status: string
+  createdAt: Date
+  lastActiveAt: Date
+}
+
+/** One transcript-message gist for the introspection tool (text-only). */
+export type WorkspaceTranscriptMessage = {
+  role: string
+  gist: string
+}
+
+/**
+ * List recent sessions belonging to the workspace's assistants, newest-active
+ * first. Scoped by the `assistants.workspace_id = $1` join (§6-a boundary) —
+ * a teammate's PERSONAL assistant is never returned. Optional `channelType`
+ * narrows to one channel. `limit` is clamped by the caller (tool) and again
+ * defensively here.
+ */
+export async function listSessionsForWorkspaceSystem(
+  workspaceId: string,
+  opts: { limit: number; channelType?: string },
+): Promise<WorkspaceSessionSummary[]> {
+  const limit = Math.max(1, Math.min(opts.limit, 50))
+  const conditions = ['a.workspace_id = $1']
+  const values: unknown[] = [workspaceId]
+  let paramIdx = 2
+
+  if (opts.channelType) {
+    conditions.push(`s.channel_type = $${paramIdx}`)
+    values.push(opts.channelType)
+    paramIdx++
+  }
+
+  values.push(limit)
+  const result = await query<WorkspaceSessionSummary>(
+    `SELECT s.id,
+            s.assistant_id  AS "assistantId",
+            a.name          AS "assistantName",
+            s.channel_type  AS "channelType",
+            s.status,
+            s.created_at    AS "createdAt",
+            s.last_active_at AS "lastActiveAt"
+     FROM sessions s
+     JOIN assistants a ON a.id = s.assistant_id
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY s.last_active_at DESC
+     LIMIT $${paramIdx}`,
+    values,
+  )
+  return result.rows
+}
+
+/**
+ * Read the most-recent `limit` messages of ONE session, chronological, as
+ * text-only gists — ONLY IF the session belongs to a workspace assistant of
+ * `workspaceId`. Returns:
+ *   - `null`  when no session with that id belongs to the workspace (unknown
+ *             id OR out-of-scope session — the caller renders an identical
+ *             not-found message either way, so this is not an existence
+ *             oracle).
+ *   - `[]`    when the session is in scope but has no messages.
+ *   - rows    otherwise (tool_use / tool_result blocks collapsed to one-line
+ *             markers; never the full payload).
+ *
+ * Two queries: a scope guard (does this id belong to a workspace assistant?)
+ * then the message fetch — mirrors the file's other resolve-then-act reads.
+ */
+export async function getSessionTranscriptForWorkspaceSystem(
+  sessionId: string,
+  workspaceId: string,
+  opts: { limit: number },
+): Promise<WorkspaceTranscriptMessage[] | null> {
+  const limit = Math.max(1, Math.min(opts.limit, 100))
+
+  // Scope guard: the session must exist AND its assistant must be in this
+  // workspace. Anything else is an honest miss (returns null → not-found).
+  const scope = await query<{ id: string }>(
+    `SELECT s.id
+     FROM sessions s
+     JOIN assistants a ON a.id = s.assistant_id
+     WHERE s.id = $1 AND a.workspace_id = $2
+     LIMIT 1`,
+    [sessionId, workspaceId],
+  )
+  if (scope.rows.length === 0) return null
+
+  // Most-recent N, then reverse to chronological (like getGroupChatContext).
+  const result = await query<{ role: string; content: unknown }>(
+    `SELECT role, content
+     FROM session_messages
+     WHERE session_id = $1
+     ORDER BY sequence_num DESC
+     LIMIT $2`,
+    [sessionId, limit],
+  )
+  return result.rows.reverse().map((r) => ({ role: r.role, gist: gistMessageContent(r.content) }))
+}
+
+/**
+ * Reduce a session_messages JSONB `content` to a single text-only gist for
+ * the transcript tool. Text blocks are joined; `tool_use` / `tool_result`
+ * blocks collapse to one-line markers (`[tool: <name>]` / `[tool result]`)
+ * so no frozen tool payload is ever surfaced. A bare string content is
+ * returned as-is; anything unrecognized becomes `(non-text content)` rather
+ * than throwing (a read tool must not fail on an odd row).
+ */
+function gistMessageContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return '(non-text content)'
+  const parts: string[] = []
+  for (const block of content as Array<Record<string, unknown>>) {
+    const type = typeof block?.type === 'string' ? block.type : ''
+    if (type === 'text' && typeof block.text === 'string') {
+      parts.push(block.text)
+    } else if (type === 'tool_use') {
+      const name = typeof block.name === 'string' ? block.name : 'tool'
+      parts.push(`[tool: ${name}]`)
+    } else if (type === 'tool_result') {
+      parts.push('[tool result]')
+    }
+    // Other block kinds (image, thinking, …) are dropped from the gist.
+  }
+  const joined = parts.join(' ').trim()
+  return joined === '' ? '(non-text content)' : joined
+}

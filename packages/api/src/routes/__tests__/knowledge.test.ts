@@ -45,6 +45,8 @@ const knowledgeStore = {
   listDisabledSourceIds: vi.fn(),
   setSourceDisabled: vi.fn(),
   getSource: vi.fn(),
+  createSource: vi.fn(),
+  updateSourceWriteAccess: vi.fn(),
 }
 
 function app(userId?: string) {
@@ -59,6 +61,7 @@ function app(userId?: string) {
 const connectorInstanceStore = {
   listByUser: vi.fn(),
   listByWorkspace: vi.fn(),
+  getCredentials: vi.fn(),
 }
 const connectorGrantStore = {
   listForTargetSystem: vi.fn(),
@@ -309,5 +312,90 @@ describe('[COMP:api/knowledge-route] DELETE /entries/:id', () => {
       (await request(app('u-1')).delete('/api/assistants/a-1/knowledge/entries/e-1')).status,
     ).toBe(404)
     expect(knowledgeStore.delete).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/kb-write-capability] POST /sources — create-time write probe', () => {
+  function ghInst(over: Record<string, unknown>) {
+    return {
+      scope: 'user', userId: 'u-1', workspaceId: null, provider: 'github', label: 'GH',
+      connectedEmail: null, url: null, custom: false, config: {}, sensitivity: 'internal',
+      connected: true, ingestionEnabled: false, credentialsType: 'oauth',
+      healthStatus: 'ok', lastError: null, lastCheckedAt: null, createdBy: 'u-1',
+      createdAt: new Date(0), updatedAt: new Date(0), ...over,
+    }
+  }
+
+  /** URL-routed GitHub stub for the pre-connect validation + the probe. */
+  function stubGithub(opts: { probeStatus?: number; push?: boolean }) {
+    const b64 = Buffer.from('---\ntitle: X\ndescription: d\n---\nBody').toString('base64')
+    return vi.fn(async (input: string | URL) => {
+      const url = String(input)
+      if (/\/git\/ref\/heads\//.test(url)) {
+        return new Response(JSON.stringify({ object: { sha: 'headsha' } }), { status: 200 })
+      }
+      if (url.includes('/git/trees/')) {
+        return new Response(JSON.stringify({ tree: [
+          { path: 'docs/index.md', type: 'blob' },
+          { path: 'docs/products/vault.md', type: 'blob' },
+          { path: 'docs/products/fees.md', type: 'blob' },
+        ] }), { status: 200 })
+      }
+      if (url.includes('/contents/')) {
+        return new Response(JSON.stringify({ content: b64, encoding: 'base64' }), { status: 200 })
+      }
+      if (/api\.github\.com\/repos\/acme\/kb$/.test(url)) {
+        // The write-capability probe (getRepoPermissions).
+        if (opts.probeStatus && opts.probeStatus !== 200) {
+          return new Response('boom', { status: opts.probeStatus })
+        }
+        return new Response(JSON.stringify({ permissions: { push: opts.push === true, pull: true, admin: false } }), { status: 200 })
+      }
+      return new Response('unexpected: ' + url, { status: 500 })
+    })
+  }
+
+  function wireHappyPath() {
+    mockRls.mockResolvedValue({ rows: [{ role: 'member', clearance: 'internal', compartments: null }], rowCount: 1 } as never)
+    mockMembership.mockResolvedValue({ role: 'member', clearance: 'internal' })
+    connectorInstanceStore.listByUser.mockResolvedValue([ghInst({ id: 'own-gh' })])
+    connectorInstanceStore.listByWorkspace.mockResolvedValue([])
+    connectorGrantStore.listForTargetSystem.mockResolvedValue([
+      { grantedByUserId: 'u-1', instance: ghInst({ id: 'own-gh' }) },
+    ])
+    connectorInstanceStore.getCredentials.mockResolvedValue({ client_id: 'github_pat', client_secret: 'ghp_x' })
+    knowledgeStore.createSource.mockResolvedValue({ id: 'src-new', workspaceId: 'ws-1', repo: 'acme/kb' })
+    knowledgeStore.updateSourceWriteAccess.mockResolvedValue(undefined)
+  }
+
+  it('probes push permission after creating the source and persists the result', async () => {
+    wireHappyPath()
+    vi.stubGlobal('fetch', stubGithub({ push: true }))
+    try {
+      const res = await request(appWs('u-1'))
+        .post('/api/workspaces/ws-1/knowledge/sources')
+        .send({ repo: 'acme/kb', branch: 'main', rootPath: 'docs', connectorInstanceId: 'own-gh' })
+      expect(res.status).toBe(201)
+      expect(knowledgeStore.createSource).toHaveBeenCalled()
+      // The just-created source is writable immediately, not after the first tick.
+      expect(knowledgeStore.updateSourceWriteAccess).toHaveBeenCalledWith('src-new', true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('still creates the source when the probe fails (best-effort; the tick re-probes)', async () => {
+    wireHappyPath()
+    vi.stubGlobal('fetch', stubGithub({ probeStatus: 500 }))
+    try {
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const res = await request(appWs('u-1'))
+        .post('/api/workspaces/ws-1/knowledge/sources')
+        .send({ repo: 'acme/kb', branch: 'main', rootPath: 'docs', connectorInstanceId: 'own-gh' })
+      expect(res.status).toBe(201)
+      expect(knowledgeStore.updateSourceWriteAccess).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

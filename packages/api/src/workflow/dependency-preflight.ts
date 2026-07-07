@@ -24,10 +24,24 @@
  */
 
 import { createSlackApi } from '@sidanclaw/channels'
-import { OFFICIAL_CONNECTOR_TOOLS } from '@sidanclaw/shared'
+import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@sidanclaw/shared'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getAuthenticatedUser } from '../github/client.js'
+
+/**
+ * Minimal structural slice of the MCP settings store — only the policy
+ * lookup the preflight needs. Kept structural (not the concrete store type)
+ * so tests can hand in a two-line stub.
+ */
+export type PreflightPolicyStore = {
+  getPolicy(params: {
+    assistantId: string
+    userId: string
+    serverName: string
+    toolName: string
+  }): Promise<{ policy: string } | null>
+}
 
 export type WorkflowDependencyPreflightOptions = {
   /** BYO Telegram + Slack credentials — same store channel-delivery uses. */
@@ -39,17 +53,36 @@ export type WorkflowDependencyPreflightOptions = {
   waConnectorSecret?: string
   /** Built-in connector credentials, for the connector preflight. */
   connectorStore?: ConnectorStore
+  /**
+   * L1/L2 tool-policy rows (`mcp_tool_settings`) — powers the preflight's
+   * `policy` answer so authoring can reject an `ask`-policy tool pinned on an
+   * `assistant_call` step (it can never execute there — the callee surface
+   * drops ask-policy tools; a `tool_call` step is the approved path, pausing
+   * in the unified Approvals queue). Absent → `defaultPolicy` from
+   * `OFFICIAL_CONNECTOR_TOOLS` still applies; user overrides are just unseen.
+   */
+  mcpSettingsStore?: PreflightPolicyStore
 }
 
-/** Reverse map: built-in connector tool name → owning connectorId. Derived
- *  from OFFICIAL_CONNECTOR_TOOLS so the two can never drift. */
-const TOOL_TO_CONNECTOR: Record<string, string> = (() => {
-  const m: Record<string, string> = {}
-  for (const [connectorId, tools] of Object.entries(OFFICIAL_CONNECTOR_TOOLS)) {
-    for (const t of tools) m[t.name] = connectorId
+/** Reverse map: built-in connector tool name → owning connectorId + registry
+ *  entry. Derived from OFFICIAL_CONNECTOR_TOOLS so the two can never drift. */
+const TOOL_TO_CONNECTOR: Record<string, string> = {}
+const TOOL_DEFAULT_POLICY: Record<string, 'allow' | 'ask' | 'block'> = {}
+for (const [connectorId, tools] of Object.entries(OFFICIAL_CONNECTOR_TOOLS)) {
+  for (const t of tools) {
+    TOOL_TO_CONNECTOR[t.name] = connectorId
+    TOOL_DEFAULT_POLICY[t.name] = t.defaultPolicy
   }
-  return m
-})()
+}
+
+const POLICY_STRICTNESS: Record<string, number> = { allow: 0, ask: 1, block: 2 }
+type ToolPolicy = 'allow' | 'ask' | 'block'
+function asPolicy(v: string | undefined, fallback: ToolPolicy): ToolPolicy {
+  return v === 'allow' || v === 'ask' || v === 'block' ? v : fallback
+}
+function strictest(a: ToolPolicy, b: ToolPolicy): ToolPolicy {
+  return (POLICY_STRICTNESS[a] ?? 0) >= (POLICY_STRICTNESS[b] ?? 0) ? a : b
+}
 
 /** Display name per connectorId for user-facing messages. */
 const CONNECTOR_LABEL: Record<string, string> = {
@@ -71,7 +104,25 @@ export type ValidateDeliveryTarget = (args: {
 export type PreflightConnectorTool = (args: {
   userId: string
   toolName: string
-}) => Promise<{ ok: boolean; provider: string; reason?: string } | null>
+  /**
+   * The assistant the step executes as (`step.target.assistantId`) — resolves
+   * the L2 per-assistant policy row. Absent → L1 (app-level) + registry
+   * default only.
+   */
+  assistantId?: string
+}) => Promise<{
+  ok: boolean
+  provider: string
+  reason?: string
+  /**
+   * Effective tool policy: strictest of the registry `defaultPolicy` and the
+   * user's L1/L2 `mcp_tool_settings` rows. The authoring layer errors when an
+   * `ask`/`block` tool is pinned on an `assistant_call` step (see
+   * `dependencyIssues` — such a tool is dropped from the callee surface at
+   * run time, so the step as authored can never execute it).
+   */
+  policy?: 'allow' | 'ask' | 'block'
+} | null>
 
 /**
  * Enumerate the Slack channels the BYO bot can see, so the authoring model can
@@ -133,15 +184,44 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
     return { ok: true }
   }
 
-  const preflightConnectorTool: PreflightConnectorTool = async ({ userId, toolName }) => {
+  const preflightConnectorTool: PreflightConnectorTool = async ({ userId, toolName, assistantId }) => {
     const connectorId = TOOL_TO_CONNECTOR[toolName]
     if (!connectorId || connectorId === 'files') return null // not a (probeable) connector tool
     const provider = CONNECTOR_LABEL[connectorId] ?? connectorId
-    if (!options.connectorStore) return { ok: true, provider } // can't check → don't block
+
+    // Effective policy — EXACTLY the runtime rule (`applyPolicyOrSkip` /
+    // `resolveEffectivePolicy` in mcp/inject.ts): strictest of the L1
+    // (app-level) and L2 (per-assistant) rows, each falling back to the
+    // registry `defaultPolicy` when absent. An explicit allow on BOTH levels
+    // loosens an ask-default, matching what dispatch would do — authoring
+    // must never reject a workflow the runtime would run. Without an
+    // `assistantId` the L2 arm stays at the default (conservative: can only
+    // be stricter than runtime, never looser). Fail-open on lookup errors.
+    const defaultPolicy: ToolPolicy = TOOL_DEFAULT_POLICY[toolName] ?? 'allow'
+    let policy: ToolPolicy = defaultPolicy
+    if (options.mcpSettingsStore) {
+      try {
+        const l1 = await options.mcpSettingsStore.getPolicy({
+          assistantId: APP_LEVEL_ASSISTANT_ID, userId, serverName: connectorId, toolName,
+        })
+        let l2Policy: ToolPolicy = defaultPolicy
+        if (assistantId) {
+          const l2 = await options.mcpSettingsStore.getPolicy({
+            assistantId, userId, serverName: connectorId, toolName,
+          })
+          l2Policy = asPolicy(l2?.policy, defaultPolicy)
+        }
+        policy = strictest(asPolicy(l1?.policy, defaultPolicy), l2Policy)
+      } catch (err) {
+        console.warn('[workflow/dependencyIssues] policy lookup threw (using registry default):', err)
+      }
+    }
+
+    if (!options.connectorStore) return { ok: true, provider, policy } // can't check → don't block
 
     const creds = await options.connectorStore.getCredentials(userId, connectorId)
     if (!creds) {
-      return { ok: false, provider, reason: `${provider} is not connected in this workspace` }
+      return { ok: false, provider, reason: `${provider} is not connected in this workspace`, policy }
     }
 
     // GitHub gets a real token probe (the incident). Other connectors are
@@ -149,20 +229,20 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
     // provider is a tracked follow-up; presence of credentials is the check.
     if (connectorId === 'github') {
       const pat = (creds as { client_secret?: string }).client_secret
-      if (!pat) return { ok: false, provider, reason: 'GitHub credentials are incomplete' }
+      if (!pat) return { ok: false, provider, reason: 'GitHub credentials are incomplete', policy }
       try {
         await getAuthenticatedUser(pat)
-        return { ok: true, provider }
+        return { ok: true, provider, policy }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         if (/invalid or revoked|401/.test(msg)) {
-          return { ok: false, provider, reason: 'its access token is invalid or revoked' }
+          return { ok: false, provider, reason: 'its access token is invalid or revoked', policy }
         }
-        return { ok: true, provider } // transient → don't block
+        return { ok: true, provider, policy } // transient → don't block
       }
     }
 
-    return { ok: true, provider }
+    return { ok: true, provider, policy }
   }
 
   const listSlackChannels: ListSlackChannels = async ({ assistantId }) => {

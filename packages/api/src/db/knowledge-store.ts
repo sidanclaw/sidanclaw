@@ -54,6 +54,13 @@ export type KnowledgeSource = {
   syncError: string | null
   /** The connector_instance this source syncs through. NULL = legacy by-workspace resolution. */
   connectorInstanceId: string | null
+  /**
+   * Cached PAT write-capability probe (migration 310): can the bound PAT
+   * push to the repo? NULL = never probed — treated as read-only. Refreshed
+   * by the sync worker each tick, at source creation, and on call-time 403.
+   */
+  writeAccess: boolean | null
+  writeAccessCheckedAt: Date | null
   createdAt: Date
 }
 
@@ -131,6 +138,7 @@ const SOURCE_COLUMNS = `
   repo, branch, root_path AS "rootPath",
   last_synced_sha AS "lastSyncedSha", last_synced_at AS "lastSyncedAt",
   sync_error AS "syncError", connector_instance_id AS "connectorInstanceId",
+  write_access AS "writeAccess", write_access_checked_at AS "writeAccessCheckedAt",
   created_at AS "createdAt"
 ` as const
 
@@ -201,6 +209,14 @@ export type KnowledgeStore = {
     compartments?: string[]
     metadata?: Record<string, unknown>; sourceId?: string | null; sourceSha?: string | null
   }): Promise<KnowledgeEntry>
+  /**
+   * Body-only update of a MANUAL entry (`source_id IS NULL` enforced in the
+   * predicate — repo-synced entries change through the repo writer, never
+   * here). Touches `content` + `updated_at` only, so tags / sensitivity /
+   * compartments / related_ids survive untouched. Returns null when the id
+   * doesn't resolve to a manual entry in the workspace.
+   */
+  updateManualEntryContent(workspaceId: string, id: string, content: string): Promise<{ id: string; path: string } | null>
   delete(id: string): Promise<boolean>
   deleteBySource(sourceId: string): Promise<number>
   deleteByTeamAndPath(workspaceId: string, path: string): Promise<boolean>
@@ -219,6 +235,8 @@ export type KnowledgeStore = {
   listSourcesForAssistant(assistantId: string): Promise<KnowledgeSource[]>
   deleteSource(id: string): Promise<boolean>
   updateSourceSync(id: string, sha: string, error?: string | null): Promise<void>
+  /** Persist the PAT write-capability probe result (migration 310). */
+  updateSourceWriteAccess(id: string, writeAccess: boolean): Promise<void>
   getSourcesDueForSync(): Promise<KnowledgeSource[]>
 
   // Per-assistant source scoping (denylist). No row = source enabled for the
@@ -403,6 +421,17 @@ export function createDbKnowledgeStore(): KnowledgeStore {
         ],
       )
       return result.rows[0]
+    },
+
+    async updateManualEntryContent(workspaceId, id, content) {
+      const result = await query<{ id: string; path: string }>(
+        `UPDATE knowledge_entries
+         SET content = $1, updated_at = now()
+         WHERE id = $2 AND workspace_id = $3 AND source_id IS NULL
+         RETURNING id, path`,
+        [content, id, workspaceId],
+      )
+      return result.rows[0] ?? null
     },
 
     async delete(id) {
@@ -621,6 +650,15 @@ export function createDbKnowledgeStore(): KnowledgeStore {
          SET last_synced_sha = $1, last_synced_at = now(), sync_error = $2
          WHERE id = $3`,
         [sha, error, id],
+      )
+    },
+
+    async updateSourceWriteAccess(id, writeAccess) {
+      await query(
+        `UPDATE workspace_knowledge_sources
+         SET write_access = $1, write_access_checked_at = now()
+         WHERE id = $2`,
+        [writeAccess, id],
       )
     },
 

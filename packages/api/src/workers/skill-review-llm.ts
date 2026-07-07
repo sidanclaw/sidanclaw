@@ -157,7 +157,9 @@ Each action is exactly one of:
 - { "action": "add_support_file","skillId": "<uuid of an existing skill>", "file": { "kind": "reference"|"template"|"script", "name": "<file name>", "content": "<file body>", "description": "<optional>" } }
 - { "action": "create_umbrella", "umbrella": { "name": "<class-level name>", "description": "<one line>", "content": "<full markdown body>", "supportFiles": [ <optional file objects> ] } }
 
-skillId MUST be the UUID of a skill listed in "Existing workspace skills". Never invent a skillId. If nothing is worth doing, return {"actions": []}.`
+skillId MUST be the UUID of a skill listed in "Existing workspace skills". Never invent a skillId. If nothing is worth doing, return {"actions": []}.
+
+newContent RULE: "newContent" REPLACES the skill's entire body — whatever you omit is deleted. It must be the COMPLETE markdown document, starting from the skill's title heading, with your edits woven in. Never send a fragment, a lone section, or only the changed lines. Before emitting a patch, re-read the skill's current body above and reproduce all of it except the parts you are deliberately changing.`
 
 function buildUserPrompt(input: Parameters<SkillReviewLLM['plan']>[0]): string {
   const skillsBlock =

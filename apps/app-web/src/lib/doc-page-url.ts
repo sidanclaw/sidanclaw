@@ -95,6 +95,9 @@ export function pageIdFromInAppHref(
  *   - `'brain'`         `/brain` (+ `/brain/<entityId>`)
  *   - `'studio'`        `/studio/...`
  *   - `'workflow'`      `/workflow` (+ `/workflow/<id>`)
+ *   - `'feed'`          `/feed/...` — the ported feed-web operator app
+ *                       (hosted-only; the nav row shows only when the
+ *                       workspace has connected distribution profiles)
  *   - `'goals'`         `/goals` (+ `/goals/<goalId>`) — attention-routed
  *                       (home-dock Autopilot card / Brain task panel), no
  *                       sidebar slot, same pattern as `'approvals'`
@@ -109,6 +112,7 @@ export type WorkspaceSurface =
   | "brain"
   | "studio"
   | "workflow"
+  | "feed"
   | "goals"
   | "approvals"
   | "knowledge-base"
@@ -122,6 +126,7 @@ const KNOWN_SURFACES: ReadonlySet<string> = new Set([
   "brain",
   "studio",
   "workflow",
+  "feed",
   "goals",
   "approvals",
   "knowledge-base",
@@ -144,6 +149,83 @@ export function surfaceFromPathname(
   // The legacy `/doc?viewId=` alias is the doc page surface.
   if (segment === "doc") return "p";
   return KNOWN_SURFACES.has(segment) ? (segment as WorkspaceSurface) : null;
+}
+
+// ── Doc-shell panel tabs ──────────────────────────────────────────────────
+// Approvals and the Autopilot (goals) board are cross-cutting workspace
+// surfaces with NO sidebar slot — attention-routed from the home dock. Rather
+// than take over the whole pane on their own top-level route (which drops the
+// doc tab strip + browse history), they open as **panel tabs INSIDE the doc
+// shell** at `/w/<wid>/p?panel=<id>`. The shell renders the panel in its centre
+// pane; the tab strip, sidebar, and chat dock all persist. See
+// `docs/architecture/features/doc.md` → "Top bar" and "Routes".
+
+/** The doc-shell panel surfaces that open as tabs under `/p` (not their own
+ *  route). `goals` is the Autopilot board — the id matches the legacy route
+ *  segment + the `WorkspaceSurface` name so nothing else has to special-case it. */
+export const PANEL_IDS = ["approvals", "goals"] as const;
+export type PanelId = (typeof PANEL_IDS)[number];
+
+const PANEL_ID_SET: ReadonlySet<string> = new Set(PANEL_IDS);
+
+/** Narrow an arbitrary string to a known panel id. */
+export function isPanelId(value: string | null | undefined): value is PanelId {
+  return !!value && PANEL_ID_SET.has(value);
+}
+
+/** Query param naming the open doc-shell panel tab (`/p?panel=approvals`). */
+export const PANEL_PARAM = "panel";
+
+/**
+ * Read the active panel id off a location search string / `URLSearchParams`,
+ * or `null` when none is present or the value isn't a known panel. Accepts a
+ * raw search string (`window.location.search`, with or without the leading
+ * `?`) or the object from `useSearchParams()`.
+ */
+export function panelFromSearch(
+  search: string | URLSearchParams | null | undefined,
+): PanelId | null {
+  if (!search) return null;
+  const params =
+    typeof search === "string" ? new URLSearchParams(search) : search;
+  const value = params.get(PANEL_PARAM);
+  return isPanelId(value) ? value : null;
+}
+
+// A doc tab's browse history holds opaque entry strings (see `doc-tabs.ts`).
+// Most entries are bare page ids (UUIDs); a panel tab stores the prefixed form
+// `panel:<id>` so the two never collide and the reducer stays page-id-agnostic.
+const PANEL_ENTRY_PREFIX = "panel:";
+
+/** Encode a panel as an opaque `doc-tabs` history entry (`panel:approvals`). */
+export function panelTabEntry(panel: PanelId): string {
+  return `${PANEL_ENTRY_PREFIX}${panel}`;
+}
+
+/**
+ * Decode a `doc-tabs` history entry back to a panel id, or `null` when the
+ * entry is a page id (the common case) or an unknown panel.
+ */
+export function panelFromTabEntry(
+  entry: string | null | undefined,
+): PanelId | null {
+  if (!entry || !entry.startsWith(PANEL_ENTRY_PREFIX)) return null;
+  const id = entry.slice(PANEL_ENTRY_PREFIX.length);
+  return isPanelId(id) ? id : null;
+}
+
+/**
+ * Build the doc-shell URL for a tab entry: a panel entry → `/p?panel=<id>`, a
+ * page id → `/p/<id>`, `null` → the `/p` index (the Suggested-for-you home).
+ * This is the tabs → URL mapping the shell mirrors the active tab through.
+ */
+export function docEntryPath(
+  workspaceId: string,
+  entry: string | null,
+): string {
+  const panel = panelFromTabEntry(entry);
+  if (panel) return `/w/${workspaceId}/p?${PANEL_PARAM}=${panel}`;
+  return docPagePath(workspaceId, entry);
 }
 
 /** Query param the desktop quick-capture hotkey sets to request a fresh draft. */

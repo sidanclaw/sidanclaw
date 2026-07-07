@@ -70,8 +70,11 @@ describe('[COMP:skills/tool] createUseSkillTool', () => {
     expect(res.isError).toBeFalsy()
     const instructions = (res.data as { instructions: string }).instructions
     // The procedure is preserved, then a directive steers output into the
-    // linked blueprint via the fill tool (structural-synthesis Phase 2).
+    // linked blueprint's RECORD: direct save for in-context work, the fill
+    // tool for brain synthesis (output-contract posture: bound ⇒ save is
+    // part of the job).
     expect(instructions).toContain('Research the shops.')
+    expect(instructions).toContain('saveBlueprintRecord')
     expect(instructions).toContain('fillBlueprintFromBrain')
     expect(instructions).toContain('bp-42')
   })

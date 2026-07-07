@@ -42,6 +42,8 @@ export type SyncGitHubApi = {
     headSha: string
     files: Array<{ filename: string; status: string }>
   }>
+  /** The PAT's effective repo permissions — backs the write-capability probe. */
+  getRepoPermissions(pat: string, owner: string, repo: string): Promise<{ push: boolean }>
 }
 
 export type SyncStore = {
@@ -61,6 +63,8 @@ export type SyncStore = {
   getByPathSystem(workspaceId: string, path: string): Promise<{ id: string } | null>
   updateRelatedIds(id: string, relatedIds: string[]): Promise<void>
   updateSourceSync(id: string, sha: string, error?: string | null): Promise<void>
+  /** Persist the per-tick PAT write-capability probe (migration 310). */
+  updateSourceWriteAccess(id: string, writeAccess: boolean): Promise<void>
   getSourcesDueForSync(): Promise<SyncSource[]>
 }
 
@@ -142,6 +146,21 @@ export function createKnowledgeSyncWorker(options: {
     if (!owner || !repo) throw new Error(`Invalid repo format: ${source.repo}`)
 
     const pat = await credentials.getPat(source.workspaceId, source.connectorInstanceId)
+
+    // Write-capability probe — cached on the source row and consumed by the
+    // assistant KB write tools' injection gate. Runs BEFORE the no-change
+    // early-return so a swapped PAT self-heals within one tick even when the
+    // repo has no new commits. Advisory: a probe failure never fails the sync
+    // (the cached value simply stays as-is).
+    try {
+      const perms = await api.getRepoPermissions(pat, owner, repo)
+      await store.updateSourceWriteAccess(source.id, perms.push)
+    } catch (err) {
+      console.warn(
+        `[knowledge-sync] write-access probe failed for ${source.repo}:`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
 
     // Get current HEAD
     const headSha = await api.getBranchHead(pat, owner, repo, source.branch)

@@ -75,7 +75,9 @@ describe('[COMP:api/recording-synthesizer] createRecordingSynthesizer', () => {
     const [source, blueprint, target] = synthesizeMock.mock.calls[0]
     expect(source).toMatchObject({ kind: 'recording', sourceId: 'rec-1', sensitivity: 'confidential' })
     expect(blueprint).toMatchObject({ kind: 'skill', slug: 'my-blueprint', body: 'WS BODY' })
-    expect(target).toEqual({ anchorKey: 'recording-synthesis:rec-1' })
+    // Recording fills render their brief page (per-surface default), with the
+    // record riding underneath on the same anchor.
+    expect(target).toMatchObject({ anchorKey: 'recording-synthesis:rec-1', renderPage: true })
   })
 
   it('excludes renderPage from the doc tools (the page-first brief must not be orphaned)', async () => {
@@ -101,8 +103,19 @@ describe('[COMP:api/recording-synthesizer] createRecordingSynthesizer', () => {
       getById: vi.fn().mockResolvedValue({
         id: 'tmpl-1',
         name: 'QBR',
+        // The real store normalizes stored JSONB to the typed v2 contract on
+        // read — the mock hands back what `getById` actually returns.
         extraction: {
-          sections: [{ heading: 'Account health', instruction: 'How are they doing', outputType: 'prose' }],
+          fields: [
+            {
+              key: 'account-health',
+              heading: 'Account health',
+              instruction: 'How are they doing',
+              type: 'markdown',
+              required: false,
+              outputType: 'prose',
+            },
+          ],
           capture: ['company'],
         },
       }),
@@ -115,5 +128,7 @@ describe('[COMP:api/recording-synthesizer] createRecordingSynthesizer', () => {
     const bp = synthesizeMock.mock.calls[0][1]
     expect(bp).toMatchObject({ kind: 'document', slug: 'tmpl-1', title: 'QBR' })
     expect(bp.body).toContain('### 1. Account health')
+    // The typed contract rides on the blueprint so the engine runs record-first.
+    expect(bp.spec.fields[0].key).toBe('account-health')
   })
 })

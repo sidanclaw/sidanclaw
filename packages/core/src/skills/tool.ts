@@ -107,15 +107,18 @@ export function createUseSkillTool(params: UseSkillToolParams) {
         }
       }
 
-      // Structural-synthesis Phase 2: a skill linked to a blueprint produces
-      // that blueprint's structured output. Steer the model to FILL it rather
-      // than free-form the layout. This is dynamic tool-result content (not the
-      // Layer-1 system prompt), so naming the fill tool is fine here; a
-      // blueprint-linked skill is workspace-scoped, exactly where the tool is
-      // injected. See docs/architecture/brain/structural-synthesis.md.
+      // Structural-synthesis Phase 2 (+ the output-contract posture): a skill
+      // linked to a blueprint produces that blueprint's TYPED RECORD. Bound
+      // context ⇒ the save is part of the job (no ask needed). Two paths:
+      // work already done in-context saves directly (`saveBlueprintRecord`,
+      // no second model run); a from-scratch synthesis over the brain uses
+      // `fillBlueprintFromBrain`. This is dynamic tool-result content (not the
+      // Layer-1 system prompt), so naming the tools is fine here; a
+      // blueprint-linked skill is workspace-scoped, exactly where both tools
+      // are injected. See docs/architecture/brain/structural-synthesis.md.
       if (skill.blueprintId) {
         instructions +=
-          `\n\n---\n**This skill is bound to a blueprint.** Its output is the structured document defined by blueprint \`${skill.blueprintId}\`. Do NOT compose the section layout yourself: run the procedure above, then produce the result by calling \`fillBlueprintFromBrain\` with \`blueprint: "${skill.blueprintId}"\` and a \`subject\` (the account, company, or topic this run is about). The blueprint owns the sections and which entities to capture.`
+          `\n\n---\n**This skill is bound to a blueprint.** Its deliverable is the typed record defined by blueprint \`${skill.blueprintId}\` — saving it is part of completing this job, not optional. Do NOT compose the output layout yourself. If you produce the content during this run, persist it with \`saveBlueprintRecord\` (blueprint: "${skill.blueprintId}", a \`subject\` for what this run is about, and \`fields\` keyed by the blueprint's field keys). If the content must instead be synthesized from what the brain already holds, call \`fillBlueprintFromBrain\` with the same blueprint + subject. The blueprint owns the fields and which entities to capture.`
       }
 
       return {

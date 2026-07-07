@@ -100,6 +100,25 @@ describe("[COMP:app-web/doc-topbar] Top-bar chrome", () => {
     expect(html).toContain(en.docPage.topbarNewTabLabel);
   });
 
+  it("labels a panel tab by its fixed label, not the blank/New-tab fallback", () => {
+    // A panel tab has pageId=null (it isn't a page) but must NOT read as a
+    // blank "New tab" — it shows its own label + glyph.
+    const html = bar({
+      tabs: [
+        {
+          key: "t0",
+          pageId: null,
+          panel: "approvals",
+          isActive: true,
+          title: en.docPage.topbarPanelApprovals,
+          icon: null,
+        },
+      ],
+    });
+    expect(html).toContain(en.docPage.topbarPanelApprovals);
+    expect(html).not.toContain(en.docPage.topbarNewTabLabel);
+  });
+
   it("falls back to Untitled for a page tab with no title", () => {
     const html = bar({
       tabs: [

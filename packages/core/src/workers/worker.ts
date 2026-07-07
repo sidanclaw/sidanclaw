@@ -115,6 +115,31 @@ export type WorkerRunsStore = {
    * docs/architecture/engine/askquestion-suspend-resume.md.
    */
   deleteTerminalOlderThan(cutoff: Date): Promise<number>
+  /**
+   * List recent worker runs for a workspace, newest first, capped at
+   * `limit`. Backs the read-only `listResearchRuns` introspection tool
+   * (docs/architecture/engine/introspection-tools.md) so the workspace
+   * primary can answer "what happened to that research job?" from ground
+   * truth instead of hunting for a status tool that never existed
+   * (assistant ability audit §1.2). System-scoped: `worker_runs` has no
+   * user column, so visibility is bounded solely by the workspace the
+   * caller passes (from `ToolContext.workspaceId`). Returns only the fields
+   * the tool renders — no `history_json` / `prompt`-body walk. `updatedAt`
+   * is a real finish time only for terminal rows; for a `running` row it is
+   * the last-checkpoint time (the tool renders it as "(running)").
+   */
+  listRecentForWorkspace(
+    workspaceId: string,
+    limit: number,
+  ): Promise<Array<{
+    id: string
+    status: WorkerStatus
+    description: string
+    prompt: string
+    sessionId: string
+    createdAt: Date
+    updatedAt: Date
+  }>>
 }
 
 /** A worker turn's accumulated LLM usage, carried with the per-spawn billing

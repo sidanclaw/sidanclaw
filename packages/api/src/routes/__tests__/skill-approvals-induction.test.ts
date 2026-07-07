@@ -114,6 +114,66 @@ describe('[COMP:api/skill-approvals-route] induction governance on approve', () 
     )
   })
 
+  it('GET / enriches staged_skill_update rows with a workspace-scoped targetSkill snapshot', async () => {
+    const updateApproval = {
+      id: 'appr-2',
+      kind: 'staged_skill_update' as const,
+      status: 'pending' as const,
+      workspaceId: WS,
+      originatingAssistantId: ASSISTANT,
+      arguments: { targetSkillId: 'skill-1', patch: { newContent: '# New body' } },
+      approvalPayload: { kind: 'staged_skill_update', targetSkillId: 'skill-1' },
+      createdAt: new Date('2026-07-07T08:00:00Z'),
+    }
+    const foreignApproval = {
+      ...updateApproval,
+      id: 'appr-3',
+      arguments: { targetSkillId: 'foreign-skill', patch: { newContent: 'x' } },
+      approvalPayload: { kind: 'staged_skill_update', targetSkillId: 'foreign-skill' },
+    }
+    const opts = baseOpts({
+      approvalsStore: {
+        listSkillApprovals: vi.fn().mockResolvedValue([updateApproval, foreignApproval]),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+      workspaceSkillStore: {
+        // skill-1 belongs to the route workspace; foreign-skill does not —
+        // the RLS-bypassing system read must re-scope before responding.
+        getByIdSystem: vi.fn(async (id: string) =>
+          id === 'skill-1'
+            ? {
+                rowId: 'skill-1',
+                workspaceId: WS,
+                name: 'Research HKTV Mall Shop Contacts',
+                slug: 'research-hktv-mall-shop-contacts',
+                content: '# Old body',
+              }
+            : {
+                rowId: 'foreign-skill',
+                workspaceId: 'ws-other',
+                name: 'Foreign',
+                slug: 'foreign',
+                content: 'nope',
+              },
+        ),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    })
+    const app = mountApp(opts)
+
+    const res = await request(app).get(`/api/skills/approvals?workspaceId=${WS}`)
+    expect(res.status).toBe(200)
+    expect(res.body.approvals).toHaveLength(2)
+    expect(res.body.approvals[0].targetSkill).toEqual({
+      id: 'skill-1',
+      name: 'Research HKTV Mall Shop Contacts',
+      slug: 'research-hktv-mall-shop-contacts',
+      content: '# Old body',
+    })
+    // Cross-workspace target → stripped to null, never leaked.
+    expect(res.body.approvals[1].targetSkill).toBeNull()
+  })
+
   it('matched existing skill → recordRederivation + learned_from edge, NO create', async () => {
     const opts = baseOpts({
       workspaceSkillStore: {

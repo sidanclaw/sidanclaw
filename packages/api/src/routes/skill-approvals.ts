@@ -10,7 +10,10 @@
  *
  * [COMP:api/skill-approvals-route]
  *
- *   GET    /                       — list pending skill approvals
+ *   GET    /                       — list pending skill approvals, each
+ *                                    `staged_skill_update` row enriched with
+ *                                    a `targetSkill` snapshot (name + current
+ *                                    content) for the queue's headline + diff
  *   POST   /:id/approve            — apply patch / create umbrella
  *   POST   /:id/reject             — mark rejected, no mutation
  */
@@ -62,16 +65,56 @@ export function skillApprovalsRoutes(opts: SkillApprovalRouteOptions): Router {
 
     try {
       const rows = await opts.approvalsStore.listSkillApprovals(userId, workspaceId)
+
+      // Enrich `staged_skill_update` rows with a snapshot of the target
+      // skill (name + current content) so the unified queue can render a
+      // headline and a current-vs-proposed diff without a per-card
+      // round-trip. `getByIdSystem` bypasses RLS, so re-scope every hit to
+      // the route workspace before it leaves the API.
+      const targetIds = Array.from(
+        new Set(
+          rows
+            .filter((r) => r.kind === 'staged_skill_update')
+            .map((r) => (r.approvalPayload as { targetSkillId?: unknown }).targetSkillId)
+            .filter((v): v is string => typeof v === 'string'),
+        ),
+      )
+      const targets = new Map<
+        string,
+        { id: string; name: string; slug: string; content: string }
+      >()
+      for (const id of targetIds) {
+        const skill = await opts.workspaceSkillStore.getByIdSystem(id)
+        if (skill && skill.workspaceId === workspaceId) {
+          targets.set(id, {
+            id: skill.rowId,
+            name: skill.name,
+            slug: skill.slug,
+            content: skill.content,
+          })
+        }
+      }
+
       res.json({
-        approvals: rows.map((r) => ({
-          id: r.id,
-          kind: r.kind,
-          status: r.status,
-          arguments: r.arguments,
-          approvalPayload: r.approvalPayload,
-          originatingAssistantId: r.originatingAssistantId,
-          createdAt: r.createdAt.toISOString(),
-        })),
+        approvals: rows.map((r) => {
+          const targetSkillId = (r.approvalPayload as { targetSkillId?: unknown })
+            .targetSkillId
+          return {
+            id: r.id,
+            kind: r.kind,
+            status: r.status,
+            arguments: r.arguments,
+            approvalPayload: r.approvalPayload,
+            originatingAssistantId: r.originatingAssistantId,
+            createdAt: r.createdAt.toISOString(),
+            // null for creation rows, and for update rows whose target was
+            // deleted after staging (the UI blocks approve in that case).
+            targetSkill:
+              typeof targetSkillId === 'string'
+                ? (targets.get(targetSkillId) ?? null)
+                : null,
+          }
+        }),
       })
     } catch (err) {
       console.error('[skill-approvals] list failed:', err)

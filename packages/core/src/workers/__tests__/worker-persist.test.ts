@@ -79,6 +79,7 @@ function makeStore(): WorkerRunsStore & {
     async recordCompletion(params) { completions.push(params) },
     async loadForSession() { return loadResult },
     async deleteTerminalOlderThan() { return 0 },
+    async listRecentForWorkspace() { return [] },
   }
 }
 

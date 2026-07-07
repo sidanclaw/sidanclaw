@@ -348,10 +348,32 @@ describe('[COMP:entities/doc-tools] listEntityTypes', () => {
     expect(listEntityTypes.isConcurrencySafe).toBe(true)
   })
 
-  it('rejects missing workspaceId at the Zod layer', () => {
+  it('accepts an empty input — workspace resolves from ToolContext (2026-07-07 context-first fix)', () => {
+    // The old contract required workspaceId in the input, which is exactly
+    // how prod got `listEntityTypes({ workspaceId: "fls.com.hk" })` → DB
+    // uuid error: the model was made to guess. Input workspaceId is now an
+    // optional deprecated fallback; context wins.
     const { listEntityTypes } = createDocEntityTools(makeDeps())
     const parsed = listEntityTypes.inputSchema.safeParse({})
-    expect(parsed.success).toBe(false)
+    expect(parsed.success).toBe(true)
+  })
+
+  it('resolves the workspace from context over input, and errors when both are absent', async () => {
+    const spy = vi.fn((workspaceId: string) => [getBuiltInEntityType(workspaceId, 'task')])
+    const deps = makeDeps({ listBuiltInEntityTypes: spy })
+    const tool = createListEntityTypesTool(deps)
+
+    // Context wins over a (stale/wrong) input workspaceId.
+    const viaContext = await tool.execute(
+      { workspaceId: 'ffffffff-0000-0000-0000-000000000000' },
+      ctx,
+    )
+    expect(viaContext.isError).toBeFalsy()
+    expect(spy).toHaveBeenCalledWith(WORKSPACE_ID)
+
+    // No context workspace + no input → honest error, nothing hits the store.
+    const bare = await tool.execute({}, { ...ctx, workspaceId: undefined } as never)
+    expect(bare.isError).toBe(true)
   })
 
   it('uses the injected listBuiltInEntityTypes (so callers can pin a fixed roster)', async () => {

@@ -8,8 +8,8 @@
  *                   + DocSidebarDataProvider + BrainSurfaceProvider
  *                   + WorkspaceChrome (the persistent sidebar)       (per workspace)
  *   the surface   → the doc page shell (`/p`), Brain, Studio, Workflow,
- *                   Approvals, Knowledge-base — each its own child route
- *                   rendered in `WorkspaceChrome`'s `<Outlet/>` slot.
+ *                   Feed, Approvals, Knowledge-base — each its own child
+ *                   route rendered in `WorkspaceChrome`'s `<Outlet/>` slot.
  *
  * EVERY `/w/[id]/*` surface that the Next build serves as a file route gets a
  * matching child route here. Without one, a sidebar click (e.g. Brain →
@@ -75,9 +75,28 @@ import ProgrammaticAccessPage from "@/app/w/[workspaceId]/studio/programmatic-ac
 import WorkflowPage from "@/app/w/[workspaceId]/workflow/page";
 import WorkflowDetailPage from "@/app/w/[workspaceId]/workflow/[id]/page";
 import WorkflowRunDetailPage from "@/app/w/[workspaceId]/workflow/[id]/runs/[runId]/page";
-import ApprovalsPage from "@/app/w/[workspaceId]/approvals/page";
 import KbGapsPage from "@/app/w/[workspaceId]/knowledge-base/gaps/page";
 import KbNewStubPage from "@/app/w/[workspaceId]/knowledge-base/new/page";
+
+// Feed surface — the ported feed-web operator app
+// (docs/plans/feed-web-consolidation.md §10). The Next routes are thin
+// wrappers by design so the SPA imports the client components directly;
+// `FeedSurfaceShell` reproduces `feed/layout.tsx` (profiles context + gate)
+// and the `:platform` guard reproduces `feed/[platform]/layout.tsx`.
+import { FeedSurfaceShell } from "@/components/feed/feed-surface-shell";
+import { FeedHome } from "@/components/feed/feed-home";
+import { FeedInbox } from "@/components/feed/feed-inbox";
+import { FeedVoice } from "@/components/feed/feed-voice";
+import { FeedInsights } from "@/components/feed/feed-insights";
+import { FeedInspiration } from "@/components/feed/feed-inspiration";
+import { DraftSessionsList } from "@/components/feed/draft-sessions-list";
+import { DraftSessionDetail } from "@/components/feed/draft-session-detail";
+import { FeedConnection } from "@/components/feed/feed-connection";
+import { FeedPolicy } from "@/components/feed/feed-policy";
+import { FeedSettings } from "@/components/feed/feed-settings";
+import { FeedSettingsMembers } from "@/components/feed/feed-settings-members";
+import { isFeedPlatform } from "@/lib/feed-nav";
+import { isOssEdition } from "@/lib/edition";
 
 declare global {
   interface Window {
@@ -154,8 +173,39 @@ export function App() {
                 element={<WorkflowRunRoute />}
               />
 
-              {/* Approvals */}
-              <Route path="approvals" element={<ApprovalsPage />} />
+              {/* Feed — the ported feed-web operator surface. FeedShell
+                  (below) mirrors `feed/layout.tsx`: OSS-edition gate +
+                  FeedSurfaceShell (profiles context, readiness gate, the
+                  feed tuning dock under the chat-dock suppression hold). */}
+              <Route path="feed" element={<FeedShell />}>
+                <Route index element={<FeedHome />} />
+                <Route path="inbox" element={<FeedInbox />} />
+                <Route path="voice" element={<FeedVoice />} />
+                <Route path=":platform" element={<FeedPlatformGuard />}>
+                  {/* No Next page exists at the bare platform root — land on
+                      the feed index instead of a dead leaf. */}
+                  <Route index element={<WorkspaceRedirect to="feed" />} />
+                  <Route path="insights" element={<FeedInsights />} />
+                  <Route path="inspiration" element={<FeedInspiration />} />
+                  <Route path="draft-sessions" element={<DraftSessionsList />} />
+                  <Route
+                    path="draft-sessions/:sessionId"
+                    element={<DraftSessionDetail />}
+                  />
+                  <Route path="connection" element={<FeedConnection />} />
+                  <Route path="policy" element={<FeedPolicy />} />
+                  <Route path="settings" element={<FeedSettings />} />
+                  <Route path="settings/members" element={<FeedSettingsMembers />} />
+                </Route>
+              </Route>
+
+              {/* Approvals — on web the Next route is a 307 into the
+                  doc-shell panel tab (`/p?panel=approvals`); the SPA mirrors
+                  it client-side. */}
+              <Route
+                path="approvals"
+                element={<WorkspaceRedirect to="p?panel=approvals" />}
+              />
 
               {/* Knowledge-base */}
               <Route path="knowledge-base/gaps" element={<KbGapsPage />} />
@@ -397,6 +447,38 @@ function StudioShell() {
       <Outlet />
     </StudioLayout>
   );
+}
+
+/**
+ * Feed surface — the SPA analogue of `feed/layout.tsx`: OSS builds bounce to
+ * the doc surface (the Next layout 404s), hosted builds mount the
+ * `FeedSurfaceShell` (profiles context + readiness gate + the feed tuning
+ * dock) around the section `<Outlet/>`.
+ */
+function FeedShell() {
+  const { workspaceId = "" } = useParams<{ workspaceId: string }>();
+  if (isOssEdition()) return <Navigate to={`/w/${workspaceId}/p`} replace />;
+  return (
+    <FeedSurfaceShell workspaceId={workspaceId}>
+      <Outlet />
+    </FeedSurfaceShell>
+  );
+}
+
+/**
+ * Platform guard — the SPA analogue of `feed/[platform]/layout.tsx`: a junk
+ * `:platform` segment lands on the feed index instead of rendering a page
+ * that would fetch with a garbage platform id.
+ */
+function FeedPlatformGuard() {
+  const { workspaceId = "", platform = "" } = useParams<{
+    workspaceId: string;
+    platform: string;
+  }>();
+  if (!isFeedPlatform(platform)) {
+    return <Navigate to={`/w/${workspaceId}/feed`} replace />;
+  }
+  return <Outlet />;
 }
 
 // ── Dynamic-segment adapters ──────────────────────────────────

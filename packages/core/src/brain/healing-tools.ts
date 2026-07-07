@@ -28,6 +28,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
+import { isAutonomousToolContext } from '../tools/capability-gate.js'
 import { createRateLimiter } from '../security/rate-limiter.js'
 import {
   promoteMemoryToEntity,
@@ -50,6 +51,7 @@ import type {
   BrainCandidateStore,
 } from './candidates-types.js'
 import type {
+  EntityKind,
   EntityLinksStore,
   EntityStore,
 } from '../entities/types.js'
@@ -215,7 +217,8 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
       'Apply a pending brain reclassifier suggestion. Today this is used for ' +
       'attribute candidates — the reclassifier saw a memory that looks like ' +
       'a structured fact about an entity (e.g. "Alice is CEO"), and accepting ' +
-      'promotes the fact into the entity\'s attributes via D.7 supersession. ' +
+      'promotes the fact into the entity\'s attributes as a new version in ' +
+      'the prior-version chain. ' +
       'The original memory stays as provenance. Caller must be the memory\'s ' +
       'original author (existing promoteMemoryToEntity gate).',
     inputSchema: z.object({
@@ -312,13 +315,18 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
       'recreates the memory; `edge` retracts the entity_link. Use when the ' +
       'user says "undo that change", "put that memory back", or wants to ' +
       'roll back a self-healing decision. Attribute promotions cannot be ' +
-      'undone via this tool — they go through D.7 supersession; revert by ' +
+      'undone via this tool — they go through the prior-version chain; revert by ' +
       'using the existing entity-correction tools to supersede again.',
     inputSchema: z.object({
       candidate_id: z.string().uuid(),
     }),
     isConcurrencySafe: false,
     isReadOnly: false,
+    // Tier-C write-gate (Posture A, docs/plans/write-gating-decision-brief.md
+    // §3): recreates memories / archives tasks / retracts edges. Itself an
+    // undo of soft ops, so interactive stays silent; the autonomous path
+    // gates so a headless loop can't silently roll changes back and forth.
+    resolveConfirmation: async (context) => isAutonomousToolContext(context),
 
     async execute(input, context) {
       try {
@@ -398,7 +406,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           case 'attribute': {
             return {
               data:
-                'Attribute promotions cannot be undone via this tool. The D.7 supersession ' +
+                'Attribute promotions cannot be undone via this tool. The prior-version ' +
                 'chain is itself reversible — use the existing entity-correction surface to ' +
                 'supersede again with the prior attribute set.',
               isError: true,
@@ -445,6 +453,11 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     }),
     isConcurrencySafe: false,
     isReadOnly: false,
+    // Tier-C write-gate (see undoReclassification): auto-applies drop /
+    // task / edge reclassifications across memories. Mixed reversibility,
+    // so interactive stays silent (the user sees the turn); a cron/workflow
+    // run mass-reclassifying with no human present parks in Approvals.
+    resolveConfirmation: async (context) => isAutonomousToolContext(context),
 
     async execute(input, context) {
       const allowed = healLimiter.check(context.userId)
@@ -572,7 +585,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
         .optional()
         .describe(
           'Opt-in: run a third LLM-clustering pass that catches semantic ' +
-            'aliases the lexical passes miss (e.g. "DD" ↔ "DeltaDeFi"). ' +
+            'aliases the lexical passes miss (e.g. "AC" ↔ "Acme Corp"). ' +
             'Costs one Flash-class LLM call per invocation. Default false.',
         ),
       llm_auto_apply_threshold: z
@@ -588,6 +601,101 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     }),
     isConcurrencySafe: false,
     isReadOnly: false,
+    // Tier-D write-gate (Posture A, docs/plans/write-gating-decision-brief.md
+    // §3): dedupeEntities is the ONE genuinely irreversible tool —
+    // survivor-wins merge collapses the loser's identity and cannot be
+    // cheaply undone (it IS the fixed CRM-dedupe incident class). Gate
+    // EVERYWHERE: interactive gets a confirmation card, the autonomous
+    // path parks a pending_approvals row (tool-executor fallback). A merge
+    // you can't walk back must never fire un-previewed.
+    requiresConfirmation: true,
+    allowPersistentApproval: false,
+
+    // Preview the merge clusters the two LEXICAL passes would collapse —
+    // "Acme Corp (company) <- AC, Acme" style — so the human sees exactly
+    // what identity is about to be merged before approving. Mirrors
+    // deleteMemory's id -> summary enrichment (memory/tools.ts). Cheap by
+    // construction: findDuplicateClustersSystem / findCrossKindDuplicate...
+    // are pure READS (they return clusters, they do NOT merge), and the
+    // opt-in LLM alias pass is deliberately NOT run here (it costs a
+    // Flash-class call and only surfaces suggestions, not auto-applies).
+    async describeConfirmation(input, context) {
+      const workspaceId = context.workspaceId
+      if (!workspaceId) return null
+      const parsed = input as {
+        cluster_cap?: number
+        kind?: string
+        cluster_by_llm?: boolean
+      }
+      const clusterCap = parsed.cluster_cap ?? 25
+      const kind = parsed.kind as EntityKind | undefined
+
+      try {
+        const withinKind = await deps.entities.findDuplicateClustersSystem(
+          context.userId,
+          workspaceId,
+          { limit: clusterCap, kind },
+        )
+        // Cross-kind pass runs only when no single-kind filter is set —
+        // exactly the runEntityDedupe gate, so the preview matches execute.
+        const crossKind =
+          kind === undefined
+            ? await deps.entities.findCrossKindDuplicateClustersSystem(
+                context.userId,
+                workspaceId,
+                { limit: clusterCap },
+              )
+            : []
+
+        if (withinKind.length === 0 && crossKind.length === 0) {
+          return ['No duplicate clusters found — nothing would be merged.']
+        }
+
+        // Resolve every clustered id to its display name in one system read.
+        const names = await resolveEntityDisplayNames(
+          deps.entities,
+          context.userId,
+          workspaceId,
+          kind,
+        )
+        const nameOf = (id: string) => names.get(id) ?? `(id ${id.slice(0, 8)})`
+
+        const lines: string[] = []
+        for (const cluster of withinKind) {
+          const [survivorId, ...mergedIds] = cluster.entityIds
+          if (!survivorId || mergedIds.length === 0) continue
+          lines.push(
+            `• ${nameOf(survivorId)} (${cluster.kind}) <- ${mergedIds
+              .map(nameOf)
+              .join(', ')}`,
+          )
+        }
+        for (const cluster of crossKind) {
+          // Cross-kind survivor is the highest-priority kind, tie-broken by
+          // oldest — but that ranking lives in entity-dedupe's private
+          // helper. For a preview, name every member and its kind so the
+          // human sees the collapse without needing the exact survivor.
+          if (cluster.entityIds.length < 2) continue
+          const members = cluster.entityIds
+            .map((id, i) => `${nameOf(id)} (${cluster.kinds[i]})`)
+            .join(' + ')
+          lines.push(`• cross-kind: ${members}`)
+        }
+
+        if (lines.length === 0) {
+          return ['No duplicate clusters found — nothing would be merged.']
+        }
+        if (parsed.cluster_by_llm) {
+          lines.push(
+            '(plus any semantic-alias clusters the opt-in LLM pass finds at run time)',
+          )
+        }
+        return lines
+      } catch (err) {
+        console.debug('[healing-tools] dedupeEntities describeConfirmation failed:', err)
+        return null
+      }
+    },
 
     async execute(input, context) {
       try {
@@ -645,10 +753,10 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     description:
       'Register an alternate name for an existing entity. After this, ' +
       'every extraction or chat mention of the alias resolves to the ' +
-      'same entity row — Pipeline B no longer creates a duplicate. ' +
-      'Use when the user says "DD is the same as DeltaDeFi", "tonic ' +
-      'is short for deltadefi-protocol/tonic", or "MeshJS/multisig ' +
-      'is the multisig repo". Aliases are stored lowercase but ' +
+      'same entity row — ingest no longer creates a duplicate. ' +
+      'Use when the user says "AC is the same as Acme Corp", "tonic ' +
+      'is short for acme-labs/tonic", or "acme-labs/gateway ' +
+      'is the gateway repo". Aliases are stored lowercase but ' +
       'case-insensitively matched. Returns a conflict error (with the ' +
       'other entity id) if the alias is already bound to a different ' +
       'live entity in this workspace; resolve via dedupeEntities or ' +
@@ -719,7 +827,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     name: 'splitAlias',
     description:
       'Remove a previously-registered alias from an entity. Use when ' +
-      'the user says "actually DD is NOT DeltaDeFi" or "stop treating ' +
+      'the user says "actually AC is NOT Acme Corp" or "stop treating ' +
       'X as Y". The next extraction of the removed alias will resolve ' +
       'as a new entity (or whatever else matches it). Idempotent — ' +
       'removing an alias that was not registered is a no-op.',
@@ -729,6 +837,10 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     }),
     isConcurrencySafe: false,
     isReadOnly: false,
+    // Tier-C write-gate (see undoReclassification): removes an alias
+    // binding. Idempotent / re-noteable, so interactive stays silent; the
+    // autonomous path gates.
+    resolveConfirmation: async (context) => isAutonomousToolContext(context),
 
     async execute(input, context) {
       try {
@@ -767,6 +879,29 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     noteAlias,
     splitAlias,
   ]
+}
+
+/**
+ * Build an id -> displayName map for every live entity in the workspace,
+ * so `dedupeEntities`' confirmation preview can name each clustered id.
+ * One system read (`listLiveEntitiesSystem`, the same source the LLM
+ * alias pass already uses). When a `kind` filter is set the caller only
+ * previews that kind's within-kind clusters, so the narrowed list is
+ * enough; unfiltered previews (which also show cross-kind clusters) pull
+ * every kind. Best-effort — an id missing from the map falls back to a
+ * short id in the caller.
+ */
+async function resolveEntityDisplayNames(
+  entities: EntityStore,
+  actorUserId: string,
+  workspaceId: string,
+  kind: EntityKind | undefined,
+): Promise<Map<string, string>> {
+  const rows = await entities.listLiveEntitiesSystem(actorUserId, workspaceId, {
+    kind,
+    limit: 500,
+  })
+  return new Map(rows.map((e) => [e.id, e.displayName]))
 }
 
 /**
