@@ -6,6 +6,7 @@ import { getSelfEntityId } from '../db/memories.js'
 import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock } from '@sidanclaw/core'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@sidanclaw/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
+import { gateSessionRead } from './sessions.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
@@ -1569,6 +1570,21 @@ export function chatRoutes(options: WebChatOptions): Router {
         return
       }
 
+      // Per-user ownership/clearance gate on the resolved session. For a
+      // SHARED workspace-primary assistant, another member's session carries
+      // the same assistant.id, so the check above passes — without this a
+      // member could resume, append to, and (via truncateFromMessageId)
+      // delete another member's private session by naming its id. Reuses the
+      // same gate as GET /:id/messages so reads and writes can't drift:
+      // workspace/draft sessions allow any authorized member, every other
+      // session is owner-only. (WS3 session-resume scoping, 2026-07-07.)
+      const sessionDenied = await gateSessionRead(user.id, session)
+      if (sessionDenied) {
+        sendEvent('error', { error: sessionDenied.error })
+        res.end()
+        return
+      }
+
       // Live multi-watcher sessions (draft mode): any participant can drive a
       // turn, but only one at a time. Reject concurrent turns with a clean 409
       // so the frontend can render "someone else is in a turn".
@@ -1806,7 +1822,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       let retryHint = ''
       if (truncateFromMessageId) {
         try {
-          const { deletedMessages } = await truncateMessagesFrom(truncateFromMessageId)
+          // Scope the truncate to the caller's own resolved session — a
+          // foreign message id resolves to a different session and is refused
+          // (WS3 cross-session chat-deletion fix).
+          const { deletedMessages } = await truncateMessagesFrom(truncateFromMessageId, session.id)
 
           // Find the old user prompt and the old assistant response (if any)
           const oldUser = deletedMessages.find((m) => m.role === 'user')

@@ -247,4 +247,33 @@ describe('[COMP:api/sessions-route] truncateMessagesFrom', () => {
     expect(deleteSql).toContain('sequence_num >= $2')
     expect(mockQuery.mock.calls[2][1]).toEqual(['s_1', 5])
   })
+
+  // WS3 cross-session chat-deletion regression: the primitive resolves the
+  // session from the message id, so a caller must be able to pin the session
+  // it believes it is truncating. A message that lives in a DIFFERENT session
+  // than expectedSessionId is refused (treated as not-found) — no DELETE runs.
+  it('refuses a message whose session differs from expectedSessionId', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ sessionId: 's_victim', sequenceNum: 2 }],
+      rowCount: 1,
+    } as never)
+
+    const result = await truncateMessagesFrom('m_leaked', 's_caller')
+    expect(result.deleted).toBe(0)
+    expect(result.sessionId).toBeNull()
+    expect(result.deletedMessages).toEqual([])
+    // Only the info lookup ran — no capture SELECT, no DELETE.
+    expect(mockQuery).toHaveBeenCalledOnce()
+  })
+
+  it('proceeds when expectedSessionId matches the message session', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ sessionId: 's_1', sequenceNum: 5 }], rowCount: 1 } as never)
+      .mockResolvedValueOnce({ rows: [{ id: 'm_5' }], rowCount: 1 } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+
+    const result = await truncateMessagesFrom('m_5', 's_1')
+    expect(result.deleted).toBe(1)
+    expect(result.sessionId).toBe('s_1')
+  })
 })

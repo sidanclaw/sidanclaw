@@ -697,7 +697,10 @@ export async function findSessionMessageByChannelId(
  * Returns the deleted messages so the caller can log them to analytics
  * (preserving the signal that a retry/edit happened).
  */
-export async function truncateMessagesFrom(messageId: string): Promise<{
+export async function truncateMessagesFrom(
+  messageId: string,
+  expectedSessionId?: string,
+): Promise<{
   deleted: number
   sessionId: string | null
   deletedMessages: SessionMessage[]
@@ -711,6 +714,16 @@ export async function truncateMessagesFrom(messageId: string): Promise<{
   if (info.rows.length === 0) return { deleted: 0, sessionId: null, deletedMessages: [] }
 
   const { sessionId, sequenceNum } = info.rows[0]
+
+  // This primitive resolves the session FROM the message id, so a leaked
+  // message id from another session could delete that session's history.
+  // When the caller names the session it believes it is truncating, refuse a
+  // message that lives in a different session (treated as not-found). WS3
+  // cross-session chat-deletion fix, 2026-07-07 — the public-API twin already
+  // guards this at the route; this makes the primitive safe by construction.
+  if (expectedSessionId != null && sessionId !== expectedSessionId) {
+    return { deleted: 0, sessionId: null, deletedMessages: [] }
+  }
 
   // Capture what we're about to delete
   const deletedMessages = await query<SessionMessage>(
