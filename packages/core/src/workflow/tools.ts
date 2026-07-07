@@ -29,7 +29,10 @@ import {
   WorkflowDefinitionSchema,
   WorkflowTriggerSchema,
   STEP_TYPE_VALUES,
+  WORKFLOW_TRIGGER_KINDS,
+  WORKFLOW_EVENT_SOURCE_TYPES,
 } from './schemas.js'
+import { TASK_LIFECYCLE_ACTIONS } from './task-event-trigger.js'
 import { RESERVED_OUTCOME_VAR_NAMES } from './types.js'
 import type {
   AssistantCallStep,
@@ -64,6 +67,7 @@ import {
   type DeliveryTargetResolver,
   type ViewWorkspaceResolver,
 } from '../scheduling/delivery-resolution.js'
+import { loadBuiltinSkills } from '../skills/loader.js'
 
 /** Per-user cap on enabled recurring schedules — mirrors createScheduledJob. */
 const MAX_ENABLED_RECURRING = 100
@@ -91,6 +95,20 @@ export type WorkflowToolDeps = {
     userId: string,
     pageId: string,
   ) => Promise<{ workspaceId: string; state: 'draft' | 'saved'; name: string } | null>
+  /**
+   * Workspace-skill listing for the `assistant_call` skill-attachment checks
+   * in proposeWorkflow / createWorkflow / updateWorkflow (`skillAttachmentIssues`):
+   * a dangling attached slug is an error; a workspace skill named in prompt
+   * prose but not attached is a warning. Implemented over
+   * `skillStore.listForWorkspace` (RLS-scoped to the AUTHORING user). Absent
+   * (tests, minimal boots) = store-backed checks are skipped; the callee's
+   * runtime governance gate stays authoritative. See
+   * docs/architecture/features/workflow.md → "assistant_call skills".
+   */
+  listAuthorableSkills?: (
+    userId: string,
+    workspaceId: string,
+  ) => Promise<Array<{ slug: string; name: string }>>
   /**
    * The workflow's ACTUAL scheduled-trigger rows (any creator) — backs the
    * `triggerJobs` field on `getWorkflow` so drift between the
@@ -186,19 +204,48 @@ const idShape = z.string().uuid()
 /**
  * Zod surface for an inline trigger on the authoring tools. Loosened to a
  * passthrough object so the tool accepts the discriminated union without
- * duplicating it; `WorkflowTriggerSchema` is the real validator applied in
- * `execute`. Optional — omit to leave the workflow `manual`.
+ * duplicating it (the query-loop converter would flatten the union's variants
+ * into one merged object for Gemini anyway); `WorkflowTriggerSchema` is the
+ * real validator applied in `execute`. Optional — omit to leave the workflow
+ * `manual`.
+ *
+ * The description is the model's ALWAYS-ON knowledge of the trigger surface,
+ * so it must be complete, closed-world, and true to what `execute` accepts —
+ * the 2026-07 "Task Created event must be configured in the web builder"
+ * hallucination was this text asserting event triggers were web-only while
+ * the server accepted them here. Kind and source-type lists interpolate the
+ * compile-time-checked constants from `schemas.ts`; never hand-write them.
  */
+export const TRIGGER_INPUT_DESCRIPTION =
+  `Optional trigger. The ONLY trigger kinds that exist: ${WORKFLOW_TRIGGER_KINDS.join(' | ')}. ` +
+  `If the user asks to trigger on anything outside these kinds (and, for events, outside the source types below), that capability does not exist — say so plainly instead of improvising. Omit for manual (run on demand). ` +
+  `\n- \`{ kind: "schedule", schedule: {type: "daily"|"weekly"|"monthly"|"once"|"cron", ...}, timezone?, mode?, delivery?: { channel: "telegram"|"slack"|"whatsapp" }, policy?: { silentUntilFire?, nagIntervalMins?, nagUntilKeyword? } }\` ` +
+  `fires on a cadence in ONE call — scheduling is a workflow trigger, so no separate scheduling step or tool is needed. \`delivery.channel\` pushes the result to the user (for a recurring reminder the exact chat + Telegram topic are captured automatically from this session); \`policy\` covers "remind every N min until <keyword>" and silent-until-fire. ` +
+  `\n- \`{ kind: "event", event: { sources: [{ source, match? }, ...] } }\` fires from a workspace signal and IS fully authorable here. The ONLY source types: ${WORKFLOW_EVENT_SOURCE_TYPES.join(' | ')}. ` +
+  `Shapes: \`{ type: "connector", connectorInstanceId, provider }\` (a CONNECTED connector instance), \`{ type: "channel", channelIntegrationId, channel }\` (a connected chat integration), \`{ type: "page", pageId }\` (a doc page + its direct children), \`{ type: "task" }\` (the workspace's tasks — id-less). ` +
+  `\`match\` narrows firing: keywords / fromActors / inChannels / mentions / tags (task events only) / fromBots (default false — bot- or assistant-authored events only fire with \`fromBots: true\`). ` +
+  `Task lifecycle actions are matched via \`match.inChannels\`: ${TASK_LIFECYCLE_ACTIONS.join(' / ')}. A connector/channel source id that does not reference a live connected source never fires — verify it is connected first. ` +
+  `\n- \`{ kind: "webhook", match?: { condition } }\` fires from an external signed POST. The kind can be set here, but the webhook URL slug + signing secret are provisioned in the web builder — tell the user the workflow cannot receive deliveries until they complete that step there.`
+
 const triggerInputSchema = z
-  .object({ kind: z.enum(['manual', 'schedule', 'webhook', 'event']) })
+  .object({ kind: z.enum(WORKFLOW_TRIGGER_KINDS) })
+  .passthrough()
+  .describe(TRIGGER_INPUT_DESCRIPTION)
+
+/**
+ * Pointer variant for `createWorkflow` / `updateWorkflow` — same accepted
+ * shape, but the full contract text lives once, on `proposeWorkflow` (the
+ * mandated first call), mirroring how `definition` docs work ("See
+ * proposeWorkflow tool docs for the schema"). Embedding the full text on all
+ * three tools tripled its per-turn token cost for no information gain
+ * (`prompt-token-cost.test.ts` is the budget).
+ */
+const triggerInputSchemaRef = z
+  .object({ kind: z.enum(WORKFLOW_TRIGGER_KINDS) })
   .passthrough()
   .describe(
-    'Optional trigger. `{ kind: "manual" }` (default) runs only on demand. ' +
-      '`{ kind: "schedule", schedule: {type,...}, timezone?, mode?, delivery?: { channel }, policy?: { silentUntilFire?, nagIntervalMins?, nagUntilKeyword? } }` ' +
-      'fires the workflow on a cadence in ONE call — scheduling is a workflow trigger, so no separate scheduling step or tool is needed. ' +
-      'Set `delivery.channel` (telegram/slack/whatsapp) to push the result to the user; for a recurring reminder the exact chat + Telegram topic is captured automatically from the session. ' +
-      'Use `policy` for "remind every N min until <keyword>" (nag) or silent-until-fire. ' +
-      '`webhook` / `event` are configured in the web builder, not here.',
+    `Optional trigger — same contract as proposeWorkflow's \`trigger\` parameter (see it for the full shapes, event sources, and task actions). ` +
+      `The ONLY kinds: ${WORKFLOW_TRIGGER_KINDS.join(' | ')}; anything else does not exist. All kinds are authorable here; only webhook slug/secret provisioning happens in the web builder.`,
   )
 
 function workspaceGate(workspaceId: string | null | undefined): { data: string; isError: true } | null {
@@ -377,6 +424,112 @@ async function pageAnchorIssues(
   return { errors, warnings }
 }
 
+/** A saved-skill reference in prompt prose — the bare-word fallback signal. */
+const SKILL_PROSE_SIGNAL = /\bskill\b/i
+
+/**
+ * `assistant_call` skill-attachment checks. A workflow callee has NO skill
+ * surface unless the step attaches one (`skills` = offered via `useSkill`,
+ * `enforcedSkills` = injected as mandatory instructions), so a skill named
+ * only in prompt prose silently degrades on every run — the 2026-07-07
+ * fls.com.hk Middle Mile incident, and the exact skills-shaped analog of the
+ * doc-work-without-anchor class. Mirrors `pageAnchorIssues`:
+ *
+ *  - **error** — an attached slug that is neither a workspace skill slug nor
+ *    a built-in skill id (it can never load; the callee would skip it).
+ *    Needs the `listAuthorableSkills` dep; skipped without it.
+ *  - **warning** — a workspace skill whose slug or (multi-word) name appears
+ *    in the prompt while the step attaches nothing matching it. Dep-backed.
+ *  - **warning** — the prompt says "skill" but both lists are empty and the
+ *    store-backed match found nothing (paraphrased / nonexistent skill, or
+ *    minimal boots with no dep). Pure fallback.
+ *
+ * See docs/architecture/features/workflow.md → "assistant_call skills".
+ */
+async function skillAttachmentIssues(
+  def: WorkflowDefinition,
+  ctx: { userId: string; workspaceId: string },
+  list: WorkflowToolDeps['listAuthorableSkills'],
+): Promise<{ errors: string[]; warnings: string[] }> {
+  const errors: string[] = []
+  const warnings: string[] = []
+  const steps = def.steps
+    .map((step, i) => ({ step, i }))
+    .filter((s): s is { step: AssistantCallStep; i: number } => s.step.type === 'assistant_call')
+  if (steps.length === 0) return { errors, warnings }
+
+  let workspaceSkills: Array<{ slug: string; name: string }> | null = null
+  if (list) {
+    try {
+      workspaceSkills = await list(ctx.userId, ctx.workspaceId)
+    } catch (err) {
+      // A store blip never blocks authoring — the runtime gate stays authoritative.
+      console.warn('[workflow/skillAttachmentIssues] skill listing threw:', err)
+    }
+  }
+  const knownSlugs = new Set<string>()
+  if (workspaceSkills) {
+    for (const s of workspaceSkills) knownSlugs.add(s.slug.toLowerCase())
+    for (const s of loadBuiltinSkills()) knownSlugs.add(s.id.toLowerCase())
+  }
+
+  for (const { step, i } of steps) {
+    const attached = [...(step.skills ?? []), ...(step.enforcedSkills ?? [])]
+    const attachedLower = new Set(attached.map((s) => s.toLowerCase()))
+
+    // Dangling attached slug — can never load; reject at authoring time.
+    if (workspaceSkills) {
+      for (const [field, slugs] of [
+        ['skills', step.skills],
+        ['enforcedSkills', step.enforcedSkills],
+      ] as const) {
+        for (const slug of slugs ?? []) {
+          if (!knownSlugs.has(slug.toLowerCase())) {
+            errors.push(
+              `steps.${i}.${field}: skill "${slug}" not found — it is neither a workspace skill slug nor a built-in skill id, so the callee would skip it on every run. Use the exact slug of an existing skill.`,
+            )
+          }
+        }
+      }
+    }
+
+    // Workspace skill referenced in prose but not attached. Slugs match on a
+    // word boundary; names only when multi-word (single common words would
+    // false-positive ordinary prose).
+    let proseMatched = false
+    if (workspaceSkills) {
+      const prompt = step.prompt.toLowerCase()
+      for (const s of workspaceSkills) {
+        if (attachedLower.has(s.slug.toLowerCase())) continue
+        const slugHit = new RegExp(`\\b${escapeRegExp(s.slug)}\\b`, 'i').test(step.prompt)
+        const nameHit = s.name.trim().includes(' ') && prompt.includes(s.name.trim().toLowerCase())
+        if (slugHit || nameHit) {
+          proseMatched = true
+          warnings.push(
+            `Step "${step.id}" mentions the skill "${s.name}" in its prompt but does not attach it. A workflow callee has no skill surface unless the step attaches one, so the reference silently does nothing at run time. Add "${s.slug}" to the step's \`enforcedSkills\` (always applied — the usual choice for workflows) or \`skills\` (offered via useSkill, the callee chooses); if the mention is incidental, reword the prompt.`,
+          )
+        }
+      }
+    }
+
+    // Bare "skill" mention with nothing attached — the pure fallback.
+    if (!proseMatched && attached.length === 0 && SKILL_PROSE_SIGNAL.test(step.prompt)) {
+      const available = workspaceSkills?.slice(0, 8).map((s) => s.slug)
+      warnings.push(
+        `Step "${step.id}" tells the callee to use a skill but attaches none (\`skills\` / \`enforcedSkills\` are empty) — skills named only in prompt prose are invisible to the callee. Attach the skill's slug to \`enforcedSkills\` (always applied) or \`skills\` (offered), or reword the prompt if no saved skill is meant.${
+          available?.length ? ` Workspace skills: ${available.join(', ')}.` : ''
+        }`,
+      )
+    }
+  }
+  return { errors, warnings }
+}
+
+/** Escape a literal for embedding in a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 /**
  * Connector names that, when a step pulls data from them without a pinned
  * tool, are the fix-D footgun: an `assistant_call` that fetches connector data
@@ -410,7 +563,7 @@ async function dependencyIssues(
   def: WorkflowDefinition,
   trigger: WorkflowTrigger | undefined,
   context: ToolContext,
-  deps: Pick<WorkflowToolDeps, 'validateDeliveryTarget' | 'preflightConnectorTool'>,
+  deps: Pick<WorkflowToolDeps, 'validateDeliveryTarget' | 'preflightConnectorTool' | 'resolvePageAnchor'>,
 ): Promise<{ errors: string[]; warnings: string[] }> {
   const errors: string[] = []
   const warnings: string[] = []
@@ -515,6 +668,35 @@ async function dependencyIssues(
       warnings.push(
         `Step "${step.id}" asks the assistant to pull data from a connector but pins no tool, so the assistant chooses tools on the fly — and if the connector errors (bad token, not connected) it may fabricate a result from memory instead of failing. Prefer a dedicated \`tool_call\` step that fetches the data (it HALTS the run if the connector errors), storing it via \`storeOutputAs\`, feeding an \`assistant_call\` that summarizes \`{{vars.<name>}}\`. If you keep it as one step, add a \`tools\` allow-list naming the exact connector tool.`,
       )
+    }
+  }
+
+  // ── E. Trigger-side truth checks ─────────────────────────────────────────
+  // A webhook trigger is authorable here, but its URL slug + signing secret
+  // are provisioned only in the web builder — without them the receiver can
+  // never match a delivery, so the workflow is created dead. Surface that at
+  // propose time instead of letting the user discover it from silence.
+  if (trigger?.kind === 'webhook') {
+    warnings.push(
+      'This webhook trigger is saved, but the webhook URL slug + signing secret are provisioned in the web builder (open the workflow there to finish setup). Until then the workflow cannot receive deliveries. Tell the user this explicitly.',
+    )
+  }
+  // An event trigger watching a doc page that does not exist (or is not
+  // visible to the author) never fires — same dead-workflow class as a
+  // dangling page anchor, so hold it to the same authoring standard.
+  if (trigger?.kind === 'event' && deps.resolvePageAnchor) {
+    for (const [i, sub] of trigger.event.sources.entries()) {
+      if (sub.source.type !== 'page') continue
+      try {
+        const page = await deps.resolvePageAnchor(context.userId, sub.source.pageId)
+        if (!page || page.workspaceId !== context.workspaceId) {
+          errors.push(
+            `trigger.event.sources[${i}].source.pageId: page not found in this workspace — an event trigger on a missing page never fires. Pick an existing page (or drop this source).`,
+          )
+        }
+      } catch (err) {
+        console.warn('[workflow/dependencyIssues] page-source resolver threw:', err)
+      }
     }
   }
 
@@ -866,7 +1048,9 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       `Use \`storeOutputAs\` on a step to make its output available as \`{{vars.<name>}}\` in later steps. Use \`{{input.<name>}}\` to reference the trigger payload. ` +
       `\n\nPage editing: when a step should edit or produce a doc page, set the step's \`page\` field — NEVER just mention a page id in the prompt (the callee gets no page tools that way and the step fails on every run). ` +
       `Variants: \`page: {"id": "<page uuid>"}\` edits an existing page; \`page: {"create": true, "title": "...", "nestUnder": "<page uuid>"}\` creates a saved page each run and anchors the step to it (title may use {{vars}}/{{input}}); \`page: {"fromStep": "<stepId>"}\` edits the page an earlier create-step made this run. ` +
-      `The callee then runs with the doc tools (getCurrentPage / patchPage / renderPage) against that page.`,
+      `The callee then runs with the doc tools (getCurrentPage / patchPage / renderPage) against that page.` +
+      `\n\nSkills: when a step should follow a saved brain skill, ATTACH it on the step — NEVER just name the skill in the prompt (a workflow callee has no skill surface unless the step attaches one, so a prose-only reference silently does nothing on every run). \`enforcedSkills: ["<slug>"]\` force-loads the skill's instructions every run (the usual choice for workflows); \`skills: ["<slug>"]\` offers it via useSkill and the callee chooses. Use exact skill slugs; an attached slug that matches no workspace skill or built-in id is rejected. ` +
+      `For structured output, an assistant_call research step may also set \`blueprintId: "<workspace skill slug | page-template id>"\` together with a \`page\` anchor to fill that blueprint instead of free-form authoring — blueprints themselves are created in the web app (Brain → Blueprints) or minted from a skill's extraction spec; they cannot be created from chat, so never claim otherwise.`,
     inputSchema: z.object({
       name: z
         .string()
@@ -930,11 +1114,18 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       // External-dependency checks: delivery-target reachability + connector
       // preflight (fix A / B); the fix-D fabrication-risk warning rides along.
       const depIssues = await dependencyIssues(definition, trigger, context, deps)
-      if (anchorIssues.errors.length > 0 || depIssues.errors.length > 0) {
+      // Skill-attachment checks — a skill named in prose but not attached is
+      // the skills-shaped doc-anchor footgun; a dangling attached slug blocks.
+      const skillIssues = await skillAttachmentIssues(
+        definition,
+        { userId: context.userId, workspaceId: context.workspaceId! },
+        deps.listAuthorableSkills,
+      )
+      if (anchorIssues.errors.length > 0 || depIssues.errors.length > 0 || skillIssues.errors.length > 0) {
         return {
           data: {
             ok: false,
-            errors: [...anchorIssues.errors, ...depIssues.errors],
+            errors: [...anchorIssues.errors, ...depIssues.errors, ...skillIssues.errors],
             stepTypes: STEP_TYPE_VALUES,
           },
           isError: true,
@@ -952,6 +1143,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
             ...warningsFor(definition, { phaseBActive, isKnownTool: deps.isKnownTool }),
             ...anchorIssues.warnings,
             ...depIssues.warnings,
+            ...skillIssues.warnings,
             ...triggerWarnings(definition, trigger),
             ...reservedOutcomeVarWarnings(definition, trigger),
           ],
@@ -968,7 +1160,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     description:
       `Persist a workflow definition that the user has explicitly approved. ` +
       `You MUST first call \`proposeWorkflow\`, present the proposal verbatim, get the user's explicit OK ("yes", "create it", "go ahead"), and only then call \`createWorkflow\`. Never call this tool from a fresh user description without proposing first. ` +
-      `\n\nScheduling is built in: pass \`trigger: { kind: "schedule", schedule, ... }\` to create AND schedule in one call — there is no separate scheduling step. A one-step assistant_call workflow with \`trigger.delivery\` IS a reminder ("remind me at 2pm"); a multi-step workflow is an automation. Confirm the schedule with the user first (mention the returned relativeTime / deliveryTarget so timezone or destination mistakes are caught).`,
+      `\n\nTriggering is built in: pass \`trigger\` to create AND wire the trigger in one call — \`{ kind: "schedule", schedule, ... }\` schedules it (no separate scheduling step), and \`{ kind: "event", event: { sources } }\` subscribes it to workspace signals (connector / channel / page / task events) right here — event triggers are NOT web-builder-only. A one-step assistant_call workflow with \`trigger.delivery\` IS a reminder ("remind me at 2pm"); a multi-step workflow is an automation. Confirm the schedule with the user first (mention the returned relativeTime / deliveryTarget so timezone or destination mistakes are caught).`,
     inputSchema: z.object({
       name: z.string().min(1).max(120),
       description: z.string().max(2000).optional(),
@@ -978,7 +1170,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           steps: z.array(z.unknown()),
         })
         .passthrough(),
-      trigger: triggerInputSchema.optional(),
+      trigger: triggerInputSchemaRef.optional(),
       targetViewId: z
         .string()
         .uuid()
@@ -1029,9 +1221,15 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       // Delivery-target reachability + connector preflight (fix A / B). Block
       // here too — createWorkflow can be reached with an edited definition.
       const depIssues = await dependencyIssues(parsed.data, trigger, context, deps)
-      if (anchorIssues.errors.length > 0 || depIssues.errors.length > 0) {
+      // Dangling attached skill slugs block here too (same reasoning).
+      const skillIssues = await skillAttachmentIssues(
+        parsed.data,
+        { userId: context.userId, workspaceId: context.workspaceId! },
+        deps.listAuthorableSkills,
+      )
+      if (anchorIssues.errors.length > 0 || depIssues.errors.length > 0 || skillIssues.errors.length > 0) {
         return {
-          data: { ok: false, errors: [...anchorIssues.errors, ...depIssues.errors] },
+          data: { ok: false, errors: [...anchorIssues.errors, ...depIssues.errors, ...skillIssues.errors] },
           isError: true,
         }
       }
@@ -1105,6 +1303,12 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           triggerKind: record.trigger.kind,
           ...(schedule ?? {}),
           ...(scheduleError ? { scheduleError } : {}),
+          ...(trigger?.kind === 'webhook'
+            ? {
+                webhookNote:
+                  'Created, but the webhook URL slug + signing secret are provisioned in the web builder — the workflow cannot receive deliveries until the user finishes setup there. Relay this to the user.',
+              }
+            : {}),
         },
       }
     },
@@ -1114,7 +1318,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     name: 'updateWorkflow',
     description:
       `Edit an existing workflow — add a step, remove a step, reorder steps, rewrite a step's fields, OR change its trigger / schedule. Patches any subset of name / description / definition / enabled / trigger. ` +
-      `Pass \`trigger: { kind: "schedule", schedule, ... }\` to (re)schedule the workflow, or \`{ kind: "manual" }\` to unschedule it. (Webhook secret lifecycle + event sources are still edited in the web builder.) ` +
+      `Pass \`trigger: { kind: "schedule", schedule, ... }\` to (re)schedule the workflow, \`{ kind: "event", event: { sources } }\` to (re)wire its event subscriptions, or \`{ kind: "manual" }\` to unschedule it. (Only the webhook URL slug + signing secret are provisioned in the web builder; every trigger kind is editable here.) ` +
       `Workflow: first call \`getWorkflow\` to read the current definition, construct the edited definition, then call \`proposeWorkflow\` to validate + preview it, present the change to the user, get explicit confirmation ("yes", "go ahead"), and only then call \`updateWorkflow\`. Never edit a definition you have not read with \`getWorkflow\` first. ` +
       `Editing does not affect runs already in flight — the change applies to the next run.`,
     inputSchema: z.object({
@@ -1130,7 +1334,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         .optional()
         .describe('Full replacement DAG. Omit to leave the steps unchanged. See proposeWorkflow tool docs for the schema.'),
       enabled: z.boolean().optional().describe('Disable (false) or re-enable (true) the workflow.'),
-      trigger: triggerInputSchema.optional(),
+      trigger: triggerInputSchemaRef.optional(),
       targetViewId: z
         .string()
         .uuid()
@@ -1187,8 +1391,13 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           { userId: context.userId, workspaceId: context.workspaceId! },
           deps.resolvePageAnchor,
         )
-        if (anchorIssues.errors.length > 0) {
-          return { data: { ok: false, errors: anchorIssues.errors }, isError: true }
+        const skillIssues = await skillAttachmentIssues(
+          parsed.data,
+          { userId: context.userId, workspaceId: context.workspaceId! },
+          deps.listAuthorableSkills,
+        )
+        if (anchorIssues.errors.length > 0 || skillIssues.errors.length > 0) {
+          return { data: { ok: false, errors: [...anchorIssues.errors, ...skillIssues.errors] }, isError: true }
         }
         fields.definition = parsed.data
       }

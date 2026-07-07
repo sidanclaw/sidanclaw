@@ -669,7 +669,7 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
     let promptFragment = ''
     const listing = formatSkillListing(availableSkills)
     if (listing) {
-      promptFragment = `\n\n# Available Skills\nUse the useSkill tool to activate a skill when relevant.\n${listing}`
+      promptFragment = `\n\n# Available Skills\nUse the useSkill tool to activate a skill when relevant.\nBefore answering what sidanclaw (or you) can do, or how a feature works, activate the most relevant skill FIRST and answer only from it.\n${listing}`
     }
 
     if (availableSkills.length > 0) {

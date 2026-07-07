@@ -527,3 +527,41 @@ export const WorkflowTriggerSchema = z.discriminatedUnion('kind', [
 ])
 
 export type WorkflowTrigger = z.infer<typeof WorkflowTriggerSchema>
+
+/**
+ * Canonical capability lists for the trigger surface — the values the
+ * model-facing authoring surfaces (the `trigger` input description in
+ * `workflow/tools.ts` and the `workflow-builder` builtin skill) must
+ * enumerate, closed-world. Declared next to the schemas and compile-time
+ * asserted against them (below), so a new trigger kind or event source type
+ * cannot ship without these lists — and therefore the model-facing text —
+ * moving in the same change. The skill side of the pairing is graded by
+ * `pnpm check` (capability-surface pairing).
+ */
+export const WORKFLOW_TRIGGER_KINDS = [
+  'manual',
+  'schedule',
+  'webhook',
+  'event',
+] as const satisfies readonly WorkflowTrigger['kind'][]
+
+export const WORKFLOW_EVENT_SOURCE_TYPES = [
+  'connector',
+  'channel',
+  'page',
+  'task',
+] as const satisfies readonly z.infer<typeof EventSubscriptionSchema>['source']['type'][]
+
+// Compile-time exhaustiveness: `satisfies` (above) rejects a wrong/extra
+// member; these reject a MISSING one — adding a union variant without
+// extending the matching list is a type error.
+type AssertNever<T extends never> = T
+type _TriggerKindsExhaustive = AssertNever<
+  Exclude<WorkflowTrigger['kind'], (typeof WORKFLOW_TRIGGER_KINDS)[number]>
+>
+type _EventSourceTypesExhaustive = AssertNever<
+  Exclude<
+    z.infer<typeof EventSubscriptionSchema>['source']['type'],
+    (typeof WORKFLOW_EVENT_SOURCE_TYPES)[number]
+  >
+>

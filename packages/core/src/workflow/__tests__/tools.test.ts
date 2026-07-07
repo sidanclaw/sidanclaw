@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { createWorkflowTools, type WorkflowToolEvent } from '../tools.js'
+import { createWorkflowTools, TRIGGER_INPUT_DESCRIPTION, type WorkflowToolEvent } from '../tools.js'
+import { WORKFLOW_TRIGGER_KINDS, WORKFLOW_EVENT_SOURCE_TYPES } from '../schemas.js'
+import { TASK_LIFECYCLE_ACTIONS } from '../task-event-trigger.js'
 import type {
   WorkflowDefinition,
   WorkflowRecord,
@@ -263,6 +265,7 @@ function makeAllTools(opts?: {
     | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
     | { ok: false; reason: string }
   >
+  listAuthorableSkills?: (userId: string, workspaceId: string) => Promise<Array<{ slug: string; name: string }>>
 }) {
   const events: WorkflowToolEvent[] = []
   const stores = fakeStores()
@@ -288,6 +291,7 @@ function makeAllTools(opts?: {
     validateDeliveryTarget: opts?.validateDeliveryTarget,
     preflightConnectorTool: opts?.preflightConnectorTool,
     listSlackChannels: opts?.listSlackChannels,
+    listAuthorableSkills: opts?.listAuthorableSkills,
   })
   return { tools, stores, events, jobStore }
 }
@@ -1276,5 +1280,211 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
       makeContext(),
     )
     expect(r.isError).toBeFalsy()
+  })
+})
+
+describe('[COMP:workflow/tools] trigger capability surface (closed-world, derived)', () => {
+  const ASSISTANT_DEF: WorkflowDefinition = {
+    startStepId: 's1',
+    steps: [
+      { id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Research the task.' },
+    ],
+  }
+  const TASK_EVENT_TRIGGER = {
+    kind: 'event',
+    event: {
+      sources: [
+        { source: { type: 'task' }, match: { inChannels: ['created', 'tagged'], tags: ['prospect'] } },
+      ],
+    },
+  }
+
+  it('the trigger description enumerates every kind, source type, and task action — derived, closed-world, no web-builder-only claim', () => {
+    for (const kind of WORKFLOW_TRIGGER_KINDS) {
+      expect(TRIGGER_INPUT_DESCRIPTION).toContain(kind)
+    }
+    for (const sourceType of WORKFLOW_EVENT_SOURCE_TYPES) {
+      expect(TRIGGER_INPUT_DESCRIPTION).toContain(sourceType)
+    }
+    for (const action of TASK_LIFECYCLE_ACTIONS) {
+      expect(TRIGGER_INPUT_DESCRIPTION).toContain(action)
+    }
+    // Closed-world marker + the 2026-07 hallucination phrase must stay dead.
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/ONLY trigger kinds/)
+    expect(TRIGGER_INPUT_DESCRIPTION).not.toMatch(/configured in the web builder, not here/)
+    // Event triggers are declared authorable here, webhook provisioning is not.
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/authorable here/)
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/web builder/)
+  })
+
+  it('createWorkflow accepts and persists an event trigger with a task source (chat-authorable, no web builder needed)', async () => {
+    const { tools, stores } = makeAllTools({})
+    const r = await tools.createWorkflow.execute(
+      { name: 'Prospect research on task', definition: ASSISTANT_DEF, trigger: TASK_EVENT_TRIGGER },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+    const data = r.data as Record<string, unknown>
+    expect(data.triggerKind).toBe('event')
+    const persisted = await stores.workflowStore.getById(USER_ID, data.id as string)
+    expect(persisted?.trigger.kind).toBe('event')
+  })
+
+  it('proposeWorkflow warns that a chat-authored webhook trigger starts unprovisioned', async () => {
+    const { tools } = makeAllTools({})
+    const r = await tools.proposeWorkflow.execute(
+      { name: 'Hook', definition: ASSISTANT_DEF, trigger: { kind: 'webhook' } },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as { warnings: string[] }).warnings
+    expect(warnings.some((w) => /web builder/.test(w) && /secret/.test(w))).toBe(true)
+  })
+
+  it('createWorkflow returns a webhookNote for a webhook trigger', async () => {
+    const { tools } = makeAllTools({})
+    const r = await tools.createWorkflow.execute(
+      { name: 'Hook', definition: ASSISTANT_DEF, trigger: { kind: 'webhook' } },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+    expect((r.data as { webhookNote?: string }).webhookNote).toMatch(/web builder/)
+  })
+
+  it('blocks an event trigger watching a page that does not resolve in this workspace', async () => {
+    const { tools } = makeAllTools({ resolvePageAnchor: async () => null })
+    const r = await tools.createWorkflow.execute(
+      {
+        name: 'Watch page',
+        definition: ASSISTANT_DEF,
+        trigger: {
+          kind: 'event',
+          event: { sources: [{ source: { type: 'page', pageId: '00000000-0000-0000-0000-00000000dead' } }] },
+        },
+      },
+      makeContext(),
+    )
+    expect(r.isError).toBe(true)
+    const errors = (r.data as { errors: string[] }).errors
+    expect(errors.some((e) => /page not found in this workspace/.test(e))).toBe(true)
+  })
+
+  it('accepts an event trigger watching a page that resolves in this workspace', async () => {
+    const { tools } = makeAllTools({
+      resolvePageAnchor: async () => ({ workspaceId: WORKSPACE_ID, state: 'saved' as const, name: 'Projects' }),
+    })
+    const r = await tools.createWorkflow.execute(
+      {
+        name: 'Watch page',
+        definition: ASSISTANT_DEF,
+        trigger: {
+          kind: 'event',
+          event: { sources: [{ source: { type: 'page', pageId: '00000000-0000-0000-0000-00000000beef' } }] },
+        },
+      },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+    expect((r.data as Record<string, unknown>).triggerKind).toBe('event')
+  })
+})
+
+describe('[COMP:workflow/tools] skill attachment authoring checks', () => {
+  const RESEARCH_SKILL = { slug: 'research-hktv-mall-shop-contacts', name: 'Research HKTV Mall Shop Contacts' }
+
+  const stepDef = (step: Record<string, unknown>): WorkflowDefinition =>
+    ({
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, ...step }],
+    }) as unknown as WorkflowDefinition
+
+  it('warns when a prompt names a workspace skill that is not attached (the Middle Mile incident)', async () => {
+    const { tools } = makeAllTools({ listAuthorableSkills: async () => [RESEARCH_SKILL] })
+    const r = await tools.proposeWorkflow.execute(
+      {
+        name: 'Middle mile',
+        definition: stepDef({
+          prompt: "Use the 'Research HKTV Mall Shop Contacts' skill to deeply research the company.",
+        }),
+      },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as { warnings: string[] }).warnings
+    const skillWarnings = warnings.filter((w) => /skill/i.test(w))
+    expect(skillWarnings).toHaveLength(1)
+    expect(skillWarnings[0]).toContain(RESEARCH_SKILL.slug)
+    expect(skillWarnings[0]).toContain('enforcedSkills')
+  })
+
+  it('stays quiet when the mentioned skill is attached via enforcedSkills', async () => {
+    const { tools } = makeAllTools({ listAuthorableSkills: async () => [RESEARCH_SKILL] })
+    const r = await tools.proposeWorkflow.execute(
+      {
+        name: 'Middle mile',
+        definition: stepDef({
+          prompt: "Use the 'Research HKTV Mall Shop Contacts' skill to deeply research the company.",
+          enforcedSkills: [RESEARCH_SKILL.slug],
+        }),
+      },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as { warnings: string[] }).warnings
+    expect(warnings.filter((w) => /skill/i.test(w))).toEqual([])
+  })
+
+  it('hard-errors on an attached slug that is neither a workspace skill nor a built-in id', async () => {
+    const { tools } = makeAllTools({ listAuthorableSkills: async () => [RESEARCH_SKILL] })
+    const r = await tools.proposeWorkflow.execute(
+      {
+        name: 'Ghost skill',
+        definition: stepDef({ prompt: 'Do the research.', skills: ['nonexistent-skill'] }),
+      },
+      makeContext(),
+    )
+    expect(r.isError).toBe(true)
+    const errors = (r.data as { errors: string[] }).errors
+    expect(errors.some((e) => e.includes('steps.0.skills') && e.includes('nonexistent-skill'))).toBe(true)
+  })
+
+  it('accepts a built-in skill id as an attached slug', async () => {
+    const { tools } = makeAllTools({ listAuthorableSkills: async () => [] })
+    const r = await tools.proposeWorkflow.execute(
+      {
+        name: 'Builtin skill',
+        definition: stepDef({ prompt: 'Draft the automation.', enforcedSkills: ['workflow-builder'] }),
+      },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+  })
+
+  it('falls back to a generic warning when the prompt says "skill" but nothing is attached (no dep)', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.proposeWorkflow.execute(
+      {
+        name: 'Prose skill',
+        definition: stepDef({ prompt: 'Use the research skill to compile a report.' }),
+      },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as { warnings: string[] }).warnings
+    expect(warnings.some((w) => w.includes('attaches none'))).toBe(true)
+  })
+
+  it('createWorkflow blocks a dangling skill slug too', async () => {
+    const { tools } = makeAllTools({ listAuthorableSkills: async () => [RESEARCH_SKILL] })
+    const r = await tools.createWorkflow.execute(
+      {
+        name: 'Ghost skill',
+        definition: stepDef({ prompt: 'Do the research.', enforcedSkills: ['ghost'] }),
+      },
+      makeContext(),
+    )
+    expect(r.isError).toBe(true)
+    const errors = (r.data as { errors: string[] }).errors
+    expect(errors.some((e) => e.includes('steps.0.enforcedSkills') && e.includes('ghost'))).toBe(true)
   })
 })

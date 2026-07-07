@@ -1672,6 +1672,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const view = await savedViewStore.getById(userId, pageId)
       return view ? { workspaceId: view.workspaceId, state: view.state, name: view.name } : null
     },
+    listAuthorableSkills: async (userId, workspaceId) => {
+      const skills = await workspaceSkillStore.listForWorkspace(workspaceId, { actingUserId: userId })
+      return skills.filter((s) => s.state !== 'archived').map((s) => ({ slug: s.slug, name: s.name }))
+    },
     listTriggerJobs: (workflowId) => jobStore.listTriggerJobsForWorkflowSystem(workflowId),
     isKnownTool: (name) => allTools.has(name),
     jobStore,
