@@ -788,10 +788,25 @@ export async function listEntities(
   return result.rows.map(toEntityListRow)
 }
 
+/**
+ * In-place entity update by id, matched under the caller's viewer
+ * projection (read/write symmetry — the write-path half of the
+ * "access-scoped" rule in `docs/architecture/features/crm.md`): a
+ * caller must never patch a row that reads hide from them, or one
+ * member's write mutates another principal's private record while
+ * every list/get correctly hides it (the 2026-07-05 dedupe incident's
+ * surviving write sibling).
+ *
+ * `access` present → the full universal access predicate is embedded in
+ * the UPDATE's WHERE. Absent (legacy writers holding only a user id) →
+ * falls back to the user-axis projection (`user_id IS NULL OR user_id =
+ * actor`), the same fallback shape the dedupe scan documents.
+ */
 export async function updateEntity(
   actorUserId: string,
   id: string,
   fields: EntityUpdateFields,
+  access?: AccessContext,
 ): Promise<EntityRecord | null> {
   const sets: string[] = []
   const values: unknown[] = []
@@ -823,17 +838,28 @@ export async function updateEntity(
   }
 
   if (sets.length === 0) {
-    return getEntityByIdSystem(actorUserId, id)
+    return access ? getEntityById(access, id) : getEntityByIdSystem(actorUserId, id)
   }
 
   sets.push('updated_at = now()')
   values.push(id)
+
+  let guard: string
+  if (access) {
+    const ap = buildAccessPredicate(access, { startIdx: idx + 1 })
+    guard = ap.sql
+    values.push(...ap.params)
+  } else {
+    guard = `(user_id IS NULL OR user_id = $${idx + 1})`
+    values.push(actorUserId)
+  }
 
   const result = await queryWithRLS<EntityRow>(
     actorUserId,
     `UPDATE entities
         SET ${sets.join(', ')}
       WHERE id = $${idx}
+        AND ${guard}
       RETURNING ${FULL_SELECT}`,
     values,
   )

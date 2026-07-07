@@ -27,6 +27,13 @@ export function verifyTelegramWebhook(secretToken: string, headerValue: string |
  */
 export type TelegramWebhookHandlerOptions = {
   adapter: ChannelAdapter & { handleWebhook(payload: unknown): void }
+  /**
+   * The `secret_token` registered with Telegram via `setWebhook`,
+   * verified constant-time against `X-Telegram-Bot-Api-Secret-Token`.
+   * **Fail-closed:** when unset, the handler rejects EVERY update (401)
+   * rather than accepting any POST that reaches the endpoint — register
+   * the webhook with a secret and pass it here.
+   */
   secretToken?: string
   onMessage: (msg: IncomingMessage) => void
   /**
@@ -41,6 +48,7 @@ export type TelegramWebhookHandlerOptions = {
 
 export function createTelegramWebhookHandler(options: TelegramWebhookHandlerOptions) {
   const dedup = createDedupBuffer()
+  let warnedMissingSecret = false
 
   return {
     /**
@@ -51,14 +59,25 @@ export function createTelegramWebhookHandler(options: TelegramWebhookHandlerOpti
       req: { body: unknown; headers: Record<string, string | string[] | undefined> },
       res: { status(code: number): { json(data: unknown): void; end(): void } },
     ): void {
-      // Verify secret token if configured
-      if (options.secretToken) {
-        const header = req.headers['x-telegram-bot-api-secret-token']
-        const headerStr = Array.isArray(header) ? header[0] : header
-        if (!verifyTelegramWebhook(options.secretToken, headerStr)) {
-          res.status(401).json({ error: 'Invalid secret token' })
-          return
+      // Fail closed: without a configured secretToken the sender cannot be
+      // authenticated as Telegram, so every update is rejected instead of
+      // the pre-2026-07 behavior of accepting any POST to the endpoint.
+      if (!options.secretToken) {
+        if (!warnedMissingSecret) {
+          warnedMissingSecret = true
+          console.error(
+            '[telegram-webhook] no secretToken configured — rejecting all updates (fail closed). ' +
+              'Register the webhook with a secret_token (setWebhook) and pass it to the handler.',
+          )
         }
+        res.status(401).json({ error: 'Webhook secret not configured' })
+        return
+      }
+      const header = req.headers['x-telegram-bot-api-secret-token']
+      const headerStr = Array.isArray(header) ? header[0] : header
+      if (!verifyTelegramWebhook(options.secretToken, headerStr)) {
+        res.status(401).json({ error: 'Invalid secret token' })
+        return
       }
 
       const payload = req.body

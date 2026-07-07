@@ -201,6 +201,24 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
 
     async execute(input, context) {
       try {
+        // Egress-safety gate: if confidential content entered the model's
+        // context this turn, refuse the send. The body is free text the model
+        // composes and could carry the secret, and email recipients are
+        // outside the workspace. This mirrors the confidential *attachment*
+        // refusal below (which blocks even with human approval) — memory/CRM
+        // writes only *label* at this floor, but an email egresses, so it is
+        // refused. Before this, the attachment path was guarded but the body
+        // was not. WS3 injection→action finding #6, 2026-07-07.
+        if (context.sensitivity?.max === 'confidential') {
+          return {
+            data:
+              'This turn is handling confidential workspace content, so the email cannot be sent — ' +
+              'recipients are outside the workspace and the message body could carry it. Share confidential ' +
+              'material from the web app instead, or compose the email in a separate turn that does not read ' +
+              'confidential data.',
+            isError: true,
+          }
+        }
         let attachments: GmailOutgoingAttachment[] | undefined
         if (input.attachments && input.attachments.length > 0) {
           const filesApi = opts?.filesApi

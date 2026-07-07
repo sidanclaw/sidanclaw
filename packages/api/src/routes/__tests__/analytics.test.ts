@@ -14,10 +14,33 @@ describe('[COMP:api/analytics-route] Analytics routes', () => {
     recordBatch: vi.fn(),
   }
 
-  const app = createTestApp('/api/analytics', analyticsRoutes(store as never))
+  // Authenticated app (the router is mounted under optionalAuth in prod; the
+  // sensitive routes require a resolved user via requireUserId).
+  const app = createTestApp('/api/analytics', analyticsRoutes(store as never), { userId: 'op_1' })
+  // Anonymous app — no user injected, to assert the guard rejects.
+  const anonApp = createTestApp('/api/analytics', analyticsRoutes(store as never))
 
   beforeEach(() => {
     vi.resetAllMocks()
+  })
+
+  // ── WS3 boundary finding #1: anonymous access is rejected ────
+  // Before the fix these system-wide reads and the destructive prune were
+  // reachable with no authenticated user (optionalAuth never rejects).
+
+  it('rejects anonymous GET /daily, /weekly, /errors, /errors/summary with 401', async () => {
+    for (const path of ['/daily', '/weekly', '/errors', '/errors/summary']) {
+      const res = await request(anonApp).get(`/api/analytics${path}`)
+      expect(res.status, path).toBe(401)
+    }
+    expect(store.getDailyReport).not.toHaveBeenCalled()
+    expect(store.listErrors).not.toHaveBeenCalled()
+  })
+
+  it('rejects anonymous POST /prune with 401 and never deletes', async () => {
+    const res = await request(anonApp).post('/api/analytics/prune?days=1')
+    expect(res.status).toBe(401)
+    expect(store.pruneOldEvents).not.toHaveBeenCalled()
   })
 
   // ── GET /daily ──────────────────────────────────────────────

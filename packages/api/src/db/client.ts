@@ -115,10 +115,11 @@ export function getPool(): pg.Pool {
  * enforcement comes from the role, so a forgotten/mis-set GUC can no longer
  * silently disable it.
  *
- * If `DATABASE_URL_APP` is unset it falls back to `DATABASE_URL` (the owner) with
- * a loud warning — RLS is then NOT enforced, because the owner bypasses it. Any
- * real deployment MUST set `DATABASE_URL_APP` (the `app_user` connection string);
- * the fallback exists only so local/dev without the role still boots. See
+ * If `DATABASE_URL_APP` is unset: in a production environment (`NODE_ENV ===
+ * 'production'` or Cloud Run's `K_SERVICE`) this THROWS — falling back to the
+ * owner connection would silently disable RLS on user-scoped queries. Outside
+ * production it falls back to `DATABASE_URL` (the owner) with a loud warning,
+ * so local/dev without the `app_user` role still boots. See
  * docs/architecture/platform/database-schema.md → "Two-role rollout".
  */
 export function getAppPool(): pg.Pool {
@@ -130,6 +131,19 @@ export function getAppPool(): pg.Pool {
   if (!appPool) {
     const appUrl = process.env.DATABASE_URL_APP
     if (!appUrl) {
+      // Fail closed in production: the owner connection bypasses RLS, so
+      // running user-scoped queries on it silently disables tenant/member
+      // isolation. `K_SERVICE` marks any Cloud Run service; `NODE_ENV`
+      // covers other deployment targets. Local/dev keeps the loud warn +
+      // fallback so a checkout without the app_user role still boots.
+      if (process.env.NODE_ENV === 'production' || process.env.K_SERVICE) {
+        throw new Error(
+          '[db] DATABASE_URL_APP is not set in a production environment — refusing to fall back to ' +
+            'the OWNER connection (RLS would be silently disabled on user-scoped queries). Set ' +
+            'DATABASE_URL_APP to the app_user role connection string. See ' +
+            'docs/architecture/platform/database-schema.md → "Two-role rollout".',
+        )
+      }
       console.warn(
         '[db] DATABASE_URL_APP is not set — the app pool is falling back to the OWNER connection, so ' +
           'RLS is NOT enforced on user-scoped queries. Set DATABASE_URL_APP (the app_user role) in any real ' +

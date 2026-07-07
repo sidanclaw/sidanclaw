@@ -21,14 +21,18 @@ type GatedSession = {
 }
 
 /**
- * Authorize a per-session read for the caller. Shared by `GET /:id/messages`
- * and the reconnect stream `GET /:id/stream` so the two can't drift: a
- * `visibility='workspace'` session (doc comment threads, migration 223) or a
- * `mode='draft'` session is readable by any workspace member at/above the
- * session's `effective_clearance` (migration 224); every other session is
- * owner-only. Returns `null` on success, or `{ status, error }` to reject.
+ * Authorize a per-session read for the caller. Shared by `GET /:id/messages`,
+ * the reconnect stream `GET /:id/stream`, and the `POST /api/chat` resume path
+ * (`routes/chat.ts`) so they can't drift: a `visibility='workspace'` session
+ * (doc comment threads, migration 223) or a `mode='draft'` session is readable
+ * by any workspace member at/above the session's `effective_clearance`
+ * (migration 224); every other session is owner-only. Returns `null` on
+ * success, or `{ status, error }` to reject. Exported so the chat write/resume
+ * path enforces the same rule as the reads (WS3: `findSessionById` did no
+ * per-user check, so a member of a shared primary assistant could resume
+ * another member's private session by id).
  */
-async function gateSessionRead(
+export async function gateSessionRead(
   jwtUserId: string,
   session: GatedSession,
 ): Promise<{ status: number; error: string } | null> {

@@ -605,12 +605,14 @@ export function brainInboxRoutes({
         }
         const prev = before.rows[0]
 
+        // Write under the viewer's workspace projection (primary-reflector
+        // shape — the route already verified workspace membership above).
         const updated = await updateEntity(userId, rowId, {
           displayName: nextDisplayName,
           sensitivity: nextSensitivity,
           verifiedByUserId: userId,
           verifiedAt: new Date(),
-        })
+        }, { workspaceId, userId, assistantId: '', assistantKind: 'primary' })
         if (!updated) {
           res.status(404).json({ error: 'Entity not found' })
           return
@@ -735,12 +737,13 @@ export function brainInboxRoutes({
         // The CRM row IS the entity now — a single updateEntity write
         // covers display_name + sensitivity.
         if (prev.entityId && (nextName !== undefined || nextSensitivity !== undefined)) {
+          // Viewer-workspace projection; membership verified above.
           await updateEntity(userId, prev.entityId, {
             ...(nextName !== undefined ? { displayName: nextName } : {}),
             ...(nextSensitivity !== undefined ? { sensitivity: nextSensitivity } : {}),
             verifiedByUserId: userId,
             verifiedAt: new Date(),
-          })
+          }, { workspaceId, userId, assistantId: '', assistantKind: 'primary' })
         }
 
         const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined

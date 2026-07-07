@@ -181,7 +181,19 @@ export type CrmStore = {
 
   listCompanies(ctx: AccessContext, filters: CompanyListFilters): Promise<CompanyListRow[]>
 
-  updateCompany(userId: string, id: string, fields: CompanyUpdateFields): Promise<CompanyRecord | null>
+  /**
+   * `access` is the viewer projection for the update-by-id write (read/
+   * write symmetry with the dedupe scan): the target row is matched under
+   * this context, so a caller can never patch a row that reads hide from
+   * them. Omitted → the store falls back to the user-axis projection
+   * derived from `userId`.
+   */
+  updateCompany(
+    userId: string,
+    id: string,
+    fields: CompanyUpdateFields,
+    access?: AccessContext,
+  ): Promise<CompanyRecord | null>
 
   // Contacts
   createContact(params: {
@@ -212,7 +224,13 @@ export type CrmStore = {
 
   listContacts(ctx: AccessContext, filters: ContactListFilters): Promise<ContactListRow[]>
 
-  updateContact(userId: string, id: string, fields: ContactUpdateFields): Promise<ContactRecord | null>
+  /** `access`: see `updateCompany` — write-path viewer projection. */
+  updateContact(
+    userId: string,
+    id: string,
+    fields: ContactUpdateFields,
+    access?: AccessContext,
+  ): Promise<ContactRecord | null>
 
   // Deals
   createDeal(params: {
@@ -236,10 +254,22 @@ export type CrmStore = {
 
   listDeals(ctx: AccessContext, filters: DealListFilters): Promise<DealListRow[]>
 
-  updateDeal(userId: string, id: string, fields: DealUpdateFields): Promise<DealRecord | null>
+  /** `access`: see `updateCompany` — write-path viewer projection. */
+  updateDeal(
+    userId: string,
+    id: string,
+    fields: DealUpdateFields,
+    access?: AccessContext,
+  ): Promise<DealRecord | null>
 
   /** Stage-only update — sole cut-point for stage transitions. */
-  setDealStage(userId: string, id: string, stage: DealStage): Promise<DealRecord | null>
+  /** `access`: see `updateCompany` — write-path viewer projection. */
+  setDealStage(
+    userId: string,
+    id: string,
+    stage: DealStage,
+    access?: AccessContext,
+  ): Promise<DealRecord | null>
 
   /**
    * Batch label resolution for Relation cells (Phase 1 — Notion-feel).

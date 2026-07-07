@@ -41,6 +41,7 @@ import {
   AnalyticsLogger, sanitize as sanitizeAnalytics,
   createConsolidationWorker,
   createEmbeddingWorker,
+  createEmbeddingUsageRecorder,
   createCommitmentLifecycleWorker,
   createSprintVarianceResolver,
   createCompositeCommitmentResolver,
@@ -380,6 +381,19 @@ export interface EpisodeIngestorDeps {
   taskStore: ReturnType<typeof createDbTaskStore>
   episodesStore: ReturnType<typeof createDbEpisodesStore>
   analytics: AnalyticsLogger
+  /**
+   * Usage recorder threaded into Pipeline B so extraction LLM calls land
+   * as `overhead:extraction` rows. Absent in OSS (no usage store) — the
+   * pipeline then skips recording.
+   */
+  usageStore?: UsageStore
+  /**
+   * Bulk-ingest surcharge hook threaded into Pipeline B (`ingestCharge`),
+   * fired once per successfully-extracted episode. The platform's
+   * implementation prices by source kind (0.5-credit bulk-ingest item,
+   * idempotent per episode); absent in OSS — ingest stays uncharged.
+   */
+  ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
 }
 
 /**
@@ -394,6 +408,12 @@ export interface OpenApiPorts {
   checkCreditBudget?: CreditBudgetGate
   /** Real DB usage recorder; default no-op (covers consolidation + chat). */
   usageStore?: UsageStore
+  /**
+   * Bulk-ingest surcharge hook (0.5-credit bulk-ingest item, priced +
+   * ledgered platform-side, idempotent per episode). Threaded into every
+   * Pipeline B wiring; default absent — OSS ingest is uncharged.
+   */
+  ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
 
   // ── Feed/distribution host hooks — open default: inert ──
   injectExtraTools?: InjectExtraTools
@@ -1120,6 +1140,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   //    (open default: no-op chat ingest, undefined brain ingest). ──
   const builtIngestors = ports.buildEpisodeIngestors?.({
     provider, crmStore, entitiesStore, entityLinksStore, memoryStore, taskStore, episodesStore, analytics,
+    usageStore,
+    ingestCharge: ports.ingestCharge,
   })
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})
@@ -1649,6 +1671,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolvePageAnchor: async (userId, pageId) => {
       const view = await savedViewStore.getById(userId, pageId)
       return view ? { workspaceId: view.workspaceId, state: view.state, name: view.name } : null
+    },
+    listAuthorableSkills: async (userId, workspaceId) => {
+      const skills = await workspaceSkillStore.listForWorkspace(workspaceId, { actingUserId: userId })
+      return skills.filter((s) => s.state !== 'archived').map((s) => ({ slug: s.slug, name: s.name }))
     },
     listTriggerJobs: (workflowId) => jobStore.listTriggerJobsForWorkflowSystem(workflowId),
     isKnownTool: (name) => allTools.has(name),
@@ -3263,10 +3289,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   // ── Embedding worker ──
   // primitivesWithVectorColumn is closed (api-platform/admin). Open uses the
-  // default primitive set from the embedding store.
+  // default primitive set from the embedding store. `usage` records each
+  // committed batch as `overhead:embedding` COGS (workspace-fallback
+  // attribution) — absent in OSS, embedding runs unmetered locally.
   const embeddingWorker = createEmbeddingWorker({
     store: createDbEmbeddingStore(),
     embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
+    ...(usageStore ? { usage: createEmbeddingUsageRecorder(usageStore) } : {}),
   })
   if (runWorkers) embeddingWorker.start()
 

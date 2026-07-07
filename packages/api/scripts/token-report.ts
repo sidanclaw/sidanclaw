@@ -14,6 +14,7 @@
  * consumes the same scenario list and asserts regression bounds.
  */
 
+import { existsSync } from 'node:fs'
 import { writeFile, mkdir } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -26,11 +27,25 @@ import {
   LAYER_1_CHARS,
 } from '../src/routes/_token-cost-scenarios.js'
 
-const SNAPSHOT_PATH = resolve(
-  import.meta.dirname,
-  '..', '..', '..',
-  'docs', 'architecture', 'context-engine', 'token-cost-snapshot.md',
-)
+// The api package lives in the open submodule; the context-engine docs live at
+// the PLATFORM root. Pre-open-core-split this was a fixed `../../..`, which
+// now resolves inside the submodule and mints a stray untracked `docs/` tree
+// there. Walk up to the first ancestor that actually carries the
+// context-engine docs dir instead; fail loudly in a standalone open clone
+// (the snapshot doc is a platform artifact).
+function findSnapshotPath(): string {
+  let dir = import.meta.dirname
+  for (let i = 0; i < 6; i++) {
+    const candidate = resolve(dir, 'docs', 'architecture', 'context-engine')
+    if (existsSync(candidate)) return resolve(candidate, 'token-cost-snapshot.md')
+    dir = resolve(dir, '..')
+  }
+  throw new Error(
+    `token-report: no docs/architecture/context-engine found above ${import.meta.dirname} — run from the platform monorepo checkout`,
+  )
+}
+
+const SNAPSHOT_PATH = findSnapshotPath()
 
 function tryGit(args: string[]): string {
   try {

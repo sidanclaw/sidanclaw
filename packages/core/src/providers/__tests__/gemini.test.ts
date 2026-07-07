@@ -246,3 +246,86 @@ describe('[COMP:providers/gemini-role-leak] stripLeadingRoleToken', () => {
     expect(stripLeadingRoleToken('models\nare plural')).toBe('models\nare plural')
   })
 })
+
+describe('[COMP:providers/gemini-json-mode] responseFormat json → responseMimeType', () => {
+  // The stateless stream() path is the caller shape (Pipeline B extraction).
+  // buildRequest is the universal choke point, so asserting through stream()
+  // covers the session path's mapping too.
+  let fetchMock: ReturnType<typeof vi.fn>
+  beforeEach(() => {
+    fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  function sseOk(): Response {
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({
+              candidates: [{ content: { role: 'model', parts: [{ text: '{}' }] }, finishReason: 'STOP' }],
+              usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+            })}\n\n`,
+          ),
+        )
+        controller.close()
+      },
+    })
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }
+
+  async function drain(iter: AsyncIterable<unknown>): Promise<void> {
+    for await (const _ of iter) void _
+  }
+
+  it('maps responseFormat json to generationConfig.responseMimeType when no tools are declared', async () => {
+    fetchMock.mockResolvedValueOnce(sseOk())
+    const { createGeminiProvider } = await import('../gemini.js')
+    await drain(
+      createGeminiProvider('test-key').stream({
+        model: 'gemini-flash',
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'extract' }],
+        responseFormat: 'json',
+      }),
+    )
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.generationConfig?.responseMimeType).toBe('application/json')
+  })
+
+  it('omits responseMimeType when tools are present (Gemini rejects the combination)', async () => {
+    fetchMock.mockResolvedValueOnce(sseOk())
+    const { createGeminiProvider } = await import('../gemini.js')
+    await drain(
+      createGeminiProvider('test-key').stream({
+        model: 'gemini-flash',
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'go' }],
+        responseFormat: 'json',
+        tools: [{ name: 'echo', description: 'echo', parameters: { type: 'object', properties: {} } }],
+      }),
+    )
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.generationConfig?.responseMimeType).toBeUndefined()
+  })
+
+  it('omits responseMimeType when the caller did not ask for JSON', async () => {
+    fetchMock.mockResolvedValueOnce(sseOk())
+    const { createGeminiProvider } = await import('../gemini.js')
+    await drain(
+      createGeminiProvider('test-key').stream({
+        model: 'gemini-flash',
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'chat' }],
+      }),
+    )
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.generationConfig?.responseMimeType).toBeUndefined()
+  })
+})

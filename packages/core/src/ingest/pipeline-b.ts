@@ -37,6 +37,7 @@
 import { z } from 'zod'
 
 import type { AnalyticsLogger } from '../analytics/logger.js'
+import { calculateCost, type UsageStore } from '../billing/cost-tracker.js'
 import { createClassificationAnalytics, type ClassificationAnalytics } from '../classification/analytics.js'
 import type { CircuitBreaker } from '../classification/circuit-breaker.js'
 import { validateEdgeKindTriple } from '../classification/rules/edge-type/index.js'
@@ -56,7 +57,7 @@ import { resolveEntity } from '../entities/resolver.js'
 import type { MemoryRecord, MemoryStore } from '../memory/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import { collectStream } from '../providers/accumulator.js'
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
+import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
 import { RANK, type Sensitivity } from '../security/sensitivity.js'
 
 import { scrubCredentials } from './credential-scrubber.js'
@@ -215,6 +216,32 @@ export type PipelineBDeps = {
     candidateLimit?: number
     llm?: { provider: LLMProvider; model: string }
   }
+  /**
+   * Optional usage recorder for the extraction LLM call. When present,
+   * the call is attributed as an `overhead:extraction` row (`triggerKey:
+   * 'pipeline_b_extraction'`) — excluded from billing math but visible on
+   * cost dashboards (cost-and-pricing.md → "Overhead accounting"). The
+   * recording lives INSIDE `processEpisode`, next to the only place
+   * extraction usage is produced, so no caller can ship an unmetered
+   * ingest path. Best-effort: absent store / missing usage skip silently;
+   * failures log and never break ingestion. OSS builds without a usage
+   * store simply omit it.
+   */
+  usage?: UsageStore
+  /**
+   * Optional user-billed charge hook, invoked once per episode after a
+   * SUCCESSFUL extraction (post summary+archive, step 7) — never on the
+   * empty-summary failure paths. All charging policy lives behind the
+   * hook: the platform's implementation classifies `episode.sourceKind`
+   * (file/manual/bulk billable; conversational, connector-drip, and
+   * recording-surcharge-covered kinds exempt) and debits the 0.5-credit
+   * bulk-ingest item into its per-episode-idempotent ledger, so a
+   * reprocessed episode can never double-charge (cost-and-pricing.md →
+   * "Credit operation menu"). Same inside-processEpisode placement
+   * rationale as `usage`: no caller can ship an uncharged ingest path.
+   * Best-effort: failures log and never break ingestion. Absent in OSS.
+   */
+  ingestCharge?: (episode: PipelineBEpisode) => Promise<void>
 }
 
 export type PipelineBResult = {
@@ -273,18 +300,27 @@ const EPHEMERAL_REASONS = [
   'other',
 ] as const
 
+// JSON-mode null tolerance: with `responseFormat: 'json'` the model emits
+// explicit `null` for empty optional slots (idiomatic JSON — and the prompt
+// itself documents nullable fields like `canonical_id` / `due_iso`). Every
+// optional below accepts `null` and canonicalizes it to `undefined` (or the
+// slot's default), so ONE nulled optional can no longer fail the whole
+// payload and archive the Episode empty. Caught by the golden set's first
+// live run: `schema mismatch: Expected string, received null` ×6/18.
+const emptyToUndef = <T>(v: T | null | undefined): T | undefined => v ?? undefined
+
 const extractedEntitySchema = z.object({
   kind: z.enum(EXTRACT_ENTITY_KINDS),
   display_name: z.string().min(1).max(200),
   canonical_id: z.string().min(1).max(200).nullable().optional(),
-  attributes: z.record(z.unknown()).optional(),
+  attributes: z.record(z.unknown()).nullish().transform(emptyToUndef),
 })
 
 const extractedEdgeSchema = z.object({
   source_ref: z.string().min(1),
   target_ref: z.string().min(1),
   edge_type: z.enum(EDGE_TYPES),
-  attributes: z.record(z.unknown()).optional(),
+  attributes: z.record(z.unknown()).nullish().transform(emptyToUndef),
 })
 
 // v2 (brain_extraction_v2_enabled) — actionable items get their own slot
@@ -295,7 +331,7 @@ const extractedTaskSchema = z.object({
   due_iso: z.string().nullable().optional(),
   // Reference to an entity display_name from this same extraction; the
   // emission loop resolves to a workspace_members.id where possible.
-  assignee_ref: z.string().optional(),
+  assignee_ref: z.string().nullish().transform(emptyToUndef),
 })
 
 // v2 — explicit drop-with-reason slot. Persisted to analytics only
@@ -311,10 +347,10 @@ const extractedMemorySchema = z.object({
   // Post-Phase-4 (retire-memory-type): `type` removed from the
   // extraction schema. The LLM extraction prompt should encode any
   // categorical signal via `tags` instead.
-  scope: z.enum(MEMORY_SCOPES).optional(),
+  scope: z.enum(MEMORY_SCOPES).nullish().transform(emptyToUndef),
   summary: z.string().min(1).max(500),
-  detail: z.string().max(2000).optional(),
-  tags: z.array(z.string().min(1).max(64)).max(20).optional(),
+  detail: z.string().max(2000).nullish().transform(emptyToUndef),
+  tags: z.array(z.string().min(1).max(64)).max(20).nullish().transform(emptyToUndef),
   // v2 — REQUIRED justification fields. Every memory must explain why
   // it's not better expressed as an entity attribute or a task. Forces
   // the model to confront the alternative explicitly rather than
@@ -326,13 +362,13 @@ const extractedMemorySchema = z.object({
 })
 
 const extractionOutputSchema = z.object({
-  summary: z.string().max(2000).default(''),
-  entities: z.array(extractedEntitySchema).max(50).default([]),
-  edges: z.array(extractedEdgeSchema).max(100).default([]),
-  tasks: z.array(extractedTaskSchema).max(30).default([]),
-  memories: z.array(extractedMemorySchema).max(30).default([]),
-  ephemeral: z.array(extractedEphemeralSchema).max(30).default([]),
-  tags: z.array(z.string().min(1).max(64)).max(20).default([]),
+  summary: z.string().max(2000).nullish().transform((v) => v ?? ''),
+  entities: z.array(extractedEntitySchema).max(50).nullish().transform((v) => v ?? []),
+  edges: z.array(extractedEdgeSchema).max(100).nullish().transform((v) => v ?? []),
+  tasks: z.array(extractedTaskSchema).max(30).nullish().transform((v) => v ?? []),
+  memories: z.array(extractedMemorySchema).max(30).nullish().transform((v) => v ?? []),
+  ephemeral: z.array(extractedEphemeralSchema).max(30).nullish().transform((v) => v ?? []),
+  tags: z.array(z.string().min(1).max(64)).max(20).nullish().transform((v) => v ?? []),
 })
 
 type ExtractionOutput = z.infer<typeof extractionOutputSchema>
@@ -527,6 +563,47 @@ function dedupTags(...lists: (string[] | undefined)[]): string[] {
   return out
 }
 
+/**
+ * Attribute one extraction LLM call as an `overhead:extraction` usage row
+ * (billing-math-excluded, dashboard-visible; `sessionId` null — ingest has
+ * no chat session). Billing party is the episode's creating user; a blank
+ * assistant rides the store's workspace-fallback attribution (the episode's
+ * `workspaceId` resolves a representative assistant — connector-drip
+ * episodes carry no assistant of their own). Best-effort by design: no
+ * store / no usage / no resolvable user → skip; a store failure logs and
+ * never breaks ingestion.
+ */
+async function recordExtractionUsage(
+  deps: PipelineBDeps,
+  episode: PipelineBEpisode,
+  usage: TokenUsage | null,
+): Promise<void> {
+  if (!deps.usage || !usage) return
+  const userId = episode.createdByUserId || episode.userId
+  if (!userId) return
+  try {
+    await deps.usage.recordUsage({
+      userId,
+      assistantId: episode.assistantId ?? '',
+      workspaceId: episode.workspaceId,
+      sessionId: null,
+      model: deps.model,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
+      actualCostUsd: calculateCost(deps.model, usage),
+      source: 'overhead:extraction',
+      triggerKey: 'pipeline_b_extraction',
+    })
+  } catch (err) {
+    console.warn(
+      `[pipeline-b] extraction usage recording failed for episode ${episode.id}:`,
+      err instanceof Error ? err.message : err,
+    )
+  }
+}
+
 // ── Main entrypoint ──────────────────────────────────────────────────
 
 /**
@@ -591,46 +668,78 @@ export async function processEpisode(
   const scrubbed = scrubCredentials(resolvedContent)
   const extractableContent = scrubbed.text
 
-  // 1. Call extraction LLM.
-  let rawText = ''
+  // 1+2. Call extraction LLM and parse — up to two attempts.
+  //
+  // The stream call carries the decoder-level JSON constraint (Gemini
+  // responseMimeType via `responseFormat: 'json'`), but the live golden-set
+  // run (2026-07-07) showed the preview-tier model still intermittently
+  // emits malformed or schema-mismatching output even with the hint. A parse
+  // failure archives the Episode EMPTY — silent knowledge loss — so one
+  // bounded retry with the validation error fed back recovers that tail.
+  // LLM *throws* (network/provider errors) keep single-shot semantics: they
+  // have their own retry layers upstream. Every attempt's spend is metered
+  // the moment usage is known; `extractionUsage` in the result is the final
+  // attempt's usage (per-attempt metering is authoritative for billing).
   let extractionUsage: TokenUsage | null = null
-  try {
-    const response = await collectStream(
-      deps.provider.stream({
-        model: deps.model,
-        systemPrompt: SYSTEM_PROMPT,
-        messages: [
-          { role: 'user', content: buildExtractionPrompt(episode, extractableContent) },
-        ],
-        maxTokens: 4000,
-        temperature: 0.1,
-      }),
-    )
-    extractionUsage = response.usage
-    rawText = response.content
-      .filter((b) => b.type === 'text')
-      .map((b) => (b.type === 'text' ? b.text : ''))
-      .join('')
-  } catch (err) {
-    console.warn(
-      `[pipeline-b] extraction LLM failed for episode ${episode.id}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
-    await archiveWithEmptySummary(episode, deps, actorUserId)
-    return emptyResult(episode, extractionUsage, false)
-  }
+  let payload: ExtractionOutput | null = null
+  const extractionMessages: Message[] = [
+    { role: 'user', content: buildExtractionPrompt(episode, extractableContent) },
+  ]
+  for (let attempt = 1; attempt <= 2 && !payload; attempt++) {
+    let rawText = ''
+    try {
+      const response = await collectStream(
+        deps.provider.stream({
+          model: deps.model,
+          systemPrompt: SYSTEM_PROMPT,
+          messages: extractionMessages,
+          maxTokens: 4000,
+          temperature: 0.1,
+          responseFormat: 'json',
+        }),
+      )
+      extractionUsage = response.usage
+      // Attribute the spend the moment usage is known — failed-parse
+      // attempts still consumed these tokens.
+      await recordExtractionUsage(deps, episode, response.usage)
+      rawText = response.content
+        .filter((b) => b.type === 'text')
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('')
+    } catch (err) {
+      console.warn(
+        `[pipeline-b] extraction LLM failed for episode ${episode.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+      await archiveWithEmptySummary(episode, deps, actorUserId)
+      return emptyResult(episode, extractionUsage, false)
+    }
 
-  // 2. Parse model output.
-  const parseRes = parseExtraction(rawText)
-  if (!parseRes.ok) {
+    const parseRes = parseExtraction(rawText)
+    if (parseRes.ok) {
+      payload = parseRes.payload
+      break
+    }
     console.warn(
-      `[pipeline-b] extraction parse failed for episode ${episode.id}: ${parseRes.reason}`,
+      `[pipeline-b] extraction parse failed for episode ${episode.id} (attempt ${attempt}/2): ${parseRes.reason}`,
     )
+    if (attempt === 1) {
+      // No echo of the bad output — re-anchoring on garbage hurts more than
+      // the reason string helps. Fresh sampling + the validation error is
+      // what recovers the intermittent failures.
+      extractionMessages.push({
+        role: 'user',
+        content:
+          `Your previous response failed validation: ${parseRes.reason}. ` +
+          'Respond again with ONLY the JSON object, exactly matching the requested shape. No commentary.',
+      })
+    }
+  }
+  if (!payload) {
     await archiveWithEmptySummary(episode, deps, actorUserId)
     return emptyResult(episode, extractionUsage, false)
   }
-  const payload = parseRes.payload
 
   // 3. Merge tags.
   const tags = dedupTags(episode.preStampedTags, payload.tags)
@@ -804,6 +913,22 @@ export async function processEpisode(
         err instanceof Error ? err.message : String(err)
       }`,
     )
+  }
+
+  // 7b. Bulk-ingest surcharge — extraction succeeded, so the billable unit
+  // exists. The hook's ledger is idempotent on episode id, so charging
+  // after a (possibly retried) archive write cannot double-debit. The
+  // empty-summary failure paths above never reach here: a failed run
+  // charges nothing (the recording-surcharge precedent).
+  if (deps.ingestCharge) {
+    try {
+      await deps.ingestCharge(episode)
+    } catch (err) {
+      console.warn(
+        `[pipeline-b] ingest charge failed for episode ${episode.id}:`,
+        err instanceof Error ? err.message : err,
+      )
+    }
   }
 
   // 8. Final step — async sensitivity classifier (non-blocking, flag-not-bump).

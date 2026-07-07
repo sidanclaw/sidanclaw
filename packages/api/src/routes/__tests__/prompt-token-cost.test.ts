@@ -91,7 +91,14 @@ describe('[COMP:prompt/token-cost] Per-turn input token cost — realistic user 
     // — the confabulation fix) and (b) the unified workflow-trigger vocabulary
     // ("scheduled job" removed from the model surface; scheduling is a workflow
     // trigger). Fresh-user baseline measured at ~3930.
-    expect(m.promptTokens).toBeLessThan(4_000)
+    // 2026-07-07: bumped 4_000 → 4_200 — Layer-1 gained the product-capability
+    // honesty bullet (capability claims must be grounded in a schema / loaded
+    // skill / tool result; unlisted = not supported — the "Task Created event
+    // trigger in the web builder" hallucination fix). The paired trigger-
+    // description growth was kept flat by moving the full contract text onto
+    // proposeWorkflow only (create/update carry a pointer). Fresh-user
+    // baseline measured at ~4083.
+    expect(m.promptTokens).toBeLessThan(4_200)
     expect(m.promptTokens).toBeGreaterThan(2_000)
     expect(m.totalTokens).toBeGreaterThan(2_800)
     expect(m.totalTokens).toBeLessThan(6_000)

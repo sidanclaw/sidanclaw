@@ -6,6 +6,7 @@ import { getSelfEntityId } from '../db/memories.js'
 import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock } from '@sidanclaw/core'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@sidanclaw/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
+import { gateSessionRead } from './sessions.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
@@ -700,6 +701,52 @@ export function buildActivePageInstruction(args: {
 }
 
 /**
+ * The `# Currently viewing — workspace skill` turn-context block for a turn
+ * whose request carried `viewingSkillRowId` (the app-web floating dock on
+ * the Brain skill editor route sends it, path-derived). Gives the model the
+ * skill's SAVED contents so "this skill" resolves to what the user is
+ * looking at. Deliberately tool-agnostic (tool-awareness rule): it never
+ * promises an edit capability — the honest default is proposing revised
+ * text in chat for the user to apply and save. Kept pure + exported so
+ * `chat.test.ts` asserts the shape without booting the route.
+ */
+export function buildViewingSkillBlock(skill: {
+  rowId: string
+  name: string
+  description: string
+  whenToUse?: string
+  content: string
+  state: 'active' | 'stale' | 'archived'
+  activatedAt?: Date
+}): string {
+  const status =
+    skill.state === 'stale'
+      ? 'stale (needs re-review)'
+      : skill.activatedAt
+        ? 'active'
+        : 'suggested (awaiting the user’s confirmation)'
+  // The store caps bodies at 5000 chars on write; the slice is a guard for
+  // legacy over-cap rows so one skill can never flood the envelope.
+  const body =
+    skill.content.length > 6000
+      ? `${skill.content.slice(0, 6000)}\n…(truncated)`
+      : skill.content
+  return (
+    `# Currently viewing — workspace skill\n` +
+    `The user has this workspace skill open in the Brain skill editor right now. ` +
+    `When they say "this skill" — or ask about the skill they are looking at — they mean this one.\n\n` +
+    `Skill: ${JSON.stringify(skill.name)} (row id: ${skill.rowId}, status: ${status})\n` +
+    `Description: ${skill.description}\n` +
+    (skill.whenToUse ? `When to use: ${skill.whenToUse}\n` : '') +
+    `\nSaved instructions (markdown):\n` +
+    `\`\`\`\`markdown\n${body}\n\`\`\`\`\n\n` +
+    `This is the last SAVED version — edits the user has typed in the editor but not saved ` +
+    `are not visible to you, and you cannot type into their editor. When they ask for ` +
+    `changes, propose the exact revised text in chat so they can apply and save it themselves.`
+  )
+}
+
+/**
  * Attach the per-turn `<turn_context>` envelope to the newest user message.
  *
  * Returns the new messages array, or `null` when no plain trailing user
@@ -1092,7 +1139,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId } = req.body as {
       message?: string
       sessionId?: string
       model?: string
@@ -1137,6 +1184,16 @@ export function chatRoutes(options: WebChatOptions): Router {
        * the page end. Absent on every non-empty-line turn.
        */
       docAnchorBlockId?: string
+      /**
+       * Brain-surface anchor: the `workspace_skills` row id of the skill the
+       * user is viewing in the Brain skill editor (`/w/<ws>/brain/skills/<id>`,
+       * path-derived by the app-web floating dock). When present, the skill's
+       * saved contents are injected as turn context so "this skill" resolves
+       * to what the user is looking at. Read RLS-scoped through the same
+       * workspace list the editor uses — never leaks a row the requesting
+       * user couldn't open.
+       */
+      viewingSkillRowId?: string
       /**
        * Optional caller-supplied channel id. Used by per-surface chats
        * (feed-web tuning chat, draft iteration) that want a sticky
@@ -1569,6 +1626,21 @@ export function chatRoutes(options: WebChatOptions): Router {
         return
       }
 
+      // Per-user ownership/clearance gate on the resolved session. For a
+      // SHARED workspace-primary assistant, another member's session carries
+      // the same assistant.id, so the check above passes — without this a
+      // member could resume, append to, and (via truncateFromMessageId)
+      // delete another member's private session by naming its id. Reuses the
+      // same gate as GET /:id/messages so reads and writes can't drift:
+      // workspace/draft sessions allow any authorized member, every other
+      // session is owner-only. (WS3 session-resume scoping, 2026-07-07.)
+      const sessionDenied = await gateSessionRead(user.id, session)
+      if (sessionDenied) {
+        sendEvent('error', { error: sessionDenied.error })
+        res.end()
+        return
+      }
+
       // Live multi-watcher sessions (draft mode): any participant can drive a
       // turn, but only one at a time. Reject concurrent turns with a clean 409
       // so the frontend can render "someone else is in a turn".
@@ -1806,7 +1878,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       let retryHint = ''
       if (truncateFromMessageId) {
         try {
-          const { deletedMessages } = await truncateMessagesFrom(truncateFromMessageId)
+          // Scope the truncate to the caller's own resolved session — a
+          // foreign message id resolves to a different session and is refused
+          // (WS3 cross-session chat-deletion fix).
+          const { deletedMessages } = await truncateMessagesFrom(truncateFromMessageId, session.id)
 
           // Find the old user prompt and the old assistant response (if any)
           const oldUser = deletedMessages.find((m) => m.role === 'user')
@@ -2643,6 +2718,33 @@ export function chatRoutes(options: WebChatOptions): Router {
           if (section) turnContextParts.push(section)
         } catch (err) {
           console.error('[chat] doc thread discovery injection failed:', err)
+        }
+      }
+
+      // ── Viewing-skill context (Brain skill editor) ──────────────
+      // The app-web floating dock sends `viewingSkillRowId` while the user
+      // is on the skill editor route. Inject the skill's saved contents as
+      // turn context so "this skill" resolves to what they are looking at.
+      // Read through the same RLS-scoped workspace list the editor itself
+      // uses (`listForWorkspace` + actingUserId), so the chat can never
+      // surface a skill the requesting user couldn't open in the editor.
+      if (
+        typeof requestedViewingSkillRowId === 'string' &&
+        requestedViewingSkillRowId &&
+        assistant.workspaceId
+      ) {
+        try {
+          const { createDbWorkspaceSkillStore } = await import('../db/skill-store.js')
+          const workspaceSkills = await createDbWorkspaceSkillStore().listForWorkspace(
+            assistant.workspaceId,
+            { actingUserId: user.id },
+          )
+          const viewedSkill = workspaceSkills.find(
+            (s) => s.rowId === requestedViewingSkillRowId && s.state !== 'archived',
+          )
+          if (viewedSkill) turnContextParts.push(buildViewingSkillBlock(viewedSkill))
+        } catch (err) {
+          console.error('[chat] viewing-skill context injection failed:', err)
         }
       }
 

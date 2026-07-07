@@ -34,7 +34,7 @@ import type {
   EntitySupersedePatch,
 } from '../../entities/types.js'
 import type { MemoryRecord, MemoryStore, MemoryWithMetrics, SoulSynthesisInput } from '../../memory/types.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, ProviderRequest, StreamChunk } from '../../providers/types.js'
 import type { Sensitivity } from '../../security/sensitivity.js'
 
 import { processEpisode, type PipelineBDeps, type PipelineBEpisode, type EpisodeUpdaterPort } from '../pipeline-b.js'
@@ -882,6 +882,183 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     warn.mockRestore()
   })
 
+  it('requests decoder-level JSON output for the extraction call', async () => {
+    // A parse failure archives the episode EMPTY (silent knowledge loss), so
+    // the extraction call must opt into the provider JSON mode where one
+    // exists (`responseFormat: 'json'` → Gemini responseMimeType). The
+    // sanitizers + Zod gate in parseExtraction remain the real boundary.
+    const requests: ProviderRequest[] = []
+    const responses = [
+      JSON.stringify({ summary: 'noted', entities: [], edges: [], memories: [], tags: [] }),
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ]
+    let call = 0
+    const provider = {
+      name: 'mock',
+      models: ['mock'],
+      createSession() {
+        return {} as never
+      },
+      async *stream(req: ProviderRequest): AsyncGenerator<StreamChunk> {
+        requests.push(req)
+        const text = responses[Math.min(call, responses.length - 1)] ?? ''
+        call++
+        yield { type: 'text_delta', text } as StreamChunk
+        yield {
+          type: 'message_end',
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 20 },
+        } as StreamChunk
+      },
+    } as unknown as LLMProvider
+
+    const result = await processEpisode(baseEpisode(), 'quick note', makeDeps({ provider }))
+
+    expect(result.extracted).toBe(true)
+    // First stream() call is extraction — it must carry the JSON hint.
+    expect(requests[0]?.responseFormat).toBe('json')
+  })
+
+  it('tolerates explicit nulls in every optional slot (JSON-mode idiom)', async () => {
+    // With responseFormat 'json' the model emits `"detail": null` /
+    // `"assignee_ref": null` / even `"ephemeral": null` instead of omitting
+    // keys — the prompt itself documents nullable fields. One nulled
+    // optional must never fail the payload and archive the Episode empty.
+    // (Golden-set live run 2026-07-07: `Expected string, received null` ×6.)
+    const world = makeWorld()
+    const crm = spyCrm(world)
+    const entities = spyEntities(world)
+    const links = spyLinks()
+    const memories = spyMemories()
+    const episodes = spyEpisodes()
+
+    const taskRows: Array<{ title: string }> = []
+    const tasks = {
+      create: async (params: { title: string }) => {
+        taskRows.push({ title: params.title })
+        return { id: `task-${taskRows.length}`, title: params.title }
+      },
+    } as unknown as PipelineBDeps['tasks']
+
+    const extraction = JSON.stringify({
+      summary: 'Nulls everywhere.',
+      entities: [
+        { kind: 'person', display_name: 'Nul Person', canonical_id: null, attributes: null },
+        { kind: 'project', display_name: 'Nul Project', canonical_id: null, attributes: null },
+      ],
+      edges: null,
+      tasks: [{ text: 'Do the thing', due_iso: null, assignee_ref: null }],
+      memories: [
+        {
+          scope: null,
+          summary: 'A durable note.',
+          detail: null,
+          tags: null,
+          why_not_entity: 'no recurring subject',
+          why_not_task: 'descriptive only',
+        },
+      ],
+      ephemeral: null,
+      tags: null,
+    })
+    const classification = JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' })
+
+    const provider = sequencedProvider([extraction, classification])
+    const deps = makeDeps({
+      provider,
+      crm: crm.store,
+      entities: entities.store,
+      entityLinks: links.store,
+      memories: memories.store,
+      episodes: episodes.port,
+      tasks,
+    })
+
+    const result = await processEpisode(baseEpisode(), 'note with nulls', deps)
+
+    expect(result.extracted).toBe(true)
+    expect(result.summaryText).toBe('Nulls everywhere.')
+    expect(crm.contacts).toHaveLength(1)
+    expect(entities.created).toHaveLength(1)
+    expect(taskRows).toHaveLength(1)
+    expect(memories.created).toHaveLength(1)
+    expect(result.ephemeralCount).toBe(0)
+  })
+
+  it('retries once with the validation error when the first extraction output fails to parse', async () => {
+    // JSON mode reduces malformed output but does not eliminate it (live
+    // golden-set run 2026-07-07). One bounded retry recovers the tail; the
+    // retry turn carries the parse reason, never an echo of the bad output.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const requests: ProviderRequest[] = []
+    const responses = [
+      'this is not json',
+      JSON.stringify({ summary: 'recovered', entities: [], edges: [], memories: [], tags: [] }),
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ]
+    let call = 0
+    const provider = {
+      name: 'mock',
+      models: ['mock'],
+      createSession() {
+        return {} as never
+      },
+      async *stream(req: ProviderRequest): AsyncGenerator<StreamChunk> {
+        requests.push(req)
+        const text = responses[Math.min(call, responses.length - 1)] ?? ''
+        call++
+        yield { type: 'text_delta', text } as StreamChunk
+        yield {
+          type: 'message_end',
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 20 },
+        } as StreamChunk
+      },
+    } as unknown as LLMProvider
+
+    const result = await processEpisode(baseEpisode(), 'note', makeDeps({ provider }))
+
+    expect(result.extracted).toBe(true)
+    expect(result.summaryText).toBe('recovered')
+    // extraction ×2 + classification ×1
+    expect(requests).toHaveLength(3)
+    // Retry turn: original prompt + a validation-error user message, no echo.
+    expect(requests[1]?.messages).toHaveLength(2)
+    const retryMsg = requests[1]?.messages[1]
+    expect(typeof retryMsg?.content === 'string' ? retryMsg.content : '').toContain('failed validation')
+    warn.mockRestore()
+  })
+
+  it('archives empty after two failed parse attempts (no infinite retry)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const requests: ProviderRequest[] = []
+    const provider = {
+      name: 'mock',
+      models: ['mock'],
+      createSession() {
+        return {} as never
+      },
+      async *stream(req: ProviderRequest): AsyncGenerator<StreamChunk> {
+        requests.push(req)
+        yield { type: 'text_delta', text: 'still not json' } as StreamChunk
+        yield {
+          type: 'message_end',
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 20 },
+        } as StreamChunk
+      },
+    } as unknown as LLMProvider
+    const episodes = spyEpisodes()
+
+    const result = await processEpisode(baseEpisode(), 'note', makeDeps({ provider, episodes: episodes.port }))
+
+    expect(result.extracted).toBe(false)
+    expect(requests).toHaveLength(2)
+    expect(episodes.checkpointCalls).toEqual([{ id: 'ep-1', summaryText: '' }])
+    expect(episodes.statusCalls).toEqual([{ id: 'ep-1', next: 'archived' }])
+    warn.mockRestore()
+  })
+
   it('recovers when the LLM emits a raw control character inside a string literal', async () => {
     // Regression: production logs at 2026-05-27 showed
     //   `JSON.parse failed: Bad control character in string literal in JSON at position 1225`
@@ -1565,5 +1742,131 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     await processEpisode(baseEpisode({ assistantId: null, userId: 'u-1' }), 'note', deps)
     // memories require both userId and assistantId; that's a separate guard
     expect(memories.created).toHaveLength(0)
+  })
+})
+
+// ── overhead:extraction usage attribution ────────────────────────────
+//
+// The extraction call is metered INSIDE processEpisode (next to the only
+// place the usage exists), so no caller — batch drain, chat compaction,
+// brain-MCP, slack/whatsapp realtime — can ship an unmetered ingest path.
+// Pre-fix, this spend was computed and discarded: unbounded free ingestion,
+// invisible to the cost dashboard (WS8 validated finding).
+
+describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
+  function usageSpy(impl?: () => Promise<void>) {
+    const recordUsage = vi.fn(async (_params: Record<string, unknown>) => {
+      if (impl) await impl()
+    })
+    return {
+      recordUsage,
+      store: { recordUsage } as unknown as import('../../billing/cost-tracker.js').UsageStore,
+    }
+  }
+
+  it('records an overhead:extraction row for a successful extraction', async () => {
+    const usage = usageSpy()
+    const provider = sequencedProvider([
+      JSON.stringify({ summary: 'A note.', entities: [], edges: [], memories: [], tags: [] }),
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ])
+    await processEpisode(baseEpisode(), 'note', makeDeps({ provider, usage: usage.store }))
+
+    expect(usage.recordUsage).toHaveBeenCalledTimes(1)
+    const row = usage.recordUsage.mock.calls[0]![0]
+    expect(row).toMatchObject({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      workspaceId: 'ws-1',
+      sessionId: null,
+      model: 'mock',
+      inputTokens: 10,
+      outputTokens: 20,
+      source: 'overhead:extraction',
+      triggerKey: 'pipeline_b_extraction',
+    })
+    expect(row.actualCostUsd).toBeGreaterThan(0)
+  })
+
+  it('still records when the model output fails to parse — the tokens were spent', async () => {
+    const usage = usageSpy()
+    const provider = sequencedProvider(['this is not json'])
+    await processEpisode(baseEpisode(), 'note', makeDeps({ provider, usage: usage.store }))
+    // Two attempts (parse-failure retry), both consumed tokens, both metered.
+    expect(usage.recordUsage).toHaveBeenCalledTimes(2)
+  })
+
+  it('tolerates a null assistant (workspace-scoped batch) as a blank-assistant row', async () => {
+    const usage = usageSpy()
+    const provider = sequencedProvider(['nope'])
+    await processEpisode(
+      baseEpisode({ assistantId: null }),
+      'note',
+      makeDeps({ provider, usage: usage.store }),
+    )
+    // The episode's workspaceId rides along so the store's workspace-fallback
+    // attribution can resolve a representative assistant for the row.
+    expect(usage.recordUsage.mock.calls[0]![0]).toMatchObject({ assistantId: '', workspaceId: 'ws-1' })
+  })
+
+  it('a recorder failure logs and never breaks ingestion', async () => {
+    const usage = usageSpy(async () => {
+      throw new Error('usage db down')
+    })
+    const provider = sequencedProvider([
+      JSON.stringify({ summary: 'A note.', entities: [], edges: [], memories: [], tags: [] }),
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ])
+    const result = await processEpisode(
+      baseEpisode(),
+      'note',
+      makeDeps({ provider, usage: usage.store }),
+    )
+    expect(result.episodeId).toBe('ep-1')
+  })
+})
+
+// ── bulk-ingest surcharge hook ───────────────────────────────────────
+//
+// The charge hook fires INSIDE processEpisode after a successful
+// extraction (step 7b) — same no-caller-can-skip placement as the usage
+// recorder. Pricing/eligibility policy lives entirely behind the hook
+// (platform: 0.5cr for file/manual/bulk kinds, idempotent per episode).
+
+describe('[COMP:brain/pipeline-b] bulk-ingest charge hook', () => {
+  const goodOutput = [
+    JSON.stringify({ summary: 'A note.', entities: [], edges: [], memories: [], tags: [] }),
+    JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+  ]
+
+  it('invokes ingestCharge once with the episode after a successful extraction', async () => {
+    const ingestCharge = vi.fn(async (_e: unknown) => {})
+    const provider = sequencedProvider(goodOutput)
+    await processEpisode(baseEpisode(), 'note', makeDeps({ provider, ingestCharge }))
+
+    expect(ingestCharge).toHaveBeenCalledTimes(1)
+    expect(ingestCharge.mock.calls[0]![0]).toMatchObject({ id: 'ep-1', workspaceId: 'ws-1' })
+  })
+
+  it('never charges on the extraction-failure paths — the run produced nothing billable', async () => {
+    const ingestCharge = vi.fn(async (_e: unknown) => {})
+    const provider = sequencedProvider(['this is not json'])
+    await processEpisode(baseEpisode(), 'note', makeDeps({ provider, ingestCharge }))
+    expect(ingestCharge).not.toHaveBeenCalled()
+  })
+
+  it('a charge failure logs and never breaks ingestion', async () => {
+    const ingestCharge = vi.fn(async () => {
+      throw new Error('ledger down')
+    })
+    const provider = sequencedProvider(goodOutput)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await processEpisode(baseEpisode(), 'note', makeDeps({ provider, ingestCharge }))
+    expect(result.episodeId).toBe('ep-1')
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('ingest charge failed for episode ep-1'),
+      'ledger down',
+    )
+    warnSpy.mockRestore()
   })
 })

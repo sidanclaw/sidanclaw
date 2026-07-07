@@ -35,8 +35,8 @@ export function createDbCrmStore(deps: { entityLinks?: EntityLinksStore } = {}):
     listCompanies(ctx, filters) {
       return listCompanies(ctx, filters)
     },
-    updateCompany(userId, id, fields) {
-      return updateCompany(userId, id, fields)
+    updateCompany(userId, id, fields, access) {
+      return updateCompany(userId, id, fields, access)
     },
 
     // Contacts
@@ -49,8 +49,8 @@ export function createDbCrmStore(deps: { entityLinks?: EntityLinksStore } = {}):
     listContacts(ctx, filters) {
       return listContacts(ctx, filters)
     },
-    updateContact(userId, id, fields) {
-      return updateContact(userId, id, fields, entityLinks)
+    updateContact(userId, id, fields, access) {
+      return updateContact(userId, id, fields, entityLinks, access)
     },
 
     // Deals
@@ -63,11 +63,11 @@ export function createDbCrmStore(deps: { entityLinks?: EntityLinksStore } = {}):
     listDeals(ctx, filters) {
       return listDeals(ctx, filters)
     },
-    updateDeal(userId, id, fields) {
-      return updateDeal(userId, id, fields, entityLinks)
+    updateDeal(userId, id, fields, access) {
+      return updateDeal(userId, id, fields, entityLinks, access)
     },
-    setDealStage(userId, id, stage) {
-      return setDealStage(userId, id, stage)
+    setDealStage(userId, id, stage, access) {
+      return setDealStage(userId, id, stage, access)
     },
 
     // Batch label resolution (Phase 1 — Notion-feel relation cells).
