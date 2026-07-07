@@ -17,7 +17,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { reviewSession, type SkillReviewLLM } from '../skill-review-worker.js'
+import { reviewSession, selectCandidateSessions, type SkillReviewLLM } from '../skill-review-worker.js'
+import { query } from '../../db/client.js'
 
 // We mock the `query` import so the worker's analytics + session-touch DB
 // calls don't hit a real DB. Vitest's auto-mock keeps the API simple.
@@ -408,5 +409,47 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
     const ops = analytics.recorded.filter((e) => e.eventName === 'skill_review_action_succeeded')
     expect(ops.length).toBe(1)
     expect(analytics.recorded.map((e) => e.eventName)).toContain('skill_review_rate_capped')
+  })
+})
+
+describe('[COMP:workers/skill-review-worker] selectCandidateSessions', () => {
+  it('resolves the workspace through the assistant so chat sessions (NULL sessions.workspace_id) qualify', async () => {
+    const mockedQuery = vi.mocked(query)
+    mockedQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          session_id: '00000000-0000-0000-0000-0000000000b1',
+          workspace_id: '00000000-0000-0000-0000-0000000000b2',
+          assistant_id: '00000000-0000-0000-0000-0000000000b3',
+          user_id: '00000000-0000-0000-0000-0000000000b4',
+          current_turn_count: '12',
+          last_skill_reviewed_turn: null,
+        },
+      ],
+      rowCount: 1,
+    } as never)
+
+    const candidates = await selectCandidateSessions(10, 24)
+
+    expect(candidates).toEqual([
+      {
+        sessionId: '00000000-0000-0000-0000-0000000000b1',
+        workspaceId: '00000000-0000-0000-0000-0000000000b2',
+        assistantId: '00000000-0000-0000-0000-0000000000b3',
+        userId: '00000000-0000-0000-0000-0000000000b4',
+        currentTurnCount: 12,
+        lastReviewedTurn: null,
+      },
+    ])
+
+    // Regression (2026-07-07): `sessions.workspace_id` is written only for
+    // workspace-visible artifact sessions (doc/canvas threads — it backs the
+    // RLS gate; see `db/sessions.ts`), so ordinary chat sessions carry NULL.
+    // Filtering on the session column alone excluded every chat session and
+    // the worker never found a candidate. The SQL must resolve the workspace
+    // through the assistants join.
+    const sql = mockedQuery.mock.calls[0]![0] as string
+    expect(sql).toContain('COALESCE(s.workspace_id, a.workspace_id)')
+    expect(sql).not.toMatch(/AND s\.workspace_id IS NOT NULL/)
   })
 })

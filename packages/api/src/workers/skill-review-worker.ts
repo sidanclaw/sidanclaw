@@ -193,6 +193,12 @@ type SessionCandidate = {
  * rows with `role='assistant'`. The query is a single scan over recent
  * sessions and is bounded by the lookback window.
  *
+ * The session's workspace resolves through the assistant:
+ * `sessions.workspace_id` exists only for the workspace-visibility RLS
+ * gate (doc/canvas threads — see `db/sessions.ts`), so ordinary chat
+ * sessions carry NULL there. Filtering on it alone excluded every chat
+ * session and the worker reviewed nothing.
+ *
  * Exported for unit tests — pass a fake `query` via the runtime if needed
  * (we read the module-level `query` here).
  */
@@ -209,7 +215,8 @@ export async function selectCandidateSessions(
     last_skill_reviewed_turn: string | null
   }>(
     `WITH active AS (
-       SELECT s.id, s.workspace_id, s.assistant_id, s.user_id,
+       SELECT s.id, COALESCE(s.workspace_id, a.workspace_id) AS workspace_id,
+              s.assistant_id, s.user_id,
               s.last_skill_reviewed_turn, s.last_active_at,
               (SELECT COUNT(*) FROM session_messages m
                 WHERE m.session_id = s.id
@@ -217,7 +224,7 @@ export async function selectCandidateSessions(
        FROM sessions s
        JOIN assistants a ON a.id = s.assistant_id
        WHERE s.last_active_at >= now() - ($1 || ' hours')::interval
-         AND s.workspace_id IS NOT NULL
+         AND COALESCE(s.workspace_id, a.workspace_id) IS NOT NULL
      )
      SELECT id           AS session_id,
             workspace_id,
