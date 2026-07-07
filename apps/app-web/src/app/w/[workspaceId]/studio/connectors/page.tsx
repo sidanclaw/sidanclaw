@@ -29,15 +29,18 @@
  *     `@sidanclaw/shared` dep). Every user-facing string flows through
  *     `useT()`.
  *
- * INFRA NOTE (degraded — connector OAuth): the OAuth connect paths build the
- * provider authorize URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID` /
+ * INFRA NOTE (connector OAuth env): the OAuth connect paths build the provider
+ * authorize URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID` /
  * `NEXT_PUBLIC_NOTION_CLIENT_ID` / `NEXT_PUBLIC_FATHOM_CLIENT_ID` and rely on
  * the server callback routes `/api/auth/callback/{google-connector,notion,
- * fathom}`. Those callbacks ARE ported (workspace-aware via `state`), but the
- * `NEXT_PUBLIC_*` client ids + the matching server secrets are not yet set in
- * app-web's environment. PAT connectors (GitHub) and custom MCP servers
- * need no OAuth and work today. See `degraded` in the chunk report for the
- * exact env vars still required.
+ * fathom}` (workspace-aware via `state`). Each client id must reach the browser
+ * bundle as a real `NEXT_PUBLIC_*` build var: Turborepo strict env mode strips
+ * bare vars like `GOOGLE_CLIENT_ID`, so the `next.config.ts` env mapping only
+ * lands when that var is declared in `sidanclaw/turbo.json` build.env (or a
+ * real `NEXT_PUBLIC_*` var is set in the Vercel project). Missing it ships an
+ * empty `client_id` (Google `Error 400: invalid_request`). PAT connectors
+ * (GitHub) and custom MCP servers need no OAuth. See
+ * docs/architecture/platform/deployment.md → "Turbo strict env mode".
  *
  * Rendered inside the Studio full-page layout, NOT the doc three-column
  * page shell (consolidation §9 #5).

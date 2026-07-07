@@ -50,11 +50,11 @@ export function filterBlueprints(
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Section count of a blueprint's extraction spec (0 when it has no spec). */
+/** Field count of a blueprint's extraction contract (0 when it has no spec). */
 export function blueprintSectionCount(
   template: CustomPageTemplateSummary,
 ): number {
-  return template.extraction?.sections.length ?? 0;
+  return template.extraction?.fields.length ?? 0;
 }
 
 /**

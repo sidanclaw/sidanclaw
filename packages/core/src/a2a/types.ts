@@ -313,6 +313,14 @@ export type ConsultRequest = {
    * See docs/architecture/brain/structural-synthesis.md → "The three fill modes".
    */
   blueprintId?: string
+  /**
+   * The originating workflow RUN id, set alongside `workflowId` for a
+   * workflow `assistant_call` step. Blueprint records the callee saves are
+   * stamped `source_kind='workflow', source_id=<runId>` so the next run's
+   * `{{lastRun.output.<key>}}` resolves to this run's typed output. Absent
+   * for ordinary askAssistant consults.
+   */
+  workflowRunId?: string
   caller: CallerIdentity
   chain: ConsultChain
 }

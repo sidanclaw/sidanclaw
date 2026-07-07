@@ -71,4 +71,9 @@ describe('[COMP:workflow/mcp-bridge] buildWorkflowToolRegistry', () => {
     expect(arg.assistantId).toBe('a-1')
     expect(arg.assistantTeamId).toBe('ws-1')
   })
+
+  it('never enables KB writes — workflow runs have no Approve/Deny loop (D2 chat-only)', async () => {
+    await buildWorkflowToolRegistry(makeDeps(new Map<string, Tool>()), scope)
+    expect(mockInject.mock.calls[0][0].allowKnowledgeWrites).toBe(false)
+  })
 })

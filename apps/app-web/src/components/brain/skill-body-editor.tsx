@@ -19,11 +19,24 @@
  *     the doc `floating-toolbar.tsx` pattern incl. its `shouldShowToolbar`
  *     predicate + DOM-desync `display:contents` guard, minus TurnInto and
  *     comments,
- *   - the official `@tiptap/extension-drag-handle-react` grip, styled to
- *     match the doc's ⋮⋮ handle,
+ *   - the doc surface's own ⋮⋮ grip — `DocDragHandle` over the vendored
+ *     `createBlockDragHandlePlugin`, NOT the official
+ *     `@tiptap/extension-drag-handle-react` (which hid the grip the moment
+ *     the pointer left the text column for the margin, so it vanished
+ *     mid-reach and had no click affordance at all). The vendored plugin
+ *     brings the reach-corridor keep-alive (`pointerInGripCorridor`) and
+ *     click → `BlockActionMenu` (Turn into / Duplicate / Delete), whose
+ *     doc-only rows self-gate on this schema's capabilities: Turn-into
+ *     filters to the md kinds, Color hides (no `color`/`bgColor` attrs
+ *     here), Copy-link hides (no page context passed). Its Yjs remap paths
+ *     no-op without a y-sync plugin state,
  *   - the `doc-collab-editor` CSS scope, so typography (headings, lists,
  *     quotes, code, the `.is-empty` placeholder paint) matches the doc
- *     surface 1:1.
+ *     surface 1:1 — including the 2rem in-box drag-handle gutter
+ *     (`padding-left` + negative `margin-left`), which full document mode
+ *     now keeps: the grip must hover OVER `.ProseMirror`'s own box, not in
+ *     a foreign margin (compact mode still neutralizes it — no handle
+ *     there).
  *
  * Task list (`- [ ]`) is NOT enabled: commonmark's tokenizer has no
  * task-list rule and no markdown-it plugin is installable here, so the
@@ -55,11 +68,9 @@ import {
 } from "@tiptap/suggestion";
 import { PluginKey } from "@tiptap/pm/state";
 import Placeholder from "@tiptap/extension-placeholder";
-import { DragHandle } from "@tiptap/extension-drag-handle-react";
 import {
   Bold,
   Code,
-  GripVertical,
   Heading1,
   Heading2,
   Heading3,
@@ -85,6 +96,7 @@ import {
 } from "@/components/doc/slash-menu";
 import { shouldShowToolbar } from "@/components/doc/floating-toolbar";
 import { createSuggestionDismiss } from "@/components/doc/suggestion-dismiss";
+import { DocDragHandle } from "@/components/doc/drag-handle";
 
 // ── Slim slash catalogue — md-representable blocks only ────────────────
 //
@@ -327,13 +339,19 @@ export function SkillBodyEditor({
     immediatelyRender: false,
     editorProps: {
       attributes: {
-        // `!ml-0 !pl-0` neutralizes the doc CSS's drag-handle gutter (its
-        // negative margin would overflow this page's narrower padding; the
-        // official DragHandle positions via tippy, not an in-box gutter).
-        // Compact mode also drops the document tail padding for form use.
+        // Full document mode KEEPS the doc CSS's 2rem drag-handle gutter
+        // (`.doc-collab-editor .ProseMirror` padding-left + negative
+        // margin-left): the grip must hover OVER the editor's own box — in a
+        // foreign margin, moving toward it crosses dead space and the handle
+        // hides mid-reach (the reported "drag icon disappears when I move to
+        // it"; the corridor keep-alive is only the backstop). The negative
+        // margin pokes ~8px past this page's px-6 column, which is benign:
+        // the gutter is empty padding, and the grip itself stays inside it.
+        // Compact mode (no drag handle) still neutralizes the gutter and
+        // drops the document tail padding for form use.
         class: compact
           ? "min-h-[10rem] outline-none !ml-0 !pl-0 !pb-2"
-          : "min-h-[30vh] outline-none !ml-0 !pl-0",
+          : "min-h-[30vh] outline-none",
         ...(ariaLabel ? { "aria-label": ariaLabel } : {}),
       },
     },
@@ -379,25 +397,15 @@ export function SkillBodyEditor({
     editor.commands.setContent(markdownToDoc(value).toJSON());
   }, [value, editor]);
 
-  // IMPORTANT: memoized — a fresh object re-initializes the handle each
-  // render and breaks dragging (see @tiptap/extension-drag-handle-react).
-  const dragTippyOptions = useMemo(() => ({ placement: "left" as const, offset: [0, 4] as [number, number] }), []);
-
   return (
     // `doc-collab-editor` scopes the doc surface's block typography (headings,
     // lists, quote, code, hr, the placeholder paint) AND the left gutter the
     // drag handle hovers in — visual parity with the page editor for free.
     <div className="doc-collab-editor relative">
-      {editor && !compact && (
-        <DragHandle editor={editor} tippyOptions={dragTippyOptions}>
-          <div
-            className="doc-drag-handle flex h-6 w-5 cursor-grab items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            aria-hidden
-          >
-            <GripVertical className="size-4" />
-          </div>
-        </DragHandle>
-      )}
+      {/* The doc surface's grip: drag to reorder, click for the block menu
+          (Turn into / Duplicate / Delete — the doc-only rows self-gate; no
+          page context is passed, so Copy-link never shows here). */}
+      {!compact && <DocDragHandle editor={editor} />}
       {editor && <SkillMarkToolbar editor={editor} />}
       <EditorContent editor={editor} />
     </div>

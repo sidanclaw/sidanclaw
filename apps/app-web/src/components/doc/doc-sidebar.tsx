@@ -56,6 +56,7 @@ import {
   GitBranch,
   Home,
   Inbox,
+  Megaphone,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -102,6 +103,7 @@ import { EmptyDraftsSidebar, EmptySearchResults } from "./empty-states";
 import { BrainSidebarPanel } from "./sidebar-panels/brain-sidebar-panel";
 import { StudioSidebarPanel } from "./sidebar-panels/studio-sidebar-panel";
 import { WorkflowSidebarPanel } from "./sidebar-panels/workflow-sidebar-panel";
+import { FeedSidebarPanel } from "./sidebar-panels/feed-sidebar-panel";
 
 export type SidebarMove = {
   viewId: string;
@@ -147,6 +149,13 @@ type Props = {
   studioNudge: boolean;
   /** Dismiss the Studio nudge (persists per workspace in localStorage). */
   onDismissStudioNudge: () => void;
+  /**
+   * Whether the Feed surface is available for this workspace (hosted edition
+   * AND at least one connected distribution profile — the `feedProfiles`
+   * probe in `DocSidebarDataProvider`). Gates the Feed nav row; the routes
+   * themselves stay deep-linkable for trial onboarding.
+   */
+  feedEnabled: boolean;
 };
 
 function collapseKey(workspaceId: string): string {
@@ -468,6 +477,23 @@ export function DocSidebar(props: Props) {
             ) : null}
           </Link>
         </Tooltip>
+        {/* Feed — the ported feed-web operator app. Hosted-only and shown only
+            when the workspace has a connected distribution profile
+            (`feedEnabled`); the routes stay deep-linkable regardless. */}
+        {props.feedEnabled ? (
+          <Tooltip label={t.iconFeed} shortcut="⌘5">
+            <Link
+              href={`/w/${workspaceId}/feed`}
+              aria-label={t.iconFeedAria}
+              className={navItemCls(surfaceActive("feed"), !utilityPillOpen)}
+            >
+              <Megaphone className="size-[17px] shrink-0" />
+              {surfacePill("feed") ? (
+                <span className="whitespace-nowrap">{t.iconFeed}</span>
+              ) : null}
+            </Link>
+          </Tooltip>
+        ) : null}
         {/* Goals board (`/goals`) deliberately has NO nav slot — like Approvals,
             it is attention-routed: the home-dock Autopilot card + the Brain task
             panel are its entry points (docs/architecture/features/goals.md). */}
@@ -546,6 +572,8 @@ export function DocSidebar(props: Props) {
           <StudioSidebarPanel workspaceId={workspaceId} />
         ) : props.activeSurface === "workflow" ? (
           <WorkflowSidebarPanel workspaceId={workspaceId} />
+        ) : props.activeSurface === "feed" ? (
+          <FeedSidebarPanel workspaceId={workspaceId} />
         ) : null}
 
         {props.activeSurface === "p" && (

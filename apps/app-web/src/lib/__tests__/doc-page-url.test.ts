@@ -10,11 +10,16 @@
 import { describe, expect, it } from "vitest";
 import {
   docBlockHash,
+  docEntryPath,
   docPagePath,
   blockIdFromHash,
   isCaptureRequest,
+  isPanelId,
   pageIdFromInAppHref,
   pageIdFromPathname,
+  panelFromSearch,
+  panelFromTabEntry,
+  panelTabEntry,
   surfaceFromPathname,
 } from "../doc-page-url";
 
@@ -155,6 +160,9 @@ describe("[COMP:app-web/page-url] surfaceFromPathname", () => {
     expect(surfaceFromPathname("/w/w1/studio/connectors")).toBe("studio");
     expect(surfaceFromPathname("/w/w1/workflow")).toBe("workflow");
     expect(surfaceFromPathname("/w/w1/workflow/wf-1")).toBe("workflow");
+    expect(surfaceFromPathname("/w/w1/feed")).toBe("feed");
+    expect(surfaceFromPathname("/w/w1/feed/inbox")).toBe("feed");
+    expect(surfaceFromPathname("/w/w1/feed/threads/insights")).toBe("feed");
     expect(surfaceFromPathname("/w/w1/approvals")).toBe("approvals");
     expect(surfaceFromPathname("/w/w1/knowledge-base")).toBe("knowledge-base");
     expect(surfaceFromPathname("/w/w1/knowledge-base/gaps")).toBe(
@@ -180,6 +188,58 @@ describe("[COMP:app-web/page-url] surfaceFromPathname", () => {
     expect(surfaceFromPathname(null)).toBeNull();
     expect(surfaceFromPathname(undefined)).toBeNull();
     expect(surfaceFromPathname("")).toBeNull();
+  });
+});
+
+describe("[COMP:app-web/page-url] panel tabs", () => {
+  it("isPanelId accepts the known panels only", () => {
+    expect(isPanelId("approvals")).toBe(true);
+    expect(isPanelId("goals")).toBe(true);
+    expect(isPanelId("brain")).toBe(false);
+    expect(isPanelId("")).toBe(false);
+    expect(isPanelId(null)).toBe(false);
+    expect(isPanelId(undefined)).toBe(false);
+  });
+
+  it("panelFromSearch reads the panel off a search string / params", () => {
+    expect(panelFromSearch("?panel=approvals")).toBe("approvals");
+    expect(panelFromSearch("panel=goals")).toBe("goals");
+    expect(panelFromSearch("?foo=bar&panel=approvals")).toBe("approvals");
+    expect(panelFromSearch(new URLSearchParams("panel=goals"))).toBe("goals");
+    expect(panelFromSearch("?panel=nope")).toBeNull();
+    expect(panelFromSearch("?other=1")).toBeNull();
+    expect(panelFromSearch("")).toBeNull();
+    expect(panelFromSearch(null)).toBeNull();
+    expect(panelFromSearch(undefined)).toBeNull();
+  });
+
+  it("panelTabEntry / panelFromTabEntry round-trip the prefixed form", () => {
+    expect(panelTabEntry("approvals")).toBe("panel:approvals");
+    expect(panelTabEntry("goals")).toBe("panel:goals");
+    expect(panelFromTabEntry("panel:approvals")).toBe("approvals");
+    expect(panelFromTabEntry("panel:goals")).toBe("goals");
+  });
+
+  it("panelFromTabEntry returns null for a page-id entry or unknown panel", () => {
+    // A bare UUID page id is the common entry — never a panel.
+    expect(panelFromTabEntry("1e02c8a4-1e02-4c8a-8e02-c8a41e02c8a4")).toBeNull();
+    expect(panelFromTabEntry("panel:brain")).toBeNull();
+    expect(panelFromTabEntry("panel:")).toBeNull();
+    expect(panelFromTabEntry(null)).toBeNull();
+    expect(panelFromTabEntry(undefined)).toBeNull();
+  });
+
+  it("docEntryPath maps an entry to its doc-shell URL", () => {
+    expect(docEntryPath("w1", panelTabEntry("approvals"))).toBe(
+      "/w/w1/p?panel=approvals",
+    );
+    expect(docEntryPath("w1", panelTabEntry("goals"))).toBe(
+      "/w/w1/p?panel=goals",
+    );
+    // A page id falls through to the canonical page path.
+    expect(docEntryPath("w1", "p1")).toBe("/w/w1/p/p1");
+    // Null → the Suggested-for-you index.
+    expect(docEntryPath("w1", null)).toBe("/w/w1/p");
   });
 });
 

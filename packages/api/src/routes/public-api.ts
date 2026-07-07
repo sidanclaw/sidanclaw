@@ -469,6 +469,11 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
         tools: baseTools,
         stores: options,
         engineHooks: options.engineHooks,
+        // KB write tools are chat-only (D2): the API consumer has no
+        // Approve/Deny loop, so this surface never exposes them. The
+        // confirmation-strip below would drop them anyway — this keeps
+        // them out of the injector's `mcp_search` index too.
+        allowKnowledgeWrites: false,
       })
 
       // Strip confirmation-required tools AFTER injection — MCP injectors

@@ -26,6 +26,33 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
     expect(result.success).toBe(true)
   })
 
+  it('unwraps JSON-string steps (the steps-as-strings model prior, 2026-07-07 tolerance fix)', () => {
+    // 4 prod authoring failures in 14 days: `steps.0: Expected object,
+    // received string`. A JSON-serialised step object now parses.
+    const def = {
+      startStepId: 'step_1',
+      steps: [
+        JSON.stringify({
+          id: 'step_1',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'do the thing',
+        }),
+      ],
+    }
+    const result = WorkflowDefinitionSchema.safeParse(def)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.steps[0]).toMatchObject({ id: 'step_1', type: 'assistant_call' })
+    }
+  })
+
+  it('a non-JSON string step still fails with the normal validation error', () => {
+    const def = { startStepId: 's1', steps: ['not json at all'] }
+    const result = WorkflowDefinitionSchema.safeParse(def)
+    expect(result.success).toBe(false)
+  })
+
   it('accepts a branch with both legs', () => {
     const def = {
       startStepId: 'check',

@@ -39,6 +39,7 @@ import {
   buildCalleeSystemPrompt,
   buildDocSkillBlock,
   calculateCost,
+  sanitize,
   canRead,
   filterToolsForMode,
   filterToolsByAllowList,
@@ -212,6 +213,14 @@ export type CalleeExecutorOptions = {
   /** Generate mode as a consult tool (fill a blueprint from the brain). Same
    *  tool the chat route injects; workspace-scoped, requiresConfirmation. */
   generateBlueprintTool?: Tool
+  /**
+   * Blueprint record surface — the SAME direct record tools the chat route
+   * injects (save/get records, create blueprint, list). Parity is
+   * load-bearing: a workflow step's record save must not be chat-only.
+   */
+  blueprintRecordTools?: Tool[]
+  /** Dynamic workspace-blueprints prompt section (empty when none exist). */
+  buildBlueprintPromptFragment?: (userId: string, workspaceId: string) => Promise<string>
 }
 
 export type CalleeQueryParams = {
@@ -323,6 +332,13 @@ export type CalleeQueryParams = {
    * See docs/architecture/brain/structural-synthesis.md → "The three fill modes".
    */
   blueprintId?: string
+  /**
+   * Originating workflow RUN id (`ConsultRequest.workflowRunId`). Threaded
+   * onto `ToolContext.workflowRunId` so blueprint records saved during the
+   * consult stamp `source_id=<runId>` — the provenance `{{lastRun.output.*}}`
+   * reads on the next run. Absent for ordinary askAssistant consults.
+   */
+  workflowRunId?: string
 }
 
 export type CalleeExecutor = (params: CalleeQueryParams) => Promise<string>
@@ -447,6 +463,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           connectorInstanceStore: options.connectorInstanceStore,
           assistantTeamId: calleeAssistant.workspaceId ?? null,
           engineHooks: options.engineHooks,
+          // KB write tools are chat-only (D2): the A2A callee path strips
+          // confirmation UX, so this surface never exposes them.
+          allowKnowledgeWrites: false,
           filesApi: options.filesApi,
         })
       } catch (err) {
@@ -506,14 +525,72 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       })
     }
 
-    // Strip tool confirmations for ordinary A2A — the inter-assistant
-    // approval was already granted (free-mode acceptance, or the
-    // require_approval flow resolving an input_required Task). EXCEPTION: a
-    // scheduled-origin step (`deliverTarget` set) keeps `ask`-policy
-    // confirmations live and surfaces them to the user's delivery channel
-    // (deferred confirmations — see the query loop below).
+    // Confirmation lanes — three, by consult origin:
+    //
+    // 1. Scheduled-origin (`deliverTarget` set): `ask`-policy confirmations
+    //    stay LIVE and surface to the user's delivery channel (deferred
+    //    confirmations — see the query loop below).
+    // 2. Workflow-origin, no deliver (`callerChannelType === 'workflow'`):
+    //    `ask`-policy tools are DROPPED from the surface entirely and the
+    //    callee is told which and why (see `askPolicyDropBlock`). There is no
+    //    interactive approver mid-run, and silently auto-allowing them let a
+    //    workflow fire user-approval-gated side-effects with no approval
+    //    anywhere — while the Approve/Deny language in tool descriptions made
+    //    the model refuse anyway (the 2026-07-07 send-step incident). The
+    //    approved path for ask-policy actions in workflows is a `tool_call`
+    //    step, which pauses the run in the unified Approvals queue. `allow`-
+    //    policy tools keep executing directly (the user pre-authorized them).
+    // 3. Ordinary A2A (askAssistant, no deliver): strip confirmations — the
+    //    inter-assistant approval was already granted (free-mode acceptance,
+    //    or the require_approval flow resolving an input_required Task).
+    //    NOTE: this lane still silent-allows ask-policy tools (pre-existing
+    //    semantics, caller's user is interactively present); tracked in
+    //    docs/architecture/channels/inter-assistant.md → "Callee Execution".
     const deferredConfirmations = params.deliverTarget != null
-    if (!deferredConfirmations) {
+    const droppedAskTools: string[] = []
+    if (!deferredConfirmations && params.callerChannelType === 'workflow') {
+      // Resolve each tool's effective policy the same way dispatch would
+      // (dynamic resolvers re-read mcp_tool_settings; synthetic ToolContext —
+      // only identity fields are read, mirroring the workflow executor's
+      // tool_call policy gate). Fail-closed: a resolver throw = treat as ask.
+      const policyCtx = {
+        userId: calleeActorUserId,
+        assistantId: params.calleeAssistantId,
+        sessionId: session.id,
+        appId: 'sidanclaw',
+        channelType: 'workflow',
+        channelId: session.id,
+        workspaceId: calleeAssistant.workspaceId ?? undefined,
+        abortSignal: new AbortController().signal,
+      }
+      await Promise.all(
+        Array.from(calleeTools.entries()).map(async ([name, tool]) => {
+          let needsConfirmation = !!tool.requiresConfirmation
+          if (tool.resolveConfirmation) {
+            try {
+              needsConfirmation = await tool.resolveConfirmation(
+                policyCtx as Parameters<NonNullable<typeof tool.resolveConfirmation>>[0],
+                undefined,
+              )
+            } catch {
+              needsConfirmation = true
+            }
+          }
+          if (needsConfirmation) {
+            droppedAskTools.push(name)
+            calleeTools.delete(name)
+          } else {
+            // Policy snapshot: the tool resolved `allow` at consult start, so
+            // it executes directly for the whole consult. Clearing the flags
+            // also closes the mid-consult policy-flip edge — this lane has no
+            // confirmation resolver to service a late `ask` event.
+            tool.requiresConfirmation = false
+            tool.resolveConfirmation = undefined
+          }
+        }),
+      )
+      droppedAskTools.sort()
+    } else if (!deferredConfirmations) {
       for (const [, tool] of calleeTools) {
         tool.requiresConfirmation = false
         tool.resolveConfirmation = undefined
@@ -596,11 +673,87 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       modeTools.set(options.generateBlueprintTool.name, options.generateBlueprintTool)
     }
 
+    // Blueprint record surface — chat-parity record tools for workspace-scoped
+    // consults (a workflow step saving its typed output uses these).
+    if (options.blueprintRecordTools && calleeAssistant.workspaceId) {
+      for (const tool of options.blueprintRecordTools) {
+        modeTools.set(tool.name, tool)
+      }
+    }
+
+    // Blueprint-bound enforcement (half 1 of 2): on a bound consult, wrap the
+    // save tool so a successful record write is OBSERVED in-process. The
+    // post-consult check below fails the step when a bound consult finishes
+    // without one — the record, not the reply text, is the deliverable, and a
+    // "completed" step with no record is the send-step lie class
+    // (`empty_response`'s sibling). Wrapping beats a DB re-read: no store dep,
+    // no race with the fill's async finalize.
+    let boundRecordSaved = false
+    if (params.blueprintId) {
+      const save = modeTools.get('saveBlueprintRecord')
+      if (save) {
+        modeTools.set('saveBlueprintRecord', {
+          ...save,
+          async execute(input, toolContext) {
+            const result = await save.execute(input, toolContext)
+            if (!result.isError) boundRecordSaved = true
+            return result
+          },
+        })
+      }
+      // A fill satisfies the contract too: a bound step may legitimately obey
+      // the directive by synthesizing from the brain, whose engine run creates
+      // the record itself (`recordId` on the result; null for a legacy
+      // spec-less blueprint, which correctly does not count).
+      const fill = modeTools.get('fillBlueprintFromBrain')
+      if (fill) {
+        modeTools.set('fillBlueprintFromBrain', {
+          ...fill,
+          async execute(input, toolContext) {
+            const result = await fill.execute(input, toolContext)
+            if (!result.isError && (result.data as { recordId?: string | null } | null)?.recordId) {
+              boundRecordSaved = true
+            }
+            return result
+          },
+        })
+      }
+    }
+
     // 4b. Per-consult tool allow-list. When the caller pins `allowedTools`
     // (a workflow `assistant_call.tools` restriction), the callee is narrowed
     // to exactly that set — applied last so it overrides the mode filter and
     // the free-mode memory default. Absent → unchanged.
     const finalTools = filterToolsByAllowList(modeTools, params.allowedTools)
+
+    // Fail fast when a pinned allow-list survives as NOTHING — the step's
+    // authored intent (those exact tools) cannot execute, and running the
+    // turn anyway produced a toolless model collapsing into empty responses
+    // (the 2026-07-07 send-step incident, run 0477b50d: allow-list of one
+    // ask-policy tool → zero-tool surface → "did not produce a response"
+    // recorded as a completed step). The typed reason is hoisted into the
+    // step-run error; the message says WHICH pin failed and WHY.
+    if (params.allowedTools?.length && finalTools.size === 0) {
+      const dropped = params.allowedTools.filter((t) => droppedAskTools.includes(t))
+      const unknown = params.allowedTools.filter((t) => !droppedAskTools.includes(t))
+      const parts: string[] = []
+      if (dropped.length) {
+        parts.push(
+          `${dropped.join(', ')}: ask-policy (requires per-use user approval) — not callable inside an automated assistant_call step; use a tool_call step, which pauses the run in the Approvals queue`,
+        )
+      }
+      if (unknown.length) {
+        parts.push(
+          `${unknown.join(', ')}: not available to this assistant (not injected — check the connector is connected and exposed)`,
+        )
+      }
+      throw Object.assign(
+        new Error(
+          `None of the step's pinned tools are available to the callee. ${parts.join('; ')}.`,
+        ),
+        { reason: 'tools_unavailable' },
+      )
+    }
 
     // 4c. Leaf invariant — a delegated callee is a terminal node in the
     // consult tree: strip the inter-assistant delegation tools so it can never
@@ -797,7 +950,51 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         ? `\n\n## Automated run — do not fabricate\nYou are running inside an automated workflow step with no user present to correct you. If a tool you need fails or returns an error (a connector is not connected, a token is invalid, a 401 / "bad credentials", or an empty result), do NOT substitute information from your memory or training and present it as if it were freshly fetched. Report the failure plainly and stop — a surfaced failure is the correct outcome; a fabricated or stale-from-memory result is not.`
         : ''
 
-    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${skillPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    // Direct-execution framing for confirmation-stripped consults. The
+    // confirmation strip above sets `requiresConfirmation = false` on every
+    // tool, but base prompts + tool descriptions still describe an
+    // Approve/Deny confirmation UI — in this UI-less context the model has
+    // inferred "manual confirmation is not available here" and REFUSED to
+    // call a tool it was explicitly granted (the 2026-07-07 send-step
+    // incident: callee session with zero tool_use, honest refusal text,
+    // step recorded completed). Tool-agnostic by design (tool-awareness rule).
+    const directExecutionBlock = !deferredConfirmations
+      ? `\n\n## Automated context — tools execute directly\nThere is no Approve/Deny or confirmation interface in this context; any interactive-approval flow described elsewhere does not apply here. Every tool available to you has already been authorized for this consult — calling it executes the action immediately. If the request asks you to perform an action and you have a tool for it, call the tool. Do not decline because manual confirmation is unavailable, and never describe an action as done without having called the tool. If you cannot perform the action (no suitable tool, or the tool errors), state that plainly as your outcome.`
+      : ''
+
+    // Approval-gated tools dropped from this workflow consult (lane 2 above).
+    // Scoped to the step's pinned list when one exists, so the note names only
+    // tools the step could plausibly reach for. Telling the callee exactly
+    // which tools are missing AND why is what turns the 2026-07-07 failure
+    // shape (model guesses, refuses, or narrates a phantom send) into an
+    // honest one-line outcome the step trail surfaces.
+    const relevantDroppedAskTools = params.allowedTools?.length
+      ? droppedAskTools.filter((t) => params.allowedTools!.includes(t))
+      : droppedAskTools
+    const askPolicyDropBlock = relevantDroppedAskTools.length
+      ? `\n\n## Approval-gated tools are NOT available in this step\nThese tools require per-use user approval (ask policy) and are not callable inside an automated workflow step: ${relevantDroppedAskTools.join(', ')}. Do not attempt to call them, do not simulate their effect, and never state or imply their action happened. If the request depends on one of them, state plainly that the action was not performed and that it needs an approval-gated \`tool_call\` workflow step (it pauses the run in the Approvals queue until the user approves).`
+      : ''
+
+    // Dynamic workspace-blueprints section — chat parity (closed-world; empty
+    // string when the workspace has no blueprints or the tools are absent).
+    let blueprintPromptFragment = ''
+    if (
+      options.buildBlueprintPromptFragment &&
+      options.blueprintRecordTools &&
+      calleeAssistant.workspaceId &&
+      finalTools.has('saveBlueprintRecord')
+    ) {
+      try {
+        blueprintPromptFragment = await options.buildBlueprintPromptFragment(
+          calleeOwner.id,
+          calleeAssistant.workspaceId,
+        )
+      } catch (err) {
+        console.warn('[inter-assistant] blueprint prompt fragment failed (skipped):', err)
+      }
+    }
+
+    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${directExecutionBlock}${askPolicyDropBlock}${skillPromptFragment}${blueprintPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
 
     // 6. Build messages and run the query loop.
     //
@@ -1007,7 +1204,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           userId: calleeActorUserId,
           assistantId: params.calleeAssistantId,
           sensitivity: calleeAssistant.clearance ?? 'internal',
-          sourceRef: params.workflowId ? `workflow:${params.workflowId}` : params.pageAnchorId!,
+          // The RUN id when available — blueprint records stamp it as
+          // source_id, which `{{lastRun.output.*}}` joins on next run.
+          sourceRef:
+            params.workflowRunId ??
+            (params.workflowId ? `workflow:${params.workflowId}` : params.pageAnchorId!),
         })
         if (result) {
           synthesisHandled = true
@@ -1022,11 +1223,21 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
+    // Output-contract binding: a step carrying a `blueprintId` whose record
+    // was NOT already produced by the research-synthesis arm directs the
+    // callee to persist its deliverable as that blueprint's typed record —
+    // bound context, so the save is part of the job (no proposing). Dynamic
+    // injection, gated on the record tools actually being in the map.
+    const outputBindingBlock =
+      params.blueprintId && !synthesisHandled && finalTools.has('saveBlueprintRecord')
+        ? `\n\n## Output contract\nThis step's deliverable is bound to blueprint \`${params.blueprintId}\`. Before finishing, persist the result as its typed record: call \`saveBlueprintRecord\` with blueprint "${params.blueprintId}", a \`subject\` naming what this run is about, and \`fields\` keyed by the blueprint's field keys (call \`listBlueprints\` first if unsure of the keys). Saving the record is part of completing the step — the record, not your reply text, is what later steps and other workflows read.`
+        : ''
+
     // The synthesis loop sees the gathered findings (research fan-out only);
     // compaction above used the un-injected prompt, which is correct.
-    const loopSystemPrompt = researchContext
-      ? buildPreflightPrompt(fullSystemPrompt, researchContext)
-      : fullSystemPrompt
+    const loopSystemPrompt =
+      (researchContext ? buildPreflightPrompt(fullSystemPrompt, researchContext) : fullSystemPrompt) +
+      outputBindingBlock
 
     // When the blueprint-research fill authored the page above, SKIP the
     // free-form authoring loop (don't double-author) — but stay inside this
@@ -1066,6 +1277,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // Doc anchor: renderView/renderChart append to this page instead
           // of minting drafts; patchPage/getCurrentPage target it.
           docViewId: params.pageAnchorId ?? null,
+          // Record provenance: saves during a workflow consult stamp the RUN
+          // id so `{{lastRun.output.*}}` resolves next run.
+          workflowRunId: params.workflowRunId ?? null,
           abortSignal: abortController.signal,
           activeCapabilities: calleeCapabilities,
         },
@@ -1086,6 +1300,40 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             .join('')
             .trim()
           if (turnText.length > 0) turnTexts.push(turnText)
+        } else if (event.type === 'tool_result') {
+          // Callee tool observability — mirror the chat route's
+          // `tool_executed` emission so per-tool dashboards and SQL recipes
+          // cover consult traffic. Before this, callee turns wrote NOTHING
+          // per tool call: a workflow step that refused / never called its
+          // tool was indistinguishable in analytics_events from one that ran
+          // it (the 2026-07-07 send-step incident debug had to read
+          // session_messages to establish "zero tool_use"). Metadata-only:
+          // tool name + success + a short error excerpt, never input/output.
+          for (const block of event.results) {
+            if (block.type !== 'tool_result') continue
+            const toolMeta = event.metaByToolUseId?.[block.toolUseId]
+            const extraMeta: Record<string, ReturnType<typeof sanitize> | number | boolean> = {}
+            if (toolMeta) {
+              for (const [k, v] of Object.entries(toolMeta)) {
+                extraMeta[k] = typeof v === 'string' ? sanitize(v) : v
+              }
+            }
+            options.analytics?.logEvent({
+              userId: calleeActorUserId,
+              assistantId: params.calleeAssistantId,
+              sessionId: session.id,
+              eventName: 'tool_executed',
+              channelType: params.callerChannelType === 'workflow' ? 'workflow' : 'assistant-call',
+              metadata: {
+                tool_name: sanitize(block.name),
+                success: !(block.isError ?? false),
+                ...(block.isError
+                  ? { error_message: sanitize(block.content.replace(/\s+/g, ' ').trim().slice(0, 200)) }
+                  : {}),
+                ...extraMeta,
+              },
+            })
+          }
         } else if (event.type === 'tool_confirmation_required') {
           // A scheduled-origin step's inner query loop hit an `ask`-policy
           // MCP tool. Park the confirmation: register the resolver so the
@@ -1208,6 +1456,45 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    return turnTexts.join('\n').trim() || 'The assistant did not produce a response.'
+    // An empty consult is a FAILURE, not a completion. Papering over it with a
+    // placeholder string let a workflow send-step record `completed` while the
+    // callee had produced nothing (the 2026-07-07 "email sent" hallucination,
+    // runs 22d62754/0477b50d: query-loop retries exhausted → placeholder →
+    // step completed → downstream steps + chat asserted the send happened).
+    // The typed reason is hoisted by the workflow run-loop catch into the
+    // step-run error, so the run records `failed`/`empty_response` honestly.
+    const finalText = turnTexts.join('\n').trim()
+    if (!finalText) {
+      throw Object.assign(
+        new Error(
+          'The callee assistant produced no output for this consult (empty response after retries). The requested work was NOT performed.',
+        ),
+        { reason: 'empty_response' },
+      )
+    }
+
+    // Blueprint-bound enforcement (half 2 of 2): a bound consult whose model
+    // was given the save tool + the Output-contract directive but finished
+    // without ONE successful record write did not deliver — reply prose is not
+    // the deliverable. Fail typed rather than let the step record `completed`
+    // with nothing persisted (the silent-lie class). Skipped when the
+    // research-synthesis arm already produced the record (`synthesisHandled`)
+    // and when the tool was never available (allow-list stripped it / no
+    // workspace) — enforcement never demands a save the callee could not make;
+    // the authoring warning covers that misconfiguration instead.
+    if (
+      params.blueprintId &&
+      !synthesisHandled &&
+      finalTools.has('saveBlueprintRecord') &&
+      !boundRecordSaved
+    ) {
+      throw Object.assign(
+        new Error(
+          `This step is bound to blueprint "${params.blueprintId}" but the consult finished without saving a blueprint record — the typed record is the step's deliverable, and it was NOT persisted. Partial reply text: ${finalText.slice(0, 300)}`,
+        ),
+        { reason: 'blueprint_record_missing', partialOutput: finalText },
+      )
+    }
+    return finalText
   }
 }

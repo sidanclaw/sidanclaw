@@ -21,7 +21,7 @@
  * [COMP:app-web/workflow]
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
@@ -29,6 +29,7 @@ import type { Dictionary } from "@/lib/i18n";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import {
   listWorkflows,
+  restoreWorkflow,
   type WorkflowSummary,
   type WorkflowTrigger,
 } from "@/lib/api/workflow";
@@ -40,19 +41,39 @@ export default function WorkflowPage() {
   const { activeId } = useWorkspaces();
   const [workflows, setWorkflows] = useState<WorkflowSummary[] | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    if (!activeId) return;
+    // `includeArchived` so the collapsed Archived section can render;
+    // the grid itself only shows live (active + stale) workflows.
+    const list = await listWorkflows(activeId, { includeArchived: true });
+    setWorkflows(list);
+  }, [activeId]);
 
   useEffect(() => {
     if (!activeId) return;
     let cancelled = false;
     setWorkflows(null);
     void (async () => {
-      const list = await listWorkflows(activeId);
+      const list = await listWorkflows(activeId, { includeArchived: true });
       if (!cancelled) setWorkflows(list);
     })();
     return () => {
       cancelled = true;
     };
   }, [activeId]);
+
+  const live = (workflows ?? []).filter((w) => w.lifecycleState !== "archived");
+  const archived = (workflows ?? []).filter((w) => w.lifecycleState === "archived");
+
+  const onRestore = async (workflowId: string) => {
+    setRestoringId(workflowId);
+    const ok = await restoreWorkflow(workflowId);
+    setRestoringId(null);
+    if (ok) void reload();
+  };
 
   return (
     <div className="h-full w-full px-8 py-6 flex flex-col gap-5 overflow-y-auto">
@@ -91,7 +112,7 @@ export default function WorkflowPage() {
         <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
           …
         </div>
-      ) : workflows.length === 0 ? (
+      ) : live.length === 0 && archived.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center text-center gap-3 border border-border rounded-md bg-card/50">
           <svg
             width="40"
@@ -127,8 +148,8 @@ export default function WorkflowPage() {
         <div className="flex-1 min-h-0 overflow-y-auto">
           {/* pb-28 keeps the last card row clear of the fixed chat dock the
               chrome floats over this surface's bottom-right. */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pb-28">
-            {workflows.map((w) => (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pb-6">
+            {live.map((w) => (
               <WorkflowCard
                 key={w.id}
                 workflow={w}
@@ -137,6 +158,72 @@ export default function WorkflowPage() {
               />
             ))}
           </div>
+
+          {archived.length > 0 && (
+            <section className="pb-28">
+              <button
+                type="button"
+                onClick={() => setArchivedOpen((v) => !v)}
+                className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+                aria-expanded={archivedOpen}
+              >
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.25"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                  className={cn("transition-transform", archivedOpen && "rotate-90")}
+                >
+                  <path d="m9 6 6 6-6 6" />
+                </svg>
+                {format(t.workflowPage.lifecycle.archivedSection, {
+                  count: String(archived.length),
+                })}
+              </button>
+              {archivedOpen && (
+                <div className="mt-3 flex flex-col gap-2">
+                  <p className="text-xs text-muted-foreground">
+                    {t.workflowPage.lifecycle.archivedHint}
+                  </p>
+                  {archived.map((w) => (
+                    <div
+                      key={w.id}
+                      className="flex items-center gap-3 rounded-lg border border-border bg-card/50 px-3 py-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <Link
+                          href={`/w/${activeId ?? ""}/workflow/${encodeURIComponent(w.id)}`}
+                          className="text-sm font-medium truncate hover:underline"
+                        >
+                          {w.name}
+                        </Link>
+                        {w.lifecycleReason ? (
+                          <p className="text-xs text-muted-foreground truncate">
+                            {w.lifecycleReason}
+                          </p>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void onRestore(w.id)}
+                        disabled={restoringId === w.id}
+                        className="shrink-0 px-2.5 py-1 rounded-md border border-border text-xs font-medium hover:bg-muted disabled:opacity-50"
+                      >
+                        {restoringId === w.id
+                          ? t.workflowPage.lifecycle.restoring
+                          : t.workflowPage.lifecycle.restore}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
         </div>
       )}
 
@@ -188,6 +275,14 @@ function WorkflowCard({
         <div className="min-w-0 flex-1">
           <div className="font-medium text-sm truncate">{workflow.name}</div>
         </div>
+        {workflow.lifecycleState === "stale" && (
+          <span
+            title={workflow.lifecycleReason ?? undefined}
+            className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-400 uppercase tracking-wide"
+          >
+            {t.workflowPage.lifecycle.staleBadge}
+          </span>
+        )}
         {!workflow.enabled && (
           <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground uppercase tracking-wide">
             {t.workflowPage.builder.disabledLabel}

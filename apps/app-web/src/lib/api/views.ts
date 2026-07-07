@@ -334,6 +334,13 @@ export type ExtractionSlotBlock = {
   id: string;
   instruction: string;
   outputType?: "prose" | "list" | "table";
+  /** Contract v2 (typed fields) — all optional; absent means a markdown field
+   *  keyed by the slugified preceding heading. Mirrors the core schema. */
+  fieldKey?: string;
+  fieldType?: "markdown" | "string" | "number" | "date" | "boolean" | "enum" | "entityRef";
+  options?: string[];
+  entityKind?: "company" | "contact" | "deal" | "task";
+  required?: boolean;
 };
 
 export type Block =
@@ -598,6 +605,48 @@ export async function deleteCustomPageTemplate(
     { method: "DELETE" },
   );
   await json<{ ok: true }>(res);
+}
+
+// ── Blueprint records (migration 307) ─────────────────────────────────
+//
+// The typed output rows a blueprint's fills/saves produce (the record is the
+// durable output; a page is its on-demand projection). Listed under each
+// blueprint in Brain -> Blueprints; "open as page" renders the projection for
+// a pageless record. See structural-synthesis.md -> "The record".
+
+export type BlueprintRecordSummary = {
+  id: string;
+  subject: string;
+  status: "complete" | "incomplete";
+  missing: string[];
+  fields: Record<string, unknown>;
+  specSnapshot: Array<{ key: string; heading: string; type: string; required?: boolean }>;
+  sourceKind: "recording" | "brain" | "research" | "chat" | "workflow";
+  pageId: string | null;
+  updatedAt: string;
+};
+
+export async function listBlueprintRecords(
+  workspaceId: string,
+  blueprintId: string,
+): Promise<BlueprintRecordSummary[]> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${workspaceId}/blueprints/${blueprintId}/records`,
+  );
+  const body = await json<{ records: BlueprintRecordSummary[] }>(res);
+  return body.records;
+}
+
+/** Render (or re-render) the record's page projection; returns the page id. */
+export async function openBlueprintRecordPage(
+  workspaceId: string,
+  recordId: string,
+): Promise<{ pageId: string }> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${workspaceId}/blueprint-records/${recordId}/page`,
+    { method: "POST" },
+  );
+  return json(res);
 }
 
 // ── Generate from brain (structural-synthesis: fill a blueprint from memory) ──

@@ -7,7 +7,7 @@
 import { findOrCreateUser, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
 import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline } from '@sidanclaw/core'
-import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, SkillContent, EngineHooks, FilesApi } from '@sidanclaw/core'
+import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, SkillContent, EngineHooks, FilesApi } from '@sidanclaw/core'
 import type { ActorIdentity } from '../mcp/auth-headers.js'
 // NOTE: the real DB-backed credit gate (`checkCreditBudget`, closed billing/)
 // is NOT imported here — that would couple this OPEN helper to closed code.
@@ -221,6 +221,11 @@ export type ChannelMcpStores = {
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: AssistantConnectorStore
   knowledgeStore?: KnowledgeStoreInterface
+  /**
+   * KB repo write-back port (assistant direct edits). Inert unless the
+   * caller also sets `allowKnowledgeWrites` on the injection params.
+   */
+  knowledgeRepoWriter?: KnowledgeRepoWriter
   gdriveFilesStore?: GDriveFilesStore
   connectorGrantStore?: ConnectorGrantStore
   connectorInstanceStore?: ConnectorInstanceStore
@@ -279,6 +284,24 @@ export type ApplyMcpInjectionParams = {
    * `injectMcpTools` (opted-in connectors get `X-Sidanclaw-Actor-*` headers).
    */
   actorIdentity?: ActorIdentity
+  /**
+   * On-demand introspection lane tools, forwarded to `injectMcpTools` as the
+   * `serverName: 'introspection'` mcp_search local source. The CALLER gates:
+   * pass them only for interactive workspace-PRIMARY turns (they read
+   * workspace-operational state — approvals, scheduled jobs, research runs,
+   * session history). See `docs/architecture/engine/introspection-tools.md`.
+   */
+  introspectionTools?: Tool[]
+  /**
+   * Whether this surface may expose the KB WRITE tools. `applyMcpInjection`
+   * serves BOTH the interactive web chat AND the public API channel, so the
+   * flag is per-caller and never hardcoded here: web chat passes `true`
+   * (live Approve/Deny loop); the public API passes `false` (no
+   * confirmation loop — its strip would orphan an `ask` tool). Default
+   * `false`, fail closed. See docs/architecture/features/knowledge-base.md
+   * → "Assistant direct edits".
+   */
+  allowKnowledgeWrites?: boolean
 }
 
 /**
@@ -314,6 +337,8 @@ export async function applyMcpInjection(
       assistantConnectorStore: stores.assistantConnectorStore,
       userTimezone: params.userTimezone,
       knowledgeStore: stores.knowledgeStore,
+      knowledgeRepoWriter: stores.knowledgeRepoWriter,
+      allowKnowledgeWrites: params.allowKnowledgeWrites === true,
       gdriveFilesStore: stores.gdriveFilesStore,
       connectorGrantStore: stores.connectorGrantStore,
       connectorInstanceStore: stores.connectorInstanceStore,
@@ -324,6 +349,7 @@ export async function applyMcpInjection(
       engineHooks: params.engineHooks,
       actorIdentity: params.actorIdentity,
       filesApi: stores.filesApi,
+      introspectionTools: params.introspectionTools,
     })
   } catch (err) {
     console.error(`[${params.scope}] MCP tool injection failed:`, err)

@@ -5,10 +5,15 @@
  *
  * Ported from `apps/web/src/app/(app)/studio/mini-apps/page.tsx` as part of
  * the studio surface migration (docs/plans/doc-web-app-consolidation.md
- * §9 #5). Card grid of installable surfaces, each deep-linking to the
- * mini-app's standalone deployable:
+ * §9 #5). Card grid of installable surfaces:
  *
- *   distribution (Feed)   → feed-web   `${FEED_APP_URL}/w/<wid>`
+ *   distribution (Feed)   → the in-app Feed surface `/w/<wid>/feed`
+ *                           (docs/plans/feed-web-consolidation.md §9 — no
+ *                           longer a separate origin). Feed is
+ *                           `status: 'alpha'`: workspaces WITHOUT a connected
+ *                           profile keep the trial-request mailto gate; one
+ *                           WITH a profile (`feedEnabled`, the sidebar-data
+ *                           probe) gets a normal internal "Open".
  *
  * The `views` (Doc) mini-app is intentionally **excluded from this gallery**
  * (`STUDIO_HIDDEN_MINI_APPS`): app-web *is* the Doc surface, so a card that
@@ -17,10 +22,10 @@
  * the apps/web onboarding picker + workspace-home, where listing Doc as an
  * installable capability still makes sense.
  *
- * Both surfaces are sibling deployables on their own origin, so the gallery
- * uses `window.open` instead of router push. Mini-apps with `status: 'alpha'`
- * (Feed today) are gated behind a manual trial request: the card shows an
- * "Alpha" pill and a "Contact us for trial" CTA that opens a `mailto:`.
+ * External targets (the trial mailto) use `window.open`; internal ones (the
+ * Feed surface) soft-navigate via router push. Mini-apps with
+ * `status: 'alpha'` are gated behind a manual trial request: the card shows
+ * an "Alpha" pill and a "Contact us for trial" CTA that opens a `mailto:`.
  * `status: 'coming_soon'` cards render disabled with no CTA.
  *
  * The `MINI_APPS` registry is imported directly from `@sidanclaw/shared`
@@ -45,12 +50,11 @@ import {
   type SupportedApp,
 } from "@sidanclaw/shared/mini-apps";
 import { useWorkspaces } from "@/contexts/workspace-context";
+import { useSidebarData } from "@/components/doc/doc-sidebar-data";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
 import { isOssEdition } from "@/lib/edition";
 
-const FEED_APP_URL =
-  process.env.NEXT_PUBLIC_FEED_URL ?? "https://feed.sidan.ai";
 const AUTHED_APP_URL =
   process.env.NEXT_PUBLIC_AUTHED_APP_URL ?? "https://app.sidan.ai";
 // Alpha mini-apps are gated behind a trial request rather than self-serve
@@ -110,6 +114,11 @@ export default function StudioMiniAppsPage() {
 function Gallery({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
   const hidden = studioHiddenMiniApps();
+  // Feed availability — the same probe that shows the sidebar's Feed nav row
+  // (`DocSidebarDataProvider.feedProfiles`). A connected workspace bypasses
+  // the alpha trial gate: the surface is theirs already.
+  const { feedProfiles } = useSidebarData();
+  const feedEnabled = (feedProfiles?.length ?? 0) > 0;
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -118,6 +127,7 @@ function Gallery({ workspaceId }: { workspaceId: string }) {
           key={app.id}
           app={app}
           workspaceId={workspaceId}
+          feedEnabled={feedEnabled}
           onNavigate={(href, external) => {
             if (href.startsWith("mailto:")) {
               window.location.href = href;
@@ -136,10 +146,12 @@ function Gallery({ workspaceId }: { workspaceId: string }) {
 function Card({
   app,
   workspaceId,
+  feedEnabled,
   onNavigate,
 }: {
   app: MiniAppMeta;
   workspaceId: string;
+  feedEnabled: boolean;
   onNavigate: (href: string, external?: boolean) => void;
 }) {
   const t = useT();
@@ -148,6 +160,9 @@ function Card({
 
   const isComingSoon = app.status === "coming_soon";
   const isAlpha = app.status === "alpha";
+  // A workspace with a connected distribution profile already HAS Feed —
+  // bypass the alpha trial gate and open the in-app surface.
+  const feedUnlocked = app.id === "distribution" && feedEnabled;
 
   // Alpha mini-apps are gated behind a manual trial request — the card opens
   // a pre-filled mailto instead of deep-linking to the deployable.
@@ -155,24 +170,26 @@ function Card({
     format(t.workspace.home.trialEmailSubject, { app: meta.label }),
   )}`;
 
-  // Each mini-app deep-links to its own deployable on a separate origin —
-  // flagged `external` so the gallery uses `window.open` instead of
-  // router push. Alpha cards point at the trial-request mailto instead.
+  // Feed opens the in-app surface (soft nav); Doc stays an external
+  // deployable deep link. Alpha cards without an unlock point at the
+  // trial-request mailto instead.
   const target: { href: string; external?: boolean } | null = (() => {
     if (isComingSoon) return null;
+    if (feedUnlocked) return { href: `/w/${workspaceId}/feed` };
     if (isAlpha) return { href: trialMailto, external: true };
     switch (app.id) {
       case "distribution":
-        return { href: `${FEED_APP_URL}/w/${workspaceId}`, external: true };
+        return { href: `/w/${workspaceId}/feed` };
       case "views":
         return { href: `${AUTHED_APP_URL}/w/${workspaceId}/doc`, external: true };
     }
   })();
   const href = target?.href ?? null;
 
-  const ctaLabel = isAlpha
-    ? t.workspace.home.contactForTrial
-    : t.workspace.home.open;
+  const ctaLabel =
+    isAlpha && !feedUnlocked
+      ? t.workspace.home.contactForTrial
+      : t.workspace.home.open;
 
   return (
     <button

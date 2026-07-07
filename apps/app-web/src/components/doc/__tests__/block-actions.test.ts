@@ -185,3 +185,91 @@ describe("[COMP:app-web/block-actions] applyTurnIntoAt on an atom embed", () => 
     ]);
   });
 });
+
+// ── Capability gates — what the block menu may offer on a given editor ─────
+//
+// `availableTurnIntoKinds` / `blockDeclaresColor` are the pure gates behind
+// the BlockActionMenu's schema-awareness: the SAME menu serves the full doc
+// surface and the skill body editor's md-restricted StarterKit schema, so the
+// gates must resolve the complete catalogue on the former and exactly the
+// md-representable subset on the latter (an unfiltered list would throw on
+// `toggleTaskList` where task lists aren't registered, or no-op on heading 4).
+
+import { getSchema } from "@tiptap/core";
+import { docExtensions } from "@sidanclaw/doc-model";
+import { skillBodySchemaExtensions } from "@/lib/skill-markdown";
+import {
+  availableTurnIntoKinds,
+  blockDeclaresColor,
+  editorTurnIntoKinds,
+} from "../block-actions";
+
+const docSchema = getSchema(docExtensions({ withViewPlugins: false }));
+const skillSchema = getSchema(skillBodySchemaExtensions);
+
+describe("[COMP:app-web/block-actions] availableTurnIntoKinds", () => {
+  it("resolves the FULL catalogue on the doc schema (unconfigured levels = 1-6)", () => {
+    const kinds = availableTurnIntoKinds(docSchema, [1, 2, 3, 4, 5, 6]);
+    expect([...kinds].sort()).toEqual(
+      [
+        "paragraph",
+        "heading_1",
+        "heading_2",
+        "heading_3",
+        "heading_4",
+        "bulleted_list",
+        "numbered_list",
+        "to_do",
+        "quote",
+        "callout",
+        "toggle",
+        "code",
+      ].sort(),
+    );
+  });
+
+  it("resolves only the md-representable subset on the skill schema", () => {
+    const kinds = availableTurnIntoKinds(skillSchema, [1, 2, 3]);
+    expect([...kinds].sort()).toEqual(
+      [
+        "paragraph",
+        "heading_1",
+        "heading_2",
+        "heading_3",
+        "bulleted_list",
+        "numbered_list",
+        "quote",
+        "code",
+      ].sort(),
+    );
+    // The doc-only kinds the skill schema cannot represent.
+    expect(kinds.has("heading_4")).toBe(false);
+    expect(kinds.has("to_do")).toBe(false);
+    expect(kinds.has("callout")).toBe(false);
+    expect(kinds.has("toggle")).toBe(false);
+  });
+
+  it("editorTurnIntoKinds reads the heading extension's configured levels", () => {
+    const editor = {
+      schema: skillSchema,
+      extensionManager: {
+        extensions: [{ name: "heading", options: { levels: [1, 2, 3] } }],
+      },
+    } as unknown as Editor;
+    const kinds = editorTurnIntoKinds(editor);
+    expect(kinds.has("heading_3")).toBe(true);
+    expect(kinds.has("heading_4")).toBe(false);
+  });
+});
+
+describe("[COMP:app-web/block-actions] blockDeclaresColor", () => {
+  it("doc nodes carry the DocAttrs color/bgColor globals", () => {
+    const para = docSchema.nodes.paragraph.create();
+    expect(blockDeclaresColor(para)).toBe(true);
+  });
+
+  it("plain StarterKit nodes (skill schema) do not", () => {
+    const para = skillSchema.nodes.paragraph.create();
+    expect(blockDeclaresColor(para)).toBe(false);
+  });
+});

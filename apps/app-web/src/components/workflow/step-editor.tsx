@@ -22,8 +22,8 @@
  * [COMP:app-web/workflow]
  */
 
-import { useEffect, useRef, useState } from "react";
-import { Search } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, ChevronDown, Plus, Search } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import type { StudioAssistantSummary } from "@/lib/api/studio";
@@ -52,10 +52,23 @@ import {
 } from "@/components/ui/searchable-select";
 import { Switch } from "@/components/ui/switch";
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
   FieldLabel,
   RailCard,
   SwitchRow,
 } from "@/components/workflow/field";
+import {
+  buildToolCatalog,
+  catalogToolNames,
+  filterToolGroups,
+  normalizeToolName,
+  BUILTIN_GROUP_ID,
+  MAX_TOOLS,
+} from "@/lib/workflow-tools";
 import {
   fieldUnderlineCls,
   quietFieldCls,
@@ -461,7 +474,6 @@ function ExecutionFields({
   t: Dictionary;
 }) {
   const b = t.workflowPage.builder;
-  const toolsCsv = (step.tools ?? []).join(", ");
   const [maxTurnsDraft, setMaxTurnsDraft] = useState<string>(
     step.maxTurns == null ? "" : String(step.maxTurns),
   );
@@ -578,22 +590,361 @@ function ExecutionFields({
 
       <div className="flex flex-col gap-1.5">
         <FieldLabel label={b.toolsFilterLabel} hint={b.toolsFilterHint} />
-        <input
-          type="text"
-          value={toolsCsv}
-          onChange={(e) => {
-            const tools = e.target.value
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean);
-            onChange({ ...step, tools: tools.length > 0 ? tools : undefined });
-          }}
-          disabled={disabled}
-          placeholder="webFetch, gmailSendMessage"
-          className={RAIL_INPUT_CLS}
-        />
+        <ToolsField step={step} onChange={onChange} disabled={disabled} t={t} />
       </div>
     </div>
+  );
+}
+
+// ── Restrict tools — searchable multi-select dropdown, collapsible groups ──
+
+/**
+ * "Restrict tools" picker (`step.tools`). A dropdown whose popup carries a
+ * search bar and the tool catalog split into collapsible groups (Built-in +
+ * one per connected-tool connector, from `lib/workflow-tools.ts`). Each tool is
+ * a checkbox row; the trigger summarizes the selection count. A custom-add
+ * escape hatch preserves the old free-text power (any tool name — a custom MCP
+ * tool, an env-gated base tool) and selected names not in the catalog surface
+ * as their own "Custom" group so editing never drops them. Empty selection
+ * persists as `tools: undefined` (the assistant's normal tool set); matching is
+ * by exact tool name (see docs/architecture/features/workflow.md →
+ * "assistant_call per-step extensions").
+ */
+function ToolsField({
+  step,
+  onChange,
+  disabled,
+  t,
+}: {
+  step: Extract<WorkflowStep, { type: "assistant_call" }>;
+  onChange: (s: WorkflowStep) => void;
+  disabled?: boolean;
+  t: Dictionary;
+}) {
+  const b = t.workflowPage.builder;
+  const selected = useMemo(() => step.tools ?? [], [step.tools]);
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const count = selected.length;
+  const atMax = count >= MAX_TOOLS;
+
+  // Catalog is static; translate only the Built-in group label (connector
+  // labels are registry data, English — same as the connector-grants surface).
+  const catalog = useMemo(() => buildToolCatalog(), []);
+  const groups = useMemo(
+    () =>
+      catalog.map((g) =>
+        g.id === BUILTIN_GROUP_ID ? { ...g, label: b.toolsBuiltinGroup } : g,
+      ),
+    [catalog, b.toolsBuiltinGroup],
+  );
+  const catalogNames = useMemo(() => catalogToolNames(catalog), [catalog]);
+
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [customDraft, setCustomDraft] = useState("");
+  // Collapse every group with no current selection; keep ones with a pick open
+  // so an edited restriction shows its tools. Recomputed when the step id flips.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => collapseFor(catalog, selectedSet));
+  useEffect(() => {
+    setCollapsed(collapseFor(catalog, new Set(step.tools ?? [])));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step.id]);
+
+  const searching = query.trim().length > 0;
+  const filtered = filterToolGroups(groups, query);
+  // Selected tools not in the catalog (hand-typed / custom MCP) — their own
+  // group so editing never silently drops them. Filtered by the search too.
+  const q = query.trim().toLowerCase();
+  const customSelected = selected
+    .filter((n) => !catalogNames.has(n))
+    .filter((n) => !q || n.toLowerCase().includes(q));
+
+  function setTools(next: string[]) {
+    onChange({ ...step, tools: next.length > 0 ? next : undefined });
+  }
+  function toggle(name: string) {
+    if (selectedSet.has(name)) setTools(selected.filter((n) => n !== name));
+    else if (!atMax) setTools([...selected, name]);
+  }
+  function toggleGroup(id: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  function addCustom() {
+    const name = normalizeToolName(customDraft);
+    if (!name) return;
+    setCustomDraft("");
+    if (selectedSet.has(name) || atMax) return;
+    setTools([...selected, name]);
+  }
+
+  const nothingShown = filtered.length === 0 && customSelected.length === 0;
+
+  return (
+    <Popover open={open} onOpenChange={(o) => setOpen(o)}>
+      <PopoverTrigger
+        disabled={disabled}
+        aria-label={b.toolsFilterLabel}
+        className={cn(
+          RAIL_INPUT_CLS,
+          "flex items-center justify-between gap-2 text-left hover:bg-muted/60 data-[popup-open]:ring-2 data-[popup-open]:ring-ring",
+        )}
+      >
+        <span className={cn("truncate", count === 0 && "text-muted-foreground")}>
+          {count === 0
+            ? b.toolsFilterEmpty
+            : format(b.toolsFilterCount, { count: String(count) })}
+        </span>
+        <ChevronDown
+          className="size-4 shrink-0 text-muted-foreground transition-transform"
+          aria-hidden
+        />
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        sideOffset={4}
+        className="w-80 max-w-[calc(100vw-1.5rem)] gap-0 p-0"
+      >
+        {/* Search */}
+        <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+          <Search className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={b.toolsSearchPlaceholder}
+            aria-label={b.toolsSearchPlaceholder}
+            autoFocus
+            className="h-5 w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+          />
+        </div>
+
+        {/* Grouped, collapsible checklist */}
+        <div className="max-h-72 overflow-y-auto p-1">
+          {nothingShown ? (
+            <div className="px-2 py-6 text-center text-xs text-muted-foreground">
+              {b.toolsSearchEmpty}
+            </div>
+          ) : (
+            <>
+              {customSelected.length > 0 && (
+                <ToolGroupSection
+                  id="__custom__"
+                  label={b.toolsCustomGroup}
+                  collapsed={!searching && collapsed.has("__custom__")}
+                  onToggle={() => toggleGroup("__custom__")}
+                  selectedCount={customSelected.length}
+                  total={customSelected.length}
+                >
+                  {customSelected.map((name) => (
+                    <ToolCheckRow
+                      key={name}
+                      name={name}
+                      checked
+                      disabled={disabled}
+                      onToggle={() => toggle(name)}
+                    />
+                  ))}
+                </ToolGroupSection>
+              )}
+              {filtered.map((g) => {
+                const sel = g.items.filter((i) => selectedSet.has(i.name)).length;
+                return (
+                  <ToolGroupSection
+                    key={g.id}
+                    id={g.id}
+                    label={g.label}
+                    collapsed={!searching && collapsed.has(g.id)}
+                    onToggle={() => toggleGroup(g.id)}
+                    selectedCount={sel}
+                    total={g.items.length}
+                  >
+                    {g.items.map((item) => {
+                      const checked = selectedSet.has(item.name);
+                      return (
+                        <ToolCheckRow
+                          key={item.name}
+                          name={item.name}
+                          description={item.description}
+                          checked={checked}
+                          disabled={disabled || (!checked && atMax)}
+                          onToggle={() => toggle(item.name)}
+                        />
+                      );
+                    })}
+                  </ToolGroupSection>
+                );
+              })}
+            </>
+          )}
+        </div>
+
+        {/* Footer — custom-add escape hatch + clear all */}
+        <div className="flex flex-col gap-2 border-t border-border/60 px-3 py-2">
+          {atMax && (
+            <p className="text-[11px] text-muted-foreground">
+              {format(b.toolsMaxReached, { max: String(MAX_TOOLS) })}
+            </p>
+          )}
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              value={customDraft}
+              onChange={(e) => setCustomDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addCustom();
+                }
+              }}
+              placeholder={b.toolsCustomPlaceholder}
+              aria-label={b.toolsCustomAdd}
+              maxLength={128}
+              disabled={disabled || atMax}
+              className="h-7 min-w-0 flex-1 rounded-md border border-input bg-background px-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
+            />
+            <button
+              type="button"
+              onClick={addCustom}
+              disabled={disabled || atMax || normalizeToolName(customDraft) === null}
+              aria-label={b.toolsCustomAdd}
+              className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-input px-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+            >
+              <Plus className="size-3.5" aria-hidden />
+              {b.toolsCustomAddShort}
+            </button>
+          </div>
+          {count > 0 && (
+            <button
+              type="button"
+              onClick={() => setTools([])}
+              disabled={disabled}
+              className="self-start text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              {format(b.toolsClearAll, { count: String(count) })}
+            </button>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** Initial collapse set: a group is collapsed unless it holds a selected tool. */
+function collapseFor(
+  groups: ReturnType<typeof buildToolCatalog>,
+  selectedSet: Set<string>,
+): Set<string> {
+  const set = new Set<string>();
+  for (const g of groups) {
+    if (!g.items.some((i) => selectedSet.has(i.name))) set.add(g.id);
+  }
+  return set;
+}
+
+/** One collapsible group inside the tools popup — header (chevron + label +
+ *  count) over its checkbox rows. */
+function ToolGroupSection({
+  id,
+  label,
+  collapsed,
+  onToggle,
+  selectedCount,
+  total,
+  children,
+}: {
+  id: string;
+  label: string;
+  collapsed: boolean;
+  onToggle: () => void;
+  selectedCount: number;
+  total: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <div data-group={id}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left hover:bg-muted/50"
+      >
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={cn(
+            "shrink-0 text-muted-foreground transition-transform",
+            !collapsed && "rotate-90",
+          )}
+          aria-hidden
+        >
+          <path d="m9 6 6 6-6 6" />
+        </svg>
+        <span className="flex-1 truncate text-xs font-semibold uppercase tracking-wide text-muted-foreground/70">
+          {label}
+        </span>
+        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+          {selectedCount > 0 ? `${selectedCount}/${total}` : total}
+        </span>
+      </button>
+      {!collapsed && <div className="flex flex-col pb-1">{children}</div>}
+    </div>
+  );
+}
+
+/** One tool row — a checkbox indicator, the mono tool name, and (for catalog
+ *  tools) a one-line description. */
+function ToolCheckRow({
+  name,
+  description,
+  checked,
+  disabled,
+  onToggle,
+}: {
+  name: string;
+  description?: string;
+  checked: boolean;
+  disabled?: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={checked}
+      onClick={onToggle}
+      disabled={disabled}
+      className={cn(
+        "flex w-full items-start gap-2 rounded-md py-1 pl-6 pr-2 text-left hover:bg-accent hover:text-accent-foreground",
+        "disabled:pointer-events-none disabled:opacity-40",
+      )}
+    >
+      <span
+        className={cn(
+          "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-[4px] border",
+          checked ? "border-primary bg-primary text-primary-foreground" : "border-input",
+        )}
+        aria-hidden
+      >
+        {checked && <Check className="size-3" strokeWidth={3} />}
+      </span>
+      <span className="flex min-w-0 flex-col">
+        <span className="truncate font-mono text-xs text-foreground">{name}</span>
+        {description && (
+          <span className="truncate text-[11px] text-muted-foreground">{description}</span>
+        )}
+      </span>
+    </button>
   );
 }
 

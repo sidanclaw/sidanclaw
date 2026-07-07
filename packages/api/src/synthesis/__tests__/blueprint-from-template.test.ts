@@ -1,37 +1,43 @@
 import { describe, it, expect } from 'vitest'
-import type { ExtractionSpec } from '@sidanclaw/core'
+import { extractionSpecSchema, type ExtractionSpec } from '@sidanclaw/core'
 import { extractionToBlueprintBody } from '../blueprint-from-template.js'
 
-const SPEC: ExtractionSpec = {
-  sections: [
-    { heading: 'What the business does', instruction: 'Product, customers, revenue.', outputType: 'prose' },
-    { heading: 'Open risks', instruction: 'List the blockers.', outputType: 'list' },
+const SPEC: ExtractionSpec = extractionSpecSchema.parse({
+  fields: [
+    { key: 'what-the-business-does', heading: 'What the business does', instruction: 'Product, customers, revenue.', type: 'markdown', outputType: 'prose' },
+    { key: 'open-risks', heading: 'Open risks', instruction: 'List the blockers.', type: 'markdown', outputType: 'list' },
+    { key: 'budget', heading: 'Budget', instruction: 'Annual number.', type: 'number', required: true },
+    { key: 'stage', heading: 'Stage', instruction: 'Pick one.', type: 'enum', options: ['Prospect', 'Won'] },
   ],
   capture: ['company', 'contact'],
-}
+})
 
 describe('[COMP:api/blueprint-from-template] extractionToBlueprintBody', () => {
-  it('renders the title and every section heading in order', () => {
+  it('renders the title and every field heading + key in order', () => {
     const body = extractionToBlueprintBody('Discovery brief', SPEC)
     expect(body).toContain('# Discovery brief')
-    expect(body.indexOf('### 1. What the business does')).toBeGreaterThan(-1)
-    expect(body.indexOf('### 2. Open risks')).toBeGreaterThan(
+    expect(body.indexOf('### 1. What the business does — `what-the-business-does`')).toBeGreaterThan(-1)
+    expect(body.indexOf('### 2. Open risks — `open-risks`')).toBeGreaterThan(
       body.indexOf('### 1. What the business does'),
     )
+    expect(body).toContain('### 3. Budget — `budget` (REQUIRED)')
   })
 
-  it('wires the engine verbs (searchRecording + patchPage) and start_ms provenance into every section', () => {
+  it('wires the record sink (writeField) into every field with its instruction', () => {
     const body = extractionToBlueprintBody('B', SPEC)
-    expect(body.match(/searchRecording/g)?.length).toBe(2)
-    expect(body.match(/patchPage/g)?.length).toBe(2)
-    expect(body).toContain('start_ms')
+    expect(body.match(/writeField\(/g)?.length).toBe(4)
+    expect(body).toContain('writeField("budget"')
     expect(body).toContain('Product, customers, revenue.')
+    // The engine, not the body, owns page authorship now.
+    expect(body).not.toContain('patchPage')
   })
 
-  it('renders the per-section output shape', () => {
+  it('renders per-type value guidance', () => {
     const body = extractionToBlueprintBody('B', SPEC)
-    expect(body).toContain('a tight paragraph') // prose
-    expect(body).toContain('a bulleted list') // list
+    expect(body).toContain('a tight markdown paragraph') // markdown prose
+    expect(body).toContain('a markdown bulleted list') // markdown list
+    expect(body).toContain('a plain number') // number
+    expect(body).toContain('exactly one of: Prospect, Won') // enum
   })
 
   it('emits a capture section listing the declared kinds', () => {
@@ -41,7 +47,7 @@ describe('[COMP:api/blueprint-from-template] extractionToBlueprintBody', () => {
   })
 
   it('omits the capture section when nothing is captured', () => {
-    const body = extractionToBlueprintBody('B', { sections: SPEC.sections, capture: [] })
+    const body = extractionToBlueprintBody('B', { fields: SPEC.fields, capture: [] })
     expect(body).not.toContain('## Capture')
   })
 })

@@ -18,6 +18,8 @@ import {
   truncateMessagesFrom,
   getSessionMessages,
   setCompactSummaryAndBoundary,
+  listSessionsForWorkspaceSystem,
+  getSessionTranscriptForWorkspaceSystem,
 } from '../sessions.js'
 import { query } from '../client.js'
 
@@ -275,5 +277,127 @@ describe('[COMP:api/sessions-route] truncateMessagesFrom', () => {
     const result = await truncateMessagesFrom('m_5', 's_1')
     expect(result.deleted).toBe(1)
     expect(result.sessionId).toBe('s_1')
+  })
+})
+
+// Introspection session-history reads (audit §6-a). Both scope via the
+// assistants.workspace_id join, which excludes other members' personal
+// assistants. See docs/architecture/engine/introspection-tools.md.
+
+describe('[COMP:api/sessions-route] listSessionsForWorkspaceSystem', () => {
+  it('joins assistants and scopes on assistants.workspace_id = $1, newest-active first', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await listSessionsForWorkspaceSystem('ws_1', { limit: 20 })
+    const [sql, params] = mockQuery.mock.calls[0]
+    expect(sql).toContain('JOIN assistants a ON a.id = s.assistant_id')
+    expect(sql).toContain('a.workspace_id = $1')
+    expect(sql).toContain('ORDER BY s.last_active_at DESC')
+    // No channel filter → workspace + limit only.
+    expect(params).toEqual(['ws_1', 20])
+  })
+
+  it('adds the channel_type predicate when channelType is supplied', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await listSessionsForWorkspaceSystem('ws_1', { limit: 10, channelType: 'telegram' })
+    const [sql, params] = mockQuery.mock.calls[0]
+    expect(sql).toContain('s.channel_type = $2')
+    expect(params).toEqual(['ws_1', 'telegram', 10])
+  })
+
+  it('clamps an over-cap limit to 50 defensively', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await listSessionsForWorkspaceSystem('ws_1', { limit: 999 })
+    expect(mockQuery.mock.calls[0][1]).toEqual(['ws_1', 50])
+  })
+})
+
+describe('[COMP:api/sessions-route] getSessionTranscriptForWorkspaceSystem', () => {
+  it('returns null when the scope guard finds no in-workspace session (no message fetch)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never) // scope guard: miss
+    const result = await getSessionTranscriptForWorkspaceSystem('s_x', 'ws_1', { limit: 30 })
+    expect(result).toBeNull()
+    // Only the guard ran — no second (message) query.
+    expect(mockQuery).toHaveBeenCalledOnce()
+    const [guardSql, guardParams] = mockQuery.mock.calls[0]
+    expect(guardSql).toContain('JOIN assistants a ON a.id = s.assistant_id')
+    expect(guardSql).toContain('s.id = $1 AND a.workspace_id = $2')
+    expect(guardParams).toEqual(['s_x', 'ws_1'])
+  })
+
+  it('fetches the most-recent N (DESC LIMIT) and returns them reversed to chronological', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 's_1' }], rowCount: 1 } as never) // scope guard: hit
+      .mockResolvedValueOnce({
+        // DB returns newest-first (sequence DESC).
+        rows: [
+          { role: 'assistant', content: [{ type: 'text', text: 'second' }] },
+          { role: 'user', content: [{ type: 'text', text: 'first' }] },
+        ],
+        rowCount: 2,
+      } as never)
+
+    const result = await getSessionTranscriptForWorkspaceSystem('s_1', 'ws_1', { limit: 30 })
+    const [msgSql, msgParams] = mockQuery.mock.calls[1]
+    expect(msgSql).toContain('ORDER BY sequence_num DESC')
+    expect(msgSql).toContain('LIMIT $2')
+    expect(msgParams).toEqual(['s_1', 30])
+    // Reversed to chronological: user 'first' then assistant 'second'.
+    expect(result).toEqual([
+      { role: 'user', gist: 'first' },
+      { role: 'assistant', gist: 'second' },
+    ])
+  })
+
+  it('collapses tool_use / tool_result blocks to one-line markers, never the payload', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 's_1' }], rowCount: 1 } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            role: 'assistant',
+            content: [
+              { type: 'text', text: 'Sending it.' },
+              { type: 'tool_use', name: 'gmailSendMessage', input: { to: 'secret@vendor.com' } },
+              { type: 'tool_result', content: 'ok' },
+            ],
+          },
+        ],
+        rowCount: 1,
+      } as never)
+
+    const result = await getSessionTranscriptForWorkspaceSystem('s_1', 'ws_1', { limit: 30 })
+    expect(result).toEqual([
+      { role: 'assistant', gist: 'Sending it. [tool: gmailSendMessage] [tool result]' },
+    ])
+    // The frozen tool input must never leak into the gist.
+    expect(result![0].gist).not.toContain('secret@vendor.com')
+  })
+
+  it('passes a bare string content through and marks empty/opaque content', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 's_1' }], rowCount: 1 } as never)
+      .mockResolvedValueOnce({
+        // DB order is newest-first (sequence DESC); the method reverses to
+        // chronological, so the assistant row (newer) is listed first here.
+        rows: [
+          { role: 'assistant', content: [{ type: 'image', source: {} }] },
+          { role: 'user', content: 'plain string body' },
+        ],
+        rowCount: 2,
+      } as never)
+
+    const result = await getSessionTranscriptForWorkspaceSystem('s_1', 'ws_1', { limit: 30 })
+    expect(result).toEqual([
+      { role: 'user', gist: 'plain string body' },
+      { role: 'assistant', gist: '(non-text content)' },
+    ])
+  })
+
+  it('clamps an over-cap message limit to 100 defensively', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 's_1' }], rowCount: 1 } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await getSessionTranscriptForWorkspaceSystem('s_1', 'ws_1', { limit: 999 })
+    expect(mockQuery.mock.calls[1][1]).toEqual(['s_1', 100])
   })
 })

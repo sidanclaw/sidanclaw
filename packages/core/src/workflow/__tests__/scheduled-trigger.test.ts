@@ -133,6 +133,12 @@ const SAMPLE_WORKFLOW: WorkflowRecord = {
   maxTurns: null,
   researchMode: false,
   nameManuallySet: false,
+  lifecycleState: 'active' as const,
+  lifecycleTransitionedAt: null,
+  lifecycleReason: null,
+  pinned: false,
+  digestedAt: null,
+  digestVerdict: null,
   createdAt: new Date(),
   updatedAt: new Date(),
 }

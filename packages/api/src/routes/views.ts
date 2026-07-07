@@ -27,10 +27,12 @@
 import { Router } from 'express'
 import multer from 'multer'
 import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
 import {
   AUTO_TITLE_MIN_CHARS,
   type AnalyticsLogger,
   bindingConfigSchema,
+  blueprintRecordToBlocks,
   buildPayload,
   canRead,
   DEAL_STAGES,
@@ -73,6 +75,8 @@ import {
 } from '@sidanclaw/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
+import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
+import { createRecordPageProjector } from '../synthesis/synthesize.js'
 import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import type { PageGrantStore } from '../db/page-grant-store.js'
 import type { WorkspaceGroupStore } from '../db/workspace-group-store.js'
@@ -173,6 +177,15 @@ export type ViewsRouteOptions = {
    * See docs/architecture/features/doc-templates.md -> "Custom templates".
    */
   pageTemplateStore?: PageTemplateStore
+  /**
+   * Blueprint records (migration 307) — the typed output rows of the blueprint
+   * contract. When wired (together with `docPageStore` for the open-as-page
+   * projection), the `/workspaces/:wid/blueprints/:bid/records` list + the
+   * `/workspaces/:wid/blueprint-records/:rid/page` projection routes are live.
+   * Optional: when absent the routes return 503.
+   * See docs/architecture/brain/structural-synthesis.md → "The record".
+   */
+  blueprintRecordStore?: BlueprintRecordStore
 }
 
 /**
@@ -355,6 +368,97 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     const removed = await opts.pageTemplateStore.remove(userId, req.params.id)
     if (!removed) return notFound(res, 'Template not found')
     res.json({ ok: true })
+  })
+
+  // ── Blueprint records (migration 307) ────────────────────────────────
+  // The typed output rows a blueprint's fills/saves produce. The page is a
+  // per-surface PROJECTION of the record — the open-as-page route below
+  // renders it on demand for records that have none.
+  // See structural-synthesis.md → "The record".
+
+  // GET /workspaces/:workspaceId/blueprints/:blueprintId/records — newest first
+  router.get('/workspaces/:workspaceId/blueprints/:blueprintId/records', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.blueprintRecordStore) return res.status(503).json({ error: 'Blueprint records not configured' })
+    const { workspaceId, blueprintId } = req.params
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) return notMember(res)
+    const records = await opts.blueprintRecordStore.listForBlueprint(userId, workspaceId, blueprintId)
+    res.json({
+      records: records.map((r) => ({
+        id: r.id,
+        subject: r.subject,
+        status: r.status,
+        missing: r.missing,
+        fields: r.fields,
+        specSnapshot: r.specSnapshot,
+        sourceKind: r.sourceKind,
+        pageId: r.pageId,
+        updatedAt: r.updatedAt,
+      })),
+    })
+  })
+
+  // POST /workspaces/:workspaceId/blueprint-records/:recordId/page — open as page.
+  // Idempotent: an existing projection re-renders in place (same page); a
+  // pageless record mints its page on the record's own anchor key.
+  router.post('/workspaces/:workspaceId/blueprint-records/:recordId/page', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.blueprintRecordStore || !opts.docPageStore) {
+      return res.status(503).json({ error: 'Blueprint records not configured' })
+    }
+    const { workspaceId, recordId } = req.params
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) return notMember(res)
+    const record = await opts.blueprintRecordStore.getById(userId, recordId)
+    if (!record || record.workspaceId !== workspaceId) return notFound(res, 'Record not found')
+
+    // Find-or-create the page on the record's anchor (23505-converge, the
+    // same identity a fill with renderPage would use), then project.
+    let pageId = record.pageId
+    if (!pageId) {
+      pageId = await opts.savedViewStore.findIdByAnchorKey(userId, workspaceId, record.anchorKey)
+    }
+    if (!pageId) {
+      try {
+        const draft = await opts.savedViewStore.createDraft({
+          userId,
+          workspaceId,
+          name: record.subject,
+          nameOrigin: 'placeholder',
+          entity: 'tasks',
+          viewType: 'table',
+          binding: { entity: 'tasks', viewType: 'table' },
+          page: { blocks: [] },
+          anchorKey: record.anchorKey,
+          originPrompt: `blueprint record: ${record.subject}`,
+        })
+        pageId = draft.id
+      } catch {
+        pageId = await opts.savedViewStore.findIdByAnchorKey(userId, workspaceId, record.anchorKey)
+      }
+    }
+    if (!pageId) return res.status(500).json({ error: 'Could not create the page' })
+
+    const project = createRecordPageProjector(opts.docPageStore)
+    const projected = await project({
+      userId,
+      pageId,
+      blocks: blueprintRecordToBlocks(record.specSnapshot, record.fields, () => randomUUID()),
+    })
+    if (!projected) {
+      // The page exists but the CAS write lost twice — the record still holds
+      // the data; the client can retry.
+      return res.status(409).json({ error: 'Page is being edited; try again' })
+    }
+    await opts.blueprintRecordStore.finalize(userId, record.id, {
+      status: record.status,
+      missing: record.missing,
+      pageId,
+    })
+    res.json({ pageId })
   })
 
   // ── Saved-views CRUD (legacy single-binding paths) ───────────────────

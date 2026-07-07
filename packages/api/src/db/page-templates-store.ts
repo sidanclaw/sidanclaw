@@ -20,6 +20,7 @@ import type {
   ExtractionSpec,
   PageTemplateCategory,
 } from '@sidanclaw/core'
+import { normalizeExtractionSpec } from '@sidanclaw/core'
 
 import { queryWithRLS } from './client.js'
 
@@ -54,7 +55,8 @@ type SummaryRow = {
   description: string | null
   icon: string | null
   category: string
-  extraction: ExtractionSpec | null
+  /** Raw JSONB — may be the v1 `sections` shape; normalized on read. */
+  extraction: unknown
   created_at: Date
   updated_at: Date
 }
@@ -74,7 +76,9 @@ function rowToSummary(row: SummaryRow): CustomPageTemplateSummary {
     description: row.description,
     icon: row.icon,
     category: row.category as PageTemplateCategory,
-    extraction: row.extraction ?? null,
+    // Old rows persist the v1 `sections` shape; every consumer downstream of
+    // the store sees the typed v2 contract (or null for a plain skeleton).
+    extraction: normalizeExtractionSpec(row.extraction),
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   }

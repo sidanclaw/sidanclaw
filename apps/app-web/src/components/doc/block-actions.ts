@@ -18,7 +18,7 @@
  */
 
 import type { Editor } from "@tiptap/core";
-import type { Node as PMNode } from "@tiptap/pm/model";
+import type { Node as PMNode, Schema } from "@tiptap/pm/model";
 import { isNodeRangeSelection } from "@tiptap/extension-node-range";
 import { applyTurnInto, type TurnIntoKind } from "./turn-into-menu";
 import { newBlockId } from "@/lib/api/views";
@@ -54,6 +54,63 @@ export function findBlockPos(editor: Editor, blockId: string): number | null {
  *  cannot, so those actions are hidden for them. */
 export function canHoldCaret(node: PMNode): boolean {
   return !node.isAtom;
+}
+
+/**
+ * The `TurnIntoKind`s this editor's schema can actually represent — the menu
+ * offers exactly this set, so an editor on a restricted schema (the skill body
+ * editor's md-only StarterKit) never shows a conversion that would throw on an
+ * unregistered command (`toggleTaskList`) or silently fail (`setHeading` to a
+ * level outside the extension's `levels`). The full doc schema resolves to the
+ * complete catalogue, so the doc surface is unchanged. Pure (schema + the
+ * heading extension's configured levels), so it unit-tests against both real
+ * schemas without a mounted editor.
+ */
+export function availableTurnIntoKinds(
+  schema: Schema,
+  headingLevels: readonly number[],
+): Set<TurnIntoKind> {
+  const has = (name: string) => Boolean(schema.nodes[name]);
+  const kinds = new Set<TurnIntoKind>();
+  if (has("paragraph")) kinds.add("paragraph");
+  if (has("heading")) {
+    for (const level of [1, 2, 3, 4] as const) {
+      if (headingLevels.includes(level)) kinds.add(`heading_${level}`);
+    }
+  }
+  if (has("bulletList") && has("listItem")) kinds.add("bulleted_list");
+  if (has("orderedList") && has("listItem")) kinds.add("numbered_list");
+  if (has("taskList") && has("taskItem")) kinds.add("to_do");
+  if (has("blockquote")) kinds.add("quote");
+  if (has("callout")) kinds.add("callout");
+  if (has("toggle")) kinds.add("toggle");
+  if (has("codeBlock")) kinds.add("code");
+  return kinds;
+}
+
+/** `availableTurnIntoKinds` off a live editor — the heading levels come from
+ *  the (possibly StarterKit-nested) heading extension's options; Tiptap's
+ *  default is 1-6 when the extension left them unconfigured. */
+export function editorTurnIntoKinds(editor: Editor): Set<TurnIntoKind> {
+  const heading = editor.extensionManager.extensions.find(
+    (ext) => ext.name === "heading",
+  );
+  const levels =
+    (heading?.options as { levels?: number[] } | undefined)?.levels ??
+    (heading ? [1, 2, 3, 4, 5, 6] : []);
+  return availableTurnIntoKinds(editor.schema, levels);
+}
+
+/**
+ * Whether the block's node type declares the whole-block `color` / `bgColor`
+ * attrs (the doc schema's `DocAttrs` global attributes). The Color submenu is
+ * gated on this: on a schema without them (the skill body editor's plain
+ * StarterKit nodes) `setNodeMarkup` would silently drop the attr — a picker
+ * that paints nothing.
+ */
+export function blockDeclaresColor(node: PMNode): boolean {
+  const attrs = node.type.spec.attrs;
+  return Boolean(attrs && "color" in attrs && "bgColor" in attrs);
 }
 
 /**

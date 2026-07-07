@@ -173,6 +173,47 @@ describe('[COMP:api/pending-approvals-store] getByIdSystem', () => {
   })
 })
 
+describe('[COMP:api/pending-approvals-store] staged-skill dedupe finders', () => {
+  it('findPendingStagedSkillUpdate keys on workspace + payload targetSkillId, pending only', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [makeRow({ id: 'ap-7', kind: 'staged_skill_update' })],
+      rowCount: 1,
+    } as never)
+    const row = await store.findPendingStagedSkillUpdate('ws-1', 'skill-1')
+    expect(row?.id).toBe('ap-7')
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain("kind = 'staged_skill_update'")
+    expect(sql).toContain("status = 'pending'")
+    expect(sql).toContain("approval_payload->>'targetSkillId'")
+    expect(params).toEqual(['ws-1', 'skill-1'])
+    // System read — the worker has no acting user.
+    expect(mockQueryWithRLS).not.toHaveBeenCalled()
+  })
+
+  it('findPendingStagedSkillUpdate returns null when nothing is pending', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    expect(await store.findPendingStagedSkillUpdate('ws-1', 'skill-1')).toBeNull()
+  })
+
+  it('findPendingStagedSkillCreation keys on workspace + proposed umbrella slug', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [makeRow({ id: 'ap-8', kind: 'staged_skill_creation' })],
+      rowCount: 1,
+    } as never)
+    const row = await store.findPendingStagedSkillCreation('ws-1', 'weekly-report')
+    expect(row?.id).toBe('ap-8')
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain("kind = 'staged_skill_creation'")
+    expect(sql).toContain("arguments->'umbrella'->>'slug'")
+    expect(params).toEqual(['ws-1', 'weekly-report'])
+  })
+
+  it('findPendingStagedSkillCreation returns null when nothing is pending', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    expect(await store.findPendingStagedSkillCreation('ws-1', 'weekly-report')).toBeNull()
+  })
+})
+
 describe('[COMP:api/pending-approvals-store] respond', () => {
   it('flips a pending row to approved and stamps the responder', async () => {
     mockQuery.mockResolvedValueOnce({

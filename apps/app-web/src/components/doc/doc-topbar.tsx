@@ -26,6 +26,7 @@
  */
 
 import {
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   FileText,
@@ -33,6 +34,7 @@ import {
   PanelLeftOpen,
   Plus,
   Sparkles,
+  Target,
   X,
 } from "lucide-react";
 import {
@@ -41,6 +43,7 @@ import {
   type ViewEntity,
   type ViewType,
 } from "@/lib/api/views";
+import { type PanelId } from "@/lib/doc-page-url";
 import { useT } from "@/lib/i18n/client";
 
 /** Permanent right-edge mist on every tab title: the tail dissolves into the
@@ -54,10 +57,13 @@ const TITLE_FADE_MASK =
 /** One open tab, resolved to its display label/icon by `doc-shell.tsx`. */
 export type TabView = {
   key: string;
-  /** The page the tab shows, or `null` for a blank "new tab". */
+  /** The page the tab shows, or `null` for a blank "new tab" OR a panel tab. */
   pageId: string | null;
+  /** A panel tab (Approvals / Autopilot) — its own fixed label + glyph, no
+   *  page. Mutually exclusive with a non-null `pageId`. */
+  panel?: PanelId;
   isActive: boolean;
-  /** Page name; `null` for a blank tab or an as-yet-untitled page. */
+  /** Page/panel name; `null` for a blank tab or an as-yet-untitled page. */
   title: string | null;
   /** Emoji icon, or `null` to fall back to the type-derived glyph. */
   icon: string | null;
@@ -196,9 +202,11 @@ function TabChip({
   newTabLabel: string;
   closeAria: string;
 }) {
-  const label = tab.pageId
-    ? tab.title?.trim() || untitledLabel
-    : newTabLabel;
+  const label = tab.panel
+    ? (tab.title ?? "")
+    : tab.pageId
+      ? tab.title?.trim() || untitledLabel
+      : newTabLabel;
 
   return (
     <div
@@ -252,10 +260,17 @@ function TabChip({
   );
 }
 
-/** A tab's leading icon: emoji if set, the AI sparkle for the blank
- *  "Suggested for you" home, the type glyph for a page, else a generic doc
- *  glyph for a page whose type hasn't resolved yet. */
+/** A tab's leading icon: the panel glyph for Approvals / Autopilot, an emoji if
+ *  set, the AI sparkle for the blank "Suggested for you" home, the type glyph
+ *  for a page, else a generic doc glyph for a page whose type hasn't resolved. */
 function TabIcon({ tab }: { tab: TabView }) {
+  // Panel tabs carry a fixed glyph (they have no page metadata / emoji).
+  if (tab.panel === "approvals") {
+    return <CheckCircle2 className="size-4 text-rose-500" aria-hidden />;
+  }
+  if (tab.panel === "goals") {
+    return <Target className="size-4 text-violet-500" aria-hidden />;
+  }
   if (tab.icon) return <span aria-hidden>{tab.icon}</span>;
   // A pageless tab is the Suggested-for-you home → the AI sparkle (palette
   // primary), matching the sidebar entry.

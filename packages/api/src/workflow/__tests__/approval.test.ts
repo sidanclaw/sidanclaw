@@ -59,6 +59,8 @@ function makeStores() {
         maxTurns: params.maxTurns ?? null,
         researchMode: params.researchMode ?? false,
         nameManuallySet: false,
+        lifecycleState: 'active', lifecycleTransitionedAt: null, lifecycleReason: null,
+        pinned: false, digestedAt: null, digestVerdict: null,
         createdAt: now, updatedAt: now,
       }
       workflows.set(r.id, r); return r
@@ -177,6 +179,12 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
     },
     async createStagedSkillCreation() {
       throw new Error('createStagedSkillCreation not used in workflow approval tests')
+    },
+    async findPendingStagedSkillUpdate() {
+      return null
+    },
+    async findPendingStagedSkillCreation() {
+      return null
     },
     async createStagedWrite() {
       throw new Error('createStagedWrite not used in workflow approval tests')

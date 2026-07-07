@@ -111,6 +111,87 @@ describe('[COMP:api/mcp-inject] injectMcpTools', () => {
   })
 })
 
+describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
+  function kbStoreStub(sources: Array<{ id: string; repo: string; writeAccess?: boolean | null }>) {
+    return {
+      hasEntriesForAssistant: vi.fn().mockResolvedValue(true),
+      listSourcesForAssistant: vi.fn().mockResolvedValue(sources),
+    } as never
+  }
+
+  const repoWriterStub = {
+    commitEntryUpdate: vi.fn(),
+    commitEntryCreate: vi.fn(),
+  }
+
+  async function inject(params: {
+    sources: Array<{ id: string; repo: string; writeAccess?: boolean | null }>
+    allowKnowledgeWrites?: boolean
+    withWriter?: boolean
+    keepBuiltinsDirect?: boolean
+  }) {
+    const tools = new Map()
+    const result = await injectMcpTools({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      knowledgeStore: kbStoreStub(params.sources),
+      knowledgeRepoWriter: params.withWriter === false ? undefined : (repoWriterStub as never),
+      allowKnowledgeWrites: params.allowKnowledgeWrites,
+      keepBuiltinsDirect: params.keepBuiltinsDirect ?? true,
+    })
+    return { tools, result }
+  }
+
+  const WRITABLE = [{ id: 's1', repo: 'acme/kb', writeAccess: true }]
+  const READ_ONLY = [{ id: 's1', repo: 'acme/kb', writeAccess: null }]
+
+  it('exposes updateKnowledgeEntry on an interactive surface with a writable source', async () => {
+    const { tools, result } = await inject({ sources: WRITABLE, allowKnowledgeWrites: true })
+    expect([...tools.keys()]).toContain('updateKnowledgeEntry')
+    expect(result.unavailable.join(' ')).not.toContain('knowledge base editing')
+  })
+
+  it('keeps write tools out on non-interactive surfaces (default), with no unavailable advert', async () => {
+    const { tools, result } = await inject({ sources: WRITABLE })
+    expect([...tools.keys()]).not.toContain('updateKnowledgeEntry')
+    expect([...tools.keys()]).toContain('searchKnowledge')
+    // The capability doesn't exist on this surface by design — advertising
+    // it as "unavailable" would invite the model to promise it.
+    expect(result.unavailable.join(' ')).not.toContain('knowledge base editing')
+  })
+
+  it('reports a precise read-only reason when no source is writable', async () => {
+    const { tools, result } = await inject({ sources: READ_ONLY, allowKnowledgeWrites: true })
+    expect([...tools.keys()]).not.toContain('updateKnowledgeEntry')
+    const line = result.unavailable.find((u) => u.includes('knowledge base editing'))
+    expect(line).toBeDefined()
+    expect(line).toContain('read-only')
+    expect(line).toContain('acme/kb')
+  })
+
+  it('reports not-configured when the writer port is absent (open standalone)', async () => {
+    const { result } = await inject({ sources: WRITABLE, allowKnowledgeWrites: true, withWriter: false })
+    const line = result.unavailable.find((u) => u.includes('knowledge base editing'))
+    expect(line).toContain('not configured')
+  })
+
+  it('keeps write tools out of the mcp_search index when gated (closed world)', async () => {
+    const denied = await inject({ sources: WRITABLE, allowKnowledgeWrites: false, keepBuiltinsDirect: false })
+    const deniedSearch = denied.tools.get('mcp_search')
+    expect(deniedSearch).toBeDefined()
+    const deniedHits = await deniedSearch!.execute({ query: 'update knowledge entry' }, {} as never)
+    expect(JSON.stringify(deniedHits.data)).not.toContain('updateKnowledgeEntry')
+
+    const allowed = await inject({ sources: WRITABLE, allowKnowledgeWrites: true, keepBuiltinsDirect: false })
+    const allowedSearch = allowed.tools.get('mcp_search')
+    const allowedHits = await allowedSearch!.execute({ query: 'update knowledge entry' }, {} as never)
+    expect(JSON.stringify(allowedHits.data)).toContain('updateKnowledgeEntry')
+  })
+})
+
 describe('[COMP:api/mcp-inject] workspace connector-scoping gate', () => {
   // Regression guard for the 2026-06-01 cross-member leak: a shared
   // (non-personal) workspace assistant must NOT load the workspace owner's

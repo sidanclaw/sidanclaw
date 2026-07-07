@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { z } from 'zod'
 import { buildTool } from '../types.js'
-import { filterToolsByCapabilities } from '../capability-gate.js'
+import {
+  filterToolsByCapabilities,
+  isAutonomousToolContext,
+  INTERACTIVE_CHANNEL_TYPES,
+} from '../capability-gate.js'
 import type { Tool } from '../types.js'
 
 function makeTool(name: string, requiresCapability?: string): Tool {
@@ -90,5 +94,42 @@ describe('[COMP:tools/capability-gate] filterToolsByCapabilities', () => {
     ])
     filterToolsByCapabilities(input, new Set())
     expect(input.size).toBe(2)
+  })
+})
+
+describe('[COMP:tools/capability-gate] isAutonomousToolContext (Tier-C write-gate discriminator)', () => {
+  // Interactive channels — a live human can tap Allow, so NOT autonomous.
+  it.each(['web', 'telegram', 'slack', 'whatsapp', 'discord'])(
+    'treats interactive channel %s as NOT autonomous',
+    (channelType) => {
+      expect(isAutonomousToolContext({ channelType })).toBe(false)
+    },
+  )
+
+  // Autonomous / headless channels — no human present, so gated.
+  it.each([
+    'workflow', // scheduled jobs run THROUGH the workflow executor
+    'assistant-call', // A2A callee
+    'system', // background workers
+    'synthesis',
+    'notification',
+    'home-refresh',
+    'skill-draft',
+    'api', // public API — no one to confirm in-line
+    'programmatic', // brain-key MCP
+    'cron',
+  ])('treats headless channel %s as autonomous', (channelType) => {
+    expect(isAutonomousToolContext({ channelType })).toBe(true)
+  })
+
+  it('is fail-closed — an unknown/new channel defaults to autonomous (gated)', () => {
+    expect(isAutonomousToolContext({ channelType: 'some-new-headless-channel' })).toBe(true)
+    expect(isAutonomousToolContext({ channelType: '' })).toBe(true)
+  })
+
+  it('the interactive allowlist is exactly the live-human channels', () => {
+    expect([...INTERACTIVE_CHANNEL_TYPES].sort()).toEqual(
+      ['discord', 'slack', 'telegram', 'web', 'whatsapp'],
+    )
   })
 })

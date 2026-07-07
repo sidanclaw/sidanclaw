@@ -272,6 +272,44 @@ export type BrainGraph = {
   truncated: boolean;
 };
 
+/**
+ * Graph-node kind each Brain filter chip (`BrainPrimitive`) covers on the
+ * force-directed canvas. Primitives with no graph representation in the
+ * current phase (`tasks` / `files` / `sessions` — graph-view.md → "What's
+ * a node") deliberately have no entry: they contribute nothing to the
+ * selection, and a selection that matches nothing on the canvas leaves the
+ * graph undimmed (the same no-anchor rule as a zero-match `focusQuery`).
+ * Kinds with no chip (`project`, `product`, `repository`, `other`,
+ * `skill`, `connector`) are never in the selected set, so they ghost
+ * whenever any filter is active.
+ */
+export const PRIMITIVE_GRAPH_KINDS: Partial<
+  Record<BrainPrimitive, BrainGraphNodeKind>
+> = {
+  people: "person",
+  companies: "company",
+  deals: "deal",
+  knowledge: "knowledge",
+  memories: "memory",
+};
+
+/**
+ * Selected primitive chips → the graph-node kinds the canvas keeps at full
+ * opacity (`BrainGraphView.filterKinds` — graph-view.md → "Filter dim").
+ * `null` when no chips are active (= no filter, nothing dims).
+ */
+export function primitivesToGraphKinds(
+  primitives: BrainPrimitive[],
+): Set<BrainGraphNodeKind> | null {
+  if (primitives.length === 0) return null;
+  const kinds = new Set<BrainGraphNodeKind>();
+  for (const p of primitives) {
+    const kind = PRIMITIVE_GRAPH_KINDS[p];
+    if (kind) kinds.add(kind);
+  }
+  return kinds;
+}
+
 // ── Knowledge entry detail ────────────────────────────────────────────
 
 /** A resolved related-entry ref — wikilink targets + the reader rail list. */

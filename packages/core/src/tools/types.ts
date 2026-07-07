@@ -62,6 +62,15 @@ export type ToolContext = {
    * guess.
    */
   userTimezone?: string
+  /**
+   * The originating workflow RUN id when this turn executes a workflow
+   * `assistant_call` step (set by the callee executor from
+   * `ConsultRequest.workflowRunId`). Blueprint record saves use it as their
+   * provenance (`source_kind='workflow', source_id=<runId>`) so the next
+   * run's `{{lastRun.output.<key>}}` resolves to this run's typed output.
+   * Absent on every non-workflow surface.
+   */
+  workflowRunId?: string | null
   abortSignal: AbortSignal
   /** DB-backed cache store for cross-restart tool result persistence. */
   cacheStore?: CacheStore

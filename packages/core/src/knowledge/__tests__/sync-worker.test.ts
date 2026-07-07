@@ -6,6 +6,7 @@ const mockApi: SyncGitHubApi = {
   getRepoTree: vi.fn(),
   getFileContents: vi.fn(),
   compareCommits: vi.fn(),
+  getRepoPermissions: vi.fn(async () => ({ push: false })),
 }
 
 const mockStore: SyncStore = {
@@ -15,6 +16,7 @@ const mockStore: SyncStore = {
   updateRelatedIds: vi.fn(),
   getByPathSystem: vi.fn(),
   updateSourceSync: vi.fn(),
+  updateSourceWriteAccess: vi.fn(),
   getSourcesDueForSync: vi.fn(),
 }
 
@@ -35,6 +37,38 @@ const SOURCE = {
 }
 
 describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
+  describe('write-capability probe', () => {
+    it('persists the probe result every tick, even when the repo is unchanged', async () => {
+      vi.mocked(mockStore.getSourcesDueForSync).mockResolvedValueOnce([{ ...SOURCE, lastSyncedSha: 'sha_head' }])
+      vi.mocked(mockApi.getBranchHead).mockResolvedValueOnce('sha_head') // no new commits
+      vi.mocked(mockApi.getRepoPermissions).mockResolvedValueOnce({ push: true })
+
+      const worker = createKnowledgeSyncWorker({ store: mockStore, api: mockApi, credentials: mockCreds })
+      await worker.tick()
+
+      expect(mockApi.getRepoPermissions).toHaveBeenCalledWith('ghp_test123', 'deltadefi-protocol', 'knowledge')
+      expect(mockStore.updateSourceWriteAccess).toHaveBeenCalledWith('src1', true)
+      // The sync itself stayed a no-op — the probe is what self-heals a
+      // swapped PAT without waiting for a new commit.
+      expect(mockStore.upsertByPath).not.toHaveBeenCalled()
+    })
+
+    it('never fails the sync when the probe throws (advisory only)', async () => {
+      vi.mocked(mockStore.getSourcesDueForSync).mockResolvedValueOnce([{ ...SOURCE, lastSyncedSha: 'sha_head' }])
+      vi.mocked(mockApi.getRepoPermissions).mockRejectedValueOnce(new Error('boom'))
+      vi.mocked(mockApi.getBranchHead).mockResolvedValueOnce('sha_head')
+
+      const events: unknown[] = []
+      const worker = createKnowledgeSyncWorker({
+        store: mockStore, api: mockApi, credentials: mockCreds, onEvent: (e) => events.push(e),
+      })
+      await worker.tick()
+
+      expect(mockStore.updateSourceWriteAccess).not.toHaveBeenCalled()
+      expect(events.filter((e) => (e as { type: string }).type === 'sync_error')).toHaveLength(0)
+    })
+  })
+
   describe('full sync (no lastSyncedSha)', () => {
     it('fetches tree, parses markdown files, and upserts once per file (team-scoped)', async () => {
       vi.mocked(mockStore.getSourcesDueForSync).mockResolvedValueOnce([{ ...SOURCE }])

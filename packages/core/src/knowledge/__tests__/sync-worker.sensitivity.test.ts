@@ -11,6 +11,7 @@ const mockApi: SyncGitHubApi = {
   getRepoTree: vi.fn(),
   getFileContents: vi.fn(),
   compareCommits: vi.fn(),
+  getRepoPermissions: vi.fn(async () => ({ push: false })),
 }
 
 const mockStore: SyncStore = {
@@ -20,6 +21,7 @@ const mockStore: SyncStore = {
   updateRelatedIds: vi.fn(),
   getByPathSystem: vi.fn(),
   updateSourceSync: vi.fn(),
+  updateSourceWriteAccess: vi.fn(),
   getSourcesDueForSync: vi.fn(),
 }
 

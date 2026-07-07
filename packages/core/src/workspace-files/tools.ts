@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
+import { tolerantInt } from '../tools/schema-tolerance.js'
 import {
   applyExplicitCloses,
   applyExplicitLinks,
@@ -321,7 +322,7 @@ export function createFileTools(
       query: z.string().min(1).max(512).optional().describe('Free-text search across title, summary, tags, and name. Omit to list all files in the (optional) parent_path / tag scope.'),
       tag: z.string().min(1).max(64).optional().describe('Exact-match tag filter.'),
       parent_path: z.string().min(1).max(1024).optional().describe('Restrict search to a folder, e.g. "/reports/2026-Q1".'),
-      limit: z.number().int().min(1).max(100).optional().default(25),
+      limit: tolerantInt({ min: 1, max: 100 }).optional().default(25),
     }),
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)

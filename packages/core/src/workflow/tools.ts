@@ -33,6 +33,7 @@ import {
   WORKFLOW_EVENT_SOURCE_TYPES,
 } from './schemas.js'
 import { TASK_LIFECYCLE_ACTIONS } from './task-event-trigger.js'
+import { isRecurringTrigger } from './lifecycle.js'
 import { RESERVED_OUTCOME_VAR_NAMES } from './types.js'
 import type {
   AssistantCallStep,
@@ -176,15 +177,27 @@ export type WorkflowToolDeps = {
    * `assistant_call.tools[]` entry), resolves the owning built-in connector and
    * probes its credentials with one cheap authenticated call. Returns `null`
    * when the name is NOT a built-in connector tool (a first-party / brain tool —
-   * nothing to preflight), else `{ ok, provider, reason }`. `ok:false` blocks
-   * authoring so a workflow can't be created against a connector that is
-   * disconnected or whose token is revoked/expired. Absent → skipped. See
+   * nothing to preflight), else `{ ok, provider, reason, policy }`. `ok:false`
+   * blocks authoring so a workflow can't be created against a connector that is
+   * disconnected or whose token is revoked/expired. `policy` is the tool's
+   * effective allow/ask/block policy (registry default tightened by the user's
+   * L1/L2 rows, resolved against `assistantId` when given): an `ask`/`block`
+   * tool pinned on an `assistant_call` step blocks authoring too — the callee
+   * surface drops non-`allow` tools at run time, so the step as authored can
+   * never execute it (a `tool_call` step, which pauses in the unified
+   * Approvals queue, is the approved path). Absent → skipped. See
    * docs/architecture/features/workflow.md → "Authoring validation".
    */
   preflightConnectorTool?: (args: {
     userId: string
     toolName: string
-  }) => Promise<{ ok: boolean; provider: string; reason?: string } | null>
+    assistantId?: string
+  }) => Promise<{
+    ok: boolean
+    provider: string
+    reason?: string
+    policy?: 'allow' | 'ask' | 'block'
+  } | null>
   /**
    * Authoring-time Slack channel discovery — backs the `listSlackChannels`
    * tool so the model can target a real Slack channel id (`C…`/`G…`) from any
@@ -225,6 +238,7 @@ export const TRIGGER_INPUT_DESCRIPTION =
   `Shapes: \`{ type: "connector", connectorInstanceId, provider }\` (a CONNECTED connector instance), \`{ type: "channel", channelIntegrationId, channel }\` (a connected chat integration), \`{ type: "page", pageId }\` (a doc page + its direct children), \`{ type: "task" }\` (the workspace's tasks — id-less). ` +
   `\`match\` narrows firing: keywords / fromActors / inChannels / mentions / tags (task events only) / fromBots (default false — bot- or assistant-authored events only fire with \`fromBots: true\`). ` +
   `Task lifecycle actions are matched via \`match.inChannels\`: ${TASK_LIFECYCLE_ACTIONS.join(' / ')}. A connector/channel source id that does not reference a live connected source never fires — verify it is connected first. ` +
+  `Each entry nests the source under a \`source\` key — e.g. a task tagged 'triage' is \`{ source: { type: "task" }, match: { inChannels: ["tagged"], tags: ["triage"] } }\` (do NOT flatten \`type\` to the entry top level). ` +
   `\n- \`{ kind: "webhook", match?: { condition } }\` fires from an external signed POST. The kind can be set here, but the webhook URL slug + signing secret are provisioned in the web builder — tell the user the workflow cannot receive deliveries until they complete that step there.`
 
 const triggerInputSchema = z
@@ -322,6 +336,22 @@ function warningsFor(
     if (step.type === 'assistant_call' && step.deliver?.channelType === 'web') {
       warnings.push(
         `Step "${step.id}" delivers to the \`web\` channel, which is not a push target — the message will not be sent anywhere. To surface output to the user, deliver to a messaging channel (telegram / slack / whatsapp), or write to a page via a \`page\` anchor.`,
+      )
+    }
+    // Blueprint binding vs `tools` allow-list — the allow-list is applied
+    // AFTER the record tools are injected, so a list that omits
+    // `saveBlueprintRecord` strips the very tool the binding directs the
+    // callee to use. The runtime enforcement then cannot demand the save
+    // (it never fails a step for a tool the callee didn't have), so the
+    // binding silently degrades to unbound output. Flag it at authoring time.
+    if (
+      step.type === 'assistant_call' &&
+      step.blueprintId &&
+      step.tools &&
+      !step.tools.includes('saveBlueprintRecord')
+    ) {
+      warnings.push(
+        `Step "${step.id}" binds blueprint "${step.blueprintId}" but its \`tools\` allow-list omits \`saveBlueprintRecord\`. The allow-list is applied after the record tools are injected, so the callee cannot save the blueprint record and the binding silently produces no typed output. Add "saveBlueprintRecord" to the list or drop the allow-list.`,
       )
     }
     // Doc-work-without-anchor — the incident class behind "the workflow runs
@@ -629,24 +659,69 @@ async function dependencyIssues(
 
   // ── B. Connector preflight ───────────────────────────────────────────────
   if (deps.preflightConnectorTool) {
-    const refs: Array<{ stepId: string; toolName: string }> = []
+    const refs: Array<{
+      stepId: string
+      toolName: string
+      stepType: 'tool_call' | 'assistant_call'
+      assistantId?: string
+    }> = []
     for (const step of def.steps) {
-      if (step.type === 'tool_call') refs.push({ stepId: step.id, toolName: step.toolName })
+      if (step.type === 'tool_call') {
+        refs.push({ stepId: step.id, toolName: step.toolName, stepType: 'tool_call' })
+      }
       if (step.type === 'assistant_call' && step.tools) {
-        for (const tn of step.tools) refs.push({ stepId: step.id, toolName: tn })
+        for (const tn of step.tools) {
+          refs.push({
+            stepId: step.id,
+            toolName: tn,
+            stepType: 'assistant_call',
+            assistantId: step.target.assistantId,
+          })
+        }
       }
     }
+    // Policy is L2-scoped (per target assistant), so the dedupe key carries
+    // the assistant — the same tool on two steps targeting different
+    // assistants can legitimately resolve to different policies.
     const probed = new Set<string>()
     for (const ref of refs) {
-      if (probed.has(ref.toolName)) continue
-      probed.add(ref.toolName)
+      const key = `${ref.toolName} ${ref.stepType} ${ref.assistantId ?? ''}`
+      if (probed.has(key)) continue
+      probed.add(key)
       try {
-        const res = await deps.preflightConnectorTool({ userId: context.userId, toolName: ref.toolName })
-        if (res && !res.ok) {
+        const res = await deps.preflightConnectorTool({
+          userId: context.userId,
+          toolName: ref.toolName,
+          assistantId: ref.assistantId,
+        })
+        if (!res) continue
+        if (!res.ok) {
           errors.push(
             `Step "${ref.stepId}" uses the ${res.provider} tool "${ref.toolName}", but ${res.provider} is not usable right now: ${
               res.reason ?? 'connection check failed'
             }. Reconnect ${res.provider} (or refresh its token) before creating this workflow — otherwise every run fails here.`,
+          )
+          continue
+        }
+        // Policy gate. An `assistant_call` callee's tool surface DROPS
+        // non-`allow` policy tools at run time (no interactive approver exists
+        // mid-consult — the 2026-07-07 send-step incident: the callee refused /
+        // produced nothing, the step "completed", and the send silently never
+        // happened). Authoring must therefore reject the pin outright and
+        // steer to the step type whose approval semantics exist.
+        if (ref.stepType === 'assistant_call' && res.policy === 'ask') {
+          errors.push(
+            `Step "${ref.stepId}" pins "${ref.toolName}" in its \`tools\` allow-list, but that tool is ask-policy (requires per-use user approval) and an assistant_call step can never execute it — ask-policy tools are removed from the callee's surface at run time. Use a dedicated \`tool_call\` step with \`toolName: "${ref.toolName}"\` instead: it pauses the run in the Approvals queue and executes on the user's approval. (Alternatively the user can set the tool's policy to allow in connector settings.)`,
+          )
+        } else if (res.policy === 'block') {
+          errors.push(
+            `Step "${ref.stepId}" references "${ref.toolName}", but that tool is blocked by policy for this ${
+              ref.stepType === 'assistant_call' ? 'assistant' : 'user'
+            } — every run would fail here. Unblock it in connector settings or drop the step.`,
+          )
+        } else if (ref.stepType === 'tool_call' && res.policy === 'ask') {
+          warnings.push(
+            `Step "${ref.stepId}" invokes the ask-policy tool "${ref.toolName}": each run will pause in the Approvals queue until the user approves that call. That is the designed contract for approval-gated actions — just make sure the user knows runs are not fully hands-free.`,
           )
         }
       } catch (err) {
@@ -703,11 +778,44 @@ async function dependencyIssues(
   return { errors, warnings }
 }
 
+/**
+ * Per-step output cap in the compact trail. Enough to see what a step
+ * actually said/did (a refusal, an error apology, a delivery outcome)
+ * without flooding the caller's context with a full research deliverable.
+ */
+const STEP_OUTPUT_PREVIEW_CHARS = 600
+
+/**
+ * One-line, length-capped preview of a step run's persisted output.
+ * Unwraps the executor's `{ value }` scalar wrapper for readability and
+ * keeps the reserved `__delivery` outcome visible (it is the record of
+ * whether a `deliver` step actually reached a channel).
+ */
+function stepOutputPreview(output: Record<string, unknown> | null): string | null {
+  if (output === null) return null
+  const keys = Object.keys(output)
+  const unwrapped = keys.length === 1 && keys[0] === 'value' ? output.value : output
+  if (unwrapped === null || unwrapped === undefined) return null
+  let s: string
+  if (typeof unwrapped === 'string') s = unwrapped
+  else {
+    try {
+      s = JSON.stringify(unwrapped)
+    } catch {
+      s = String(unwrapped)
+    }
+  }
+  return s.length > STEP_OUTPUT_PREVIEW_CHARS
+    ? `${s.slice(0, STEP_OUTPUT_PREVIEW_CHARS - 3)}...`
+    : s
+}
+
 function compactStepRun(row: WorkflowStepRunRecord): {
   stepId: string
   type: string
   status: string
   durationMs: number | null
+  output: string | null
   error: Record<string, unknown> | null
 } {
   return {
@@ -715,6 +823,12 @@ function compactStepRun(row: WorkflowStepRunRecord): {
     type: row.stepType,
     status: row.status,
     durationMs: row.finishedAt ? row.finishedAt.getTime() - row.startedAt.getTime() : null,
+    // Truncated output preview — without it a step's honest refusal / apology
+    // text was structurally unreachable from chat, so the calling assistant
+    // could only GUESS what a "completed" step actually did (the 2026-07-07
+    // send-step incident: the refusal sat in workflow_step_runs.output while
+    // chat asserted the email was sent).
+    output: stepOutputPreview(row.output),
     error: row.error,
   }
 }
@@ -841,20 +955,6 @@ function triggerWarnings(def: WorkflowDefinition, trigger?: WorkflowTrigger): st
     )
   }
   return warnings
-}
-
-/**
- * Does this trigger fire the workflow more than once? Only a recurring trigger
- * has a "next run" for cross-run `{{lastRun.*}}` state to reach: a recurring
- * `schedule` (anything but `once`), an `event` subscription, or a `webhook`.
- * `manual` and `schedule: { type: 'once' }` are one-shots. Absent trigger →
- * treated as the `manual` default.
- */
-function isRecurringTrigger(trigger?: WorkflowTrigger): boolean {
-  if (!trigger) return false
-  if (trigger.kind === 'event' || trigger.kind === 'webhook') return true
-  if (trigger.kind === 'schedule') return trigger.schedule.type !== 'once'
-  return false
 }
 
 /**
@@ -1599,7 +1699,8 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
   const runWorkflow = buildTool({
     name: 'runWorkflow',
     description:
-      `Manually run a workflow. Returns the terminal outcome (completed / failed / paused) along with step trail summary. ` +
+      `Manually run a workflow. Returns the terminal outcome (completed / failed / paused) along with the step trail, including each step's truncated output. ` +
+      `A step status of "completed" means the step's turn finished — it does NOT by itself prove any side-effect (a send, a save) happened. Before telling the user an action occurred, read that step's \`output\` (and \`__delivery\` when present) for evidence; if the output shows a refusal or an error, report that honestly. ` +
       `Use this when the user says "run my X workflow now". For recurring runs, pass a schedule \`trigger\` to \`createWorkflow\` / \`updateWorkflow\` instead.`,
     inputSchema: z.object({
       workflowId: idShape,
@@ -1694,7 +1795,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
   const getWorkflowRun = buildTool({
     name: 'getWorkflowRun',
     description:
-      'Inspect a workflow run — current status, step trail, and any error. Use when the user asks "what happened with my X workflow?".',
+      'Inspect a workflow run — current status, step trail (with each step\'s truncated output), and any error. Use when the user asks "what happened with my X workflow?", and ALWAYS before asserting or re-asserting that a past run performed an action: the step `output` is the evidence of what actually happened, and a "completed" status alone is not proof of a side-effect.',
     inputSchema: z.object({
       runId: idShape,
     }),

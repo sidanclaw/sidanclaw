@@ -42,13 +42,15 @@ function tpl(
 }
 
 const SPEC_ONE = {
-  sections: [{ heading: "What", instruction: "pull X", outputType: "prose" as const }],
+  fields: [
+    { key: "what", heading: "What", instruction: "pull X", type: "markdown" as const, required: false, outputType: "prose" as const },
+  ],
   capture: [],
 };
 const SPEC_TWO = {
-  sections: [
-    { heading: "A", instruction: "a", outputType: "prose" as const },
-    { heading: "B", instruction: "b", outputType: "list" as const },
+  fields: [
+    { key: "a", heading: "A", instruction: "a", type: "markdown" as const, required: false, outputType: "prose" as const },
+    { key: "b", heading: "B", instruction: "b", type: "markdown" as const, required: false, outputType: "list" as const },
   ],
   capture: ["company" as const],
 };
@@ -78,7 +80,7 @@ describe("[COMP:web/blueprints-library] Blueprint library helpers", () => {
   });
 
   describe("blueprintSectionCount", () => {
-    it("counts the spec's sections, or 0 for a skeleton", () => {
+    it("counts the contract's fields, or 0 for a skeleton", () => {
       expect(blueprintSectionCount(tpl({ id: "1", name: "x", extraction: SPEC_TWO }))).toBe(2);
       expect(blueprintSectionCount(tpl({ id: "2", name: "y", extraction: null }))).toBe(0);
     });
@@ -168,9 +170,9 @@ describe("[COMP:web/blueprints-library] Blueprint library helpers", () => {
         { kind: "extraction_slot", id: "s2", instruction: "Verified contacts", outputType: "list" },
       ] as unknown as Block[];
       expect(templateExtractionFromBlocks(blocks)).toEqual({
-        sections: [
-          { heading: "Website", instruction: "Pull the merchant site", outputType: "table" },
-          { heading: "Contacts", instruction: "Verified contacts", outputType: "list" },
+        fields: [
+          { key: "website", heading: "Website", instruction: "Pull the merchant site", type: "markdown", required: false, outputType: "table" },
+          { key: "contacts", heading: "Contacts", instruction: "Verified contacts", type: "markdown", required: false, outputType: "list" },
         ],
         capture: [],
       });

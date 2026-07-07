@@ -15,10 +15,13 @@
  * `workflow_step`, `tool_invocation`, and `staged_write` approvals resolve
  * in place (on approve, a `staged_write`'s staged tool executes
  * server-side; a 502 means the apply failed and the row stays pending).
- * The other kinds (distribution_draft, staged_skill_*) list here for
- * visibility but resolve through their originating surface —
- * `respondToApproval` surfaces the backend's `nativeSurface` directive
- * so the UI can deep-link instead.
+ * The staged_skill_* kinds also resolve in place, but through the
+ * DEDICATED surface `/api/skills/approvals` (the unified respond route
+ * 422s them by design) — `respondByKind` routes each row to the right
+ * endpoint, and `listSkillApprovalDetails` fetches the target-skill
+ * snapshot the diff view needs. Only `distribution_draft` (feed) and
+ * `question` (chat) still defer to their originating surface via the
+ * `nativeSurface` hint.
  *
  * Spec: docs/architecture/features/workflow.md → Unified approvals.
  */
@@ -125,4 +128,87 @@ export async function respondToApproval(
     };
   }
   return { ok: false, error: data.error ?? "Request failed" };
+}
+
+// ── Skill approvals (staged_skill_creation / staged_skill_update) ──────
+// These rows live in the same queue but action through the dedicated
+// `/api/skills/approvals` routes (packages/api/src/routes/skill-approvals.ts).
+
+export type SkillApprovalKind = "staged_skill_creation" | "staged_skill_update";
+
+export function isSkillApprovalKind(kind: ApprovalKind): kind is SkillApprovalKind {
+  return kind === "staged_skill_creation" || kind === "staged_skill_update";
+}
+
+/** Snapshot of a staged update's target skill, joined server-side. */
+export type SkillApprovalTargetSkill = {
+  id: string;
+  name: string;
+  slug: string;
+  content: string;
+};
+
+export type SkillApprovalDetail = {
+  id: string;
+  kind: SkillApprovalKind;
+  arguments: Record<string, unknown>;
+  /** null for creation rows, and for update rows whose target skill was
+   *  deleted after staging (the card blocks approve in that case). */
+  targetSkill: SkillApprovalTargetSkill | null;
+};
+
+/**
+ * Detail fetch for the queue's skill cards, keyed by approval id — one
+ * request for the whole page, not one per card. Returns {} on failure so
+ * the cards degrade to a proposed-only view.
+ */
+export async function listSkillApprovalDetails(
+  workspaceId: string,
+): Promise<Record<string, SkillApprovalDetail>> {
+  const q = new URLSearchParams({ workspaceId });
+  const res = await authFetch(`${API_URL}/api/skills/approvals?${q.toString()}`);
+  if (!res.ok) return {};
+  const data = (await res.json().catch(() => ({}))) as {
+    approvals?: SkillApprovalDetail[];
+  };
+  const byId: Record<string, SkillApprovalDetail> = {};
+  for (const row of data.approvals ?? []) byId[row.id] = row;
+  return byId;
+}
+
+/** Approve or reject a staged_skill_* row via its dedicated endpoints. */
+export async function respondToSkillApproval(
+  id: string,
+  decision: "approved" | "rejected",
+  reason?: string,
+): Promise<RespondResult> {
+  const action = decision === "approved" ? "approve" : "reject";
+  const res = await authFetch(
+    `${API_URL}/api/skills/approvals/${encodeURIComponent(id)}/${action}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(decision === "rejected" && reason ? { reason } : {}),
+    },
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    status?: string;
+    error?: string;
+    detail?: string;
+  };
+  if (res.ok) {
+    return { ok: true, status: data.status ?? "resolved" };
+  }
+  return { ok: false, error: data.detail ?? data.error ?? "Request failed" };
+}
+
+/** Kind-aware respond dispatch — the queue's single action entry point. */
+export function respondByKind(
+  row: Pick<PendingApprovalRow, "id" | "kind">,
+  decision: "approved" | "rejected",
+  reason?: string,
+): Promise<RespondResult> {
+  return isSkillApprovalKind(row.kind)
+    ? respondToSkillApproval(row.id, decision, reason)
+    : respondToApproval(row.id, decision, reason);
 }

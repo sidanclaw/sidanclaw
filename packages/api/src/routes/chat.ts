@@ -230,6 +230,12 @@ type WebChatOptions = {
    */
   workerRunsStore?: import('@sidanclaw/core').WorkerRunsStore
   knowledgeStore?: import('@sidanclaw/core').KnowledgeStoreInterface
+  /**
+   * KB repo write-back port (assistant direct edits). Chat is an
+   * interactive, confirmation-capable surface, so this route passes
+   * `allowKnowledgeWrites: true` to `applyMcpInjection`.
+   */
+  knowledgeRepoWriter?: import('@sidanclaw/core').KnowledgeRepoWriter
   gdriveFilesStore?: import('@sidanclaw/core').GDriveFilesStore
   skillStore?: import('../db/skill-store.js').SkillStore
   /**
@@ -341,6 +347,26 @@ type WebChatOptions = {
   /** Generate mode as a chat tool (fill a blueprint from the brain). Built at
    *  boot with generateSynthesize + pageTemplateStore; workspace-scoped. */
   generateBlueprintTool?: Tool
+  /**
+   * The blueprint output-contract direct surface (save/get records, create
+   * blueprint, list). Built at boot; workspace-scoped; injected on the SAME
+   * turns as the fill tool. Callee-executor parity is load-bearing.
+   */
+  blueprintRecordTools?: Tool[]
+  /**
+   * On-demand introspection lane tools (pending approvals / scheduled jobs /
+   * research runs / session history reads). Built at boot; the route passes
+   * them to `applyMcpInjection` ONLY for workspace-primary turns, where they
+   * become the `introspection` mcp_search local source — never the direct
+   * tool surface. See `docs/architecture/engine/introspection-tools.md`.
+   */
+  introspectionTools?: Tool[]
+  /**
+   * Dynamic "workspace blueprints" system-prompt section — closed-world
+   * (empty string when the workspace has no blueprints). Carries the
+   * bound-vs-unbound application posture. Never part of Layer 1.
+   */
+  buildBlueprintPromptFragment?: (userId: string, workspaceId: string) => Promise<string>
   /**
    * Entity-graph stores (WU-6.12). When both are set — alongside a
    * workspace-scoped assistant — `saveMemory` accepts an `entityId` that
@@ -2897,6 +2923,14 @@ export function chatRoutes(options: WebChatOptions): Router {
         allTools.set(options.generateBlueprintTool.name, options.generateBlueprintTool)
       }
 
+      // Blueprint record surface — save/read typed records in-context, define
+      // contracts, discover them. Workspace-scoped like the fill tool.
+      if (options.blueprintRecordTools && assistant.workspaceId) {
+        for (const tool of options.blueprintRecordTools) {
+          allTools.set(tool.name, tool)
+        }
+      }
+
       // Brain inbox inspection toolkit — read-only introspection tools.
       // Two surfaces:
       //   1. Brain inbox "Ask about this" drawer
@@ -3172,6 +3206,18 @@ export function chatRoutes(options: WebChatOptions): Router {
         // treating attendees-with-domain as external (audience=public).
         // Future migration adds the column.
         workspaceDomain: null,
+        // Interactive chat has a live Approve/Deny loop, so the KB write
+        // tools may exist here (D2 — chat-only). The public API shares
+        // `applyMcpInjection` and must NOT set this.
+        allowKnowledgeWrites: true,
+        // On-demand introspection lane (ability audit §6-c/d): workspace
+        // PRIMARY assistants only — these read workspace-operational state
+        // (approvals / scheduled jobs / research runs / session history).
+        // They enter the mcp_search index, never the direct tool surface.
+        introspectionTools:
+          assistant.kind === 'primary' && assistant.workspaceId
+            ? options.introspectionTools
+            : undefined,
       })
 
       // Inject skills — budget-aware listing + useSkill tool
@@ -3206,6 +3252,18 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Inject unavailable capabilities so the model doesn't waste turns
       // searching for tools that don't exist.
       fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities)
+
+      // Dynamic workspace-blueprints section (blueprint output contract):
+      // present only when the workspace has blueprints, naming only blueprints
+      // that exist right now. Tool names are legal here — this is a dynamic
+      // injection gated on the tools being in the map, never Layer 1 prose.
+      if (
+        options.buildBlueprintPromptFragment &&
+        options.blueprintRecordTools &&
+        assistant.workspaceId
+      ) {
+        fullSystemPrompt += await options.buildBlueprintPromptFragment(user.id, assistant.workspaceId)
+      }
 
       // Research-mode override. Suspends the base L1's "two searches and stop"
       // discipline and replaces it with coordinator-pattern rules (parallelism,

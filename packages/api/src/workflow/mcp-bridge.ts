@@ -96,6 +96,9 @@ export async function buildWorkflowToolRegistry(
     connectorInstanceStore: deps.connectorInstanceStore,
     assistantTeamId: scope.workspaceId,
     keepBuiltinsDirect: true,
+    // KB write tools are chat-only (D2): workflow runs have no live
+    // Approve/Deny loop, so this surface never exposes them.
+    allowKnowledgeWrites: false,
     filesApi: deps.filesApi,
   })
 

@@ -194,6 +194,14 @@ export type CreateStagedSkillCreationParams = {
   }
   approverUserId: string
   originatingAssistantId: string | null
+  /**
+   * Producer provenance (mig 308 workflow lifecycle). The session curator
+   * omits both; the workflow-digest pass stamps `origin: 'workflow-digest'`
+   * plus the retiring workflows the candidate was distilled from. Rides
+   * `approval_payload` — additive, ignored by the approve path.
+   */
+  origin?: string
+  sourceWorkflowIds?: string[]
 }
 
 /**
@@ -311,6 +319,28 @@ export type PendingApprovalsStore = {
 
   /** RLS-gated — pending skill approvals (both kinds) for a workspace. */
   listSkillApprovals(userId: string, workspaceId: string): Promise<PendingApproval[]>
+
+  /**
+   * System read — newest pending `staged_skill_update` targeting a skill.
+   * The dedupe gate for the curator: while a proposal for a skill sits
+   * unresolved, a busy session would otherwise re-stage a near-identical
+   * one every review tick until a human acts. See
+   * `docs/architecture/engine/skill-system.md` → "Approval routing".
+   */
+  findPendingStagedSkillUpdate(
+    workspaceId: string,
+    targetSkillId: string,
+  ): Promise<PendingApproval | null>
+
+  /**
+   * System read — newest pending `staged_skill_creation` proposing a slug.
+   * Same dedupe gate as `findPendingStagedSkillUpdate`, keyed on the
+   * proposed umbrella's slug.
+   */
+  findPendingStagedSkillCreation(
+    workspaceId: string,
+    slug: string,
+  ): Promise<PendingApproval | null>
 
   /** RLS-gated — workspace members only. Used by web UI and route. */
   listPendingForWorkspace(userId: string, workspaceId: string): Promise<PendingApproval[]>
@@ -553,6 +583,10 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           JSON.stringify({
             kind: 'staged_skill_creation',
             originatingAssistantId: params.originatingAssistantId,
+            ...(params.origin ? { origin: params.origin } : {}),
+            ...(params.sourceWorkflowIds?.length
+              ? { sourceWorkflowIds: params.sourceWorkflowIds }
+              : {}),
           }),
           params.originatingAssistantId ?? null,
         ],
@@ -600,6 +634,36 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
         [workspaceId],
       )
       return result.rows.map((r) => rowToApproval(r as Record<string, unknown>))
+    },
+
+    async findPendingStagedSkillUpdate(workspaceId, targetSkillId) {
+      const result = await query(
+        `SELECT ${COLS} FROM pending_approvals
+         WHERE workspace_id = $1
+           AND kind = 'staged_skill_update'
+           AND status = 'pending'
+           AND approval_payload->>'targetSkillId' = $2
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [workspaceId, targetSkillId],
+      )
+      const row = result.rows[0]
+      return row ? rowToApproval(row as Record<string, unknown>) : null
+    },
+
+    async findPendingStagedSkillCreation(workspaceId, slug) {
+      const result = await query(
+        `SELECT ${COLS} FROM pending_approvals
+         WHERE workspace_id = $1
+           AND kind = 'staged_skill_creation'
+           AND status = 'pending'
+           AND arguments->'umbrella'->>'slug' = $2
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [workspaceId, slug],
+      )
+      const row = result.rows[0]
+      return row ? rowToApproval(row as Record<string, unknown>) : null
     },
 
     async createToolInvocation(params) {

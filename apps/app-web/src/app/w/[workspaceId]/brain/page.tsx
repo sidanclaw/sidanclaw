@@ -61,7 +61,7 @@
  * [COMP:app-web/brain-page]
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Plus } from "lucide-react";
 import { useWorkspaces } from "@/contexts/workspace-context";
@@ -75,6 +75,7 @@ import {
   getBrainFacets,
   getBrainGraph,
   listBrain,
+  primitivesToGraphKinds,
   type BrainFacets,
   type BrainGraph,
   type BrainRow,
@@ -218,6 +219,14 @@ function BrainPageInner() {
 
   const [graph, setGraph] = useState<BrainGraph | null>(null);
   const [facets, setFacets] = useState<BrainFacets | null>(null);
+
+  // The graph never refetches on a filter-chip toggle — the selection
+  // re-applies VISUALLY: unselected kinds ghost back on the canvas
+  // (graph-view.md → "Filter dim").
+  const graphFilterKinds = useMemo(
+    () => primitivesToGraphKinds(primitives),
+    [primitives],
+  );
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -761,6 +770,7 @@ function BrainPageInner() {
             graph={graph ?? { nodes: [], edges: [], truncated: false }}
             loading={graph === null}
             focusQuery={search}
+            filterKinds={graphFilterKinds}
             onSelect={openRow}
             onSelectSkillNode={(skillRowId) => {
               const match = skills?.find((s) => s.rowId === skillRowId);

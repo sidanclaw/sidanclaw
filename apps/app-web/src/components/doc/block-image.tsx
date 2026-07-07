@@ -18,10 +18,11 @@
  * transient `file_cache` chat-attachment store (7-day TTL) — a doc
  * *page* is durable, so its backing image must be too. The stored ref is
  * `{ bucket: 'workspace_files', path: <fileId>, mimeType, sizeBytes, name }`.
- * `signedReadUrlFor()` resolves a `workspace_files` ref through
- * `GET /api/doc-files/:workspaceId/:id`, which 302-redirects to a signed
+ * `resolveFileRefUrl()` (`doc-file-url.ts`) resolves a `workspace_files` ref
+ * through `GET /api/doc-files/:workspaceId/:id`, which 302-redirects to a signed
  * GCS URL (the signed URL never lands in the doc). The `file_cache` branch is
- * kept only as a legacy fallback for any pre-existing refs.
+ * kept only as a legacy fallback for any pre-existing refs, and now resolves
+ * through the signed preview-URL mint (WS3 #8).
  *
  * Per the agent brief, this component intentionally accepts the
  * richer `(block, blockId, readOnly, onChange, onAction)` prop set
@@ -33,19 +34,14 @@ import { useEffect, useRef, useState } from "react";
 import { useT, format } from "@/lib/i18n/client";
 import { authFetch } from "@/lib/auth-fetch";
 import { hasPendingMediaUpload, takeMediaUpload } from "./doc-media-uploads";
+import {
+  durableReadUrlFor,
+  resolveFileRefUrl,
+  type FileRef,
+} from "./doc-file-url";
 import { UploadSpinner } from "./upload-spinner";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-
-// Mirrored from packages/core/src/views/blocks.ts — kept local to dodge
-// the @sidanclaw/core barrel's Node-only imports (see views.ts SDK note).
-type FileRef = {
-  bucket: string;
-  path: string;
-  mimeType: string;
-  sizeBytes: number;
-  name: string;
-};
 
 type ImageBlock = {
   kind: "image";
@@ -65,25 +61,6 @@ type Props = {
   onAction?: (actionId: string, params?: Record<string, unknown>) => void;
 };
 
-/**
- * Resolve a `FileRef` to a browser-loadable URL.
- *
- *   - `workspace_files` (the durable doc-media sink) → the signed-read
- *     endpoint `GET /api/doc-files/:workspaceId/:id`, which 302-redirects
- *     to a signed GCS URL. Usable directly as an `<img src>`.
- *   - `file_cache` (legacy fallback) → the transient chat-attachment preview
- *     route, kept only for refs minted before durable storage was wired.
- */
-function signedReadUrlFor(ref: FileRef, workspaceId: string): string | null {
-  if (ref.bucket === "workspace_files") {
-    return `${API_URL}/api/doc-files/${workspaceId}/${encodeURIComponent(ref.path)}`;
-  }
-  if (ref.bucket === "file_cache") {
-    return `${API_URL}/api/files/${encodeURIComponent(ref.path)}/preview`;
-  }
-  return null;
-}
-
 export function BlockImage({ block, workspaceId, readOnly, onChange }: Props) {
   const t = useT().docPage;
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -92,6 +69,34 @@ export function BlockImage({ block, workspaceId, readOnly, onChange }: Props) {
   const [uploading, setUploading] = useState(() => hasPendingMediaUpload(block.id));
   const [uploadingName, setUploadingName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Resolved `<img src>`. Durable `workspace_files` refs resolve synchronously
+  // (seed to dodge a flash of the fallback); a legacy `file_cache` ref needs an
+  // async signed-URL mint, filled in by the effect below.
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(() =>
+    block.ref ? durableReadUrlFor(block.ref, workspaceId) : null,
+  );
+
+  // Resolve the ref's browser URL. Durable refs are set synchronously above;
+  // this covers the legacy `file_cache` signed-mint round-trip and re-resolves
+  // if the ref changes. Guarded against out-of-order settles + unmount.
+  useEffect(() => {
+    if (!block.ref) {
+      setResolvedUrl(null);
+      return;
+    }
+    const durable = durableReadUrlFor(block.ref, workspaceId);
+    if (durable) {
+      setResolvedUrl(durable);
+      return;
+    }
+    let cancelled = false;
+    void resolveFileRefUrl(block.ref, workspaceId).then((url) => {
+      if (!cancelled) setResolvedUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [block.ref, workspaceId]);
 
   // Drag-drop / paste hand-off: `doc-media-paste.ts` inserts this empty block
   // and stashes the dropped file under `block.id`. Claim it on mount and run
@@ -141,7 +146,7 @@ export function BlockImage({ block, workspaceId, readOnly, onChange }: Props) {
         throw new Error(first?.error ?? t.mediaBlock.uploadFailed);
       }
       // The /api/doc-files route writes to the permanent `workspace_files`
-      // GCS-backed store; encode that sink in `bucket` so `signedReadUrlFor()`
+      // GCS-backed store; encode that sink in `bucket` so `resolveFileRefUrl()`
       // resolves it through the signed-read endpoint.
       onChange?.({
         ref: {
@@ -202,7 +207,7 @@ export function BlockImage({ block, workspaceId, readOnly, onChange }: Props) {
   }
 
   // ── Filled state ────────────────────────────────────────────────────
-  const url = signedReadUrlFor(block.ref, workspaceId);
+  const url = resolvedUrl;
 
   return (
     <figure className="w-full">

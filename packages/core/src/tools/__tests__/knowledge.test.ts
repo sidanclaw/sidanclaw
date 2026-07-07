@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createKnowledgeTools } from '../base/knowledge.js'
-import type { KnowledgeStoreInterface } from '../../knowledge/types.js'
-import type { ToolContext } from '../types.js'
+import type { KnowledgeStoreInterface, KnowledgeRepoWriter } from '../../knowledge/types.js'
+import type { Tool, ToolContext } from '../types.js'
 
 const mockStore: KnowledgeStoreInterface = {
   search: vi.fn(),
@@ -9,8 +9,39 @@ const mockStore: KnowledgeStoreInterface = {
   getById: vi.fn(),
   create: vi.fn(),
   listSummaries: vi.fn(),
+  updateManualEntryContent: vi.fn(),
   hasEntriesForAssistant: vi.fn(),
   listSourcesForAssistant: vi.fn(),
+}
+
+function makeWriter(): KnowledgeRepoWriter {
+  return {
+    commitEntryUpdate: vi.fn(async () => ({
+      ok: true as const, entryId: 'e1', path: 'products/vault', commitSha: 'abc1234', commitUrl: 'https://github.com/o/r/commit/abc1234',
+    })),
+    commitEntryCreate: vi.fn(async () => ({
+      ok: true as const, entryId: 'e2', path: 'docs/new', commitSha: 'def5678', commitUrl: null,
+    })),
+  }
+}
+
+function byName(tools: Tool[], name: string): Tool {
+  const tool = tools.find((t) => t.name === name)
+  if (!tool) throw new Error(`tool ${name} not emitted`)
+  return tool
+}
+
+const repoEntry = {
+  id: 'e1',
+  path: 'products/vault',
+  title: 'Vault',
+  content: 'Old body',
+  summary: 'Vault product',
+  tags: ['product'],
+  relatedIds: [],
+  sensitivity: 'internal' as const,
+  metadata: {},
+  sourceId: 'src1',
 }
 
 const ctx: ToolContext = {
@@ -118,6 +149,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         relatedIds: ['id2'],
         sensitivity: 'internal',
         metadata: { status: 'current' },
+        sourceId: null,
       })
 
       const tools = createKnowledgeTools(mockStore)
@@ -226,6 +258,207 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(result.isError).toBe(true)
       expect(result.data).toContain('not in a team')
       expect(mockStore.create).not.toHaveBeenCalled()
+    })
+
+    it('commits through the repo writer when a writable source is passed', async () => {
+      const writer = makeWriter()
+      const tools = createKnowledgeTools(mockStore, {
+        repoConnected: true,
+        allowWrites: true,
+        repoWriter: writer,
+        writableSources: [{ id: 'src1', repo: 'acme/kb' }],
+        requesterLabel: 'neal@example.com',
+      })
+      const result = await byName(tools, 'addKnowledgeEntry').execute(
+        { path: 'docs/new', title: 'New Doc', content: 'First paragraph of the body.', tags: ['a'] },
+        ctx,
+      )
+
+      expect(writer.commitEntryCreate).toHaveBeenCalledTimes(1)
+      const call = vi.mocked(writer.commitEntryCreate).mock.calls[0][0]
+      expect(call).toMatchObject({
+        workspaceId: 't1',
+        sourceId: 'src1',
+        path: 'docs/new',
+        requestedBy: { userId: 'u1', label: 'neal@example.com' },
+      })
+      // Generated frontmatter carries title / description / tags / sensitivity.
+      expect(call.fileContent).toContain('title: "New Doc"')
+      expect(call.fileContent).toContain('description: "First paragraph of the body."')
+      expect(call.fileContent).toContain('tags: ["a"]')
+      expect(call.fileContent).toContain('sensitivity: internal')
+      expect(call.fileContent).toContain('First paragraph of the body.')
+      expect(result.data).toMatchObject({ id: 'e2', commit: 'def5678' })
+      expect(mockStore.create).not.toHaveBeenCalled()
+    })
+
+    it('requires a repo argument when several sources are writable', async () => {
+      const writer = makeWriter()
+      const tools = createKnowledgeTools(mockStore, {
+        repoConnected: true,
+        allowWrites: true,
+        repoWriter: writer,
+        writableSources: [
+          { id: 'src1', repo: 'acme/kb' },
+          { id: 'src2', repo: 'acme/kb-two' },
+        ],
+      })
+      const missing = await byName(tools, 'addKnowledgeEntry').execute(
+        { path: 'docs/new', title: 'New', content: 'Body' },
+        ctx,
+      )
+      expect(missing.isError).toBe(true)
+      expect(missing.data).toContain('acme/kb-two')
+
+      const picked = await byName(tools, 'addKnowledgeEntry').execute(
+        { path: 'docs/new', title: 'New', content: 'Body', repo: 'acme/kb-two' },
+        ctx,
+      )
+      expect(picked.isError).toBeUndefined()
+      expect(vi.mocked(writer.commitEntryCreate).mock.calls[0][0].sourceId).toBe('src2')
+    })
+
+    it('stamps the accumulator max into the generated frontmatter', async () => {
+      const { SensitivityAccumulator } = await import('../../security/sensitivity.js')
+      const accumulator = new SensitivityAccumulator()
+      accumulator.note('confidential')
+
+      const writer = makeWriter()
+      const tools = createKnowledgeTools(mockStore, {
+        repoConnected: true,
+        allowWrites: true,
+        repoWriter: writer,
+        writableSources: [{ id: 'src1', repo: 'acme/kb' }],
+      })
+      await byName(tools, 'addKnowledgeEntry').execute(
+        { path: 'docs/x', title: 'X', content: 'Body', sensitivity: 'public' },
+        { ...ctx, sensitivity: accumulator },
+      )
+
+      expect(vi.mocked(writer.commitEntryCreate).mock.calls[0][0].fileContent).toContain('sensitivity: confidential')
+    })
+  })
+
+  describe('updateKnowledgeEntry', () => {
+    const writeOpts = () => ({
+      repoConnected: true,
+      allowWrites: true,
+      repoWriter: makeWriter(),
+      writableSources: [{ id: 'src1', repo: 'acme/kb' }],
+      requesterLabel: 'neal@example.com',
+    })
+
+    it('is emitted only on interactive surfaces', () => {
+      // Interactive + writable repo source → present.
+      expect(createKnowledgeTools(mockStore, writeOpts()).map((t) => t.name)).toContain('updateKnowledgeEntry')
+      // Interactive + manual-only KB → present (store-side updates).
+      expect(createKnowledgeTools(mockStore, { repoConnected: false, allowWrites: true }).map((t) => t.name)).toContain('updateKnowledgeEntry')
+      // Non-interactive surface → absent, even with a writer.
+      expect(createKnowledgeTools(mockStore, { ...writeOpts(), allowWrites: false }).map((t) => t.name)).not.toContain('updateKnowledgeEntry')
+      // Interactive but repo-synced with no writable source → absent.
+      expect(createKnowledgeTools(mockStore, { repoConnected: true, allowWrites: true }).map((t) => t.name)).not.toContain('updateKnowledgeEntry')
+      // No opts at all (legacy call shape) → absent.
+      expect(createKnowledgeTools(mockStore).map((t) => t.name)).not.toContain('updateKnowledgeEntry')
+    })
+
+    it('requires confirmation and forbids proactive use in the description', () => {
+      const tool = byName(createKnowledgeTools(mockStore, writeOpts()), 'updateKnowledgeEntry')
+      expect(tool.requiresConfirmation).toBe(true)
+      expect(tool.description).toContain('explicitly asked')
+      const add = byName(createKnowledgeTools(mockStore, writeOpts()), 'addKnowledgeEntry')
+      expect(add.requiresConfirmation).toBe(true)
+      expect(add.description).toContain('explicitly asked')
+    })
+
+    it('routes a repo-synced entry through the writer', async () => {
+      vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry)
+      const opts = writeOpts()
+      const tools = createKnowledgeTools(mockStore, opts)
+      const result = await byName(tools, 'updateKnowledgeEntry').execute(
+        { id: 'e1', content: 'New body', changeSummary: 'clarify fees' },
+        ctx,
+      )
+
+      expect(opts.repoWriter.commitEntryUpdate).toHaveBeenCalledWith({
+        workspaceId: 't1',
+        entry: { id: 'e1', path: 'products/vault', content: 'Old body', sourceId: 'src1' },
+        newBody: 'New body',
+        changeSummary: 'clarify fees',
+        requestedBy: { userId: 'u1', label: 'neal@example.com' },
+      })
+      expect(result.data).toMatchObject({ id: 'e1', commit: 'abc1234' })
+      expect(mockStore.updateManualEntryContent).not.toHaveBeenCalled()
+    })
+
+    it('relays writer failures (e.g. staleness) as tool errors', async () => {
+      vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry)
+      const opts = writeOpts()
+      vi.mocked(opts.repoWriter.commitEntryUpdate).mockResolvedValueOnce({
+        ok: false, reason: 'stale_entry', message: 'The repository moved ahead of the synced copy.',
+      })
+      const tools = createKnowledgeTools(mockStore, opts)
+      const result = await byName(tools, 'updateKnowledgeEntry').execute(
+        { id: 'e1', content: 'New body', changeSummary: 'x' },
+        ctx,
+      )
+      expect(result.isError).toBe(true)
+      expect(result.data).toContain('moved ahead')
+    })
+
+    it('refuses to update a lower-tier entry after higher-tier reads (no laundering)', async () => {
+      const { SensitivityAccumulator } = await import('../../security/sensitivity.js')
+      const accumulator = new SensitivityAccumulator()
+      accumulator.note('confidential')
+
+      vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry) // internal entry
+      const opts = writeOpts()
+      const tools = createKnowledgeTools(mockStore, opts)
+      const result = await byName(tools, 'updateKnowledgeEntry').execute(
+        { id: 'e1', content: 'New body', changeSummary: 'x' },
+        { ...ctx, sensitivity: accumulator },
+      )
+
+      expect(result.isError).toBe(true)
+      expect(result.data).toContain('confidential')
+      expect(opts.repoWriter.commitEntryUpdate).not.toHaveBeenCalled()
+    })
+
+    it('updates a manual entry through the store, body-only', async () => {
+      vi.mocked(mockStore.getById).mockResolvedValueOnce({ ...repoEntry, id: 'm1', sourceId: null })
+      vi.mocked(mockStore.updateManualEntryContent).mockResolvedValueOnce({ id: 'm1', path: 'products/vault' })
+
+      const tools = createKnowledgeTools(mockStore, { repoConnected: false, allowWrites: true })
+      const result = await byName(tools, 'updateKnowledgeEntry').execute(
+        { id: 'm1', content: 'New body', changeSummary: 'x' },
+        ctx,
+      )
+
+      expect(mockStore.updateManualEntryContent).toHaveBeenCalledWith('t1', 'm1', 'New body')
+      expect(result.data).toMatchObject({ id: 'm1', path: 'products/vault' })
+    })
+
+    it('errors cleanly when the repo entry has no writer on this surface', async () => {
+      vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry)
+      // Manual-only emission (no writer), but the entry turns out repo-synced.
+      const tools = createKnowledgeTools(mockStore, { repoConnected: false, allowWrites: true })
+      const result = await byName(tools, 'updateKnowledgeEntry').execute(
+        { id: 'e1', content: 'New body', changeSummary: 'x' },
+        ctx,
+      )
+      expect(result.isError).toBe(true)
+      expect(result.data).toContain('read-only')
+    })
+
+    it('describes the confirmation with entry title, repo, and preview', async () => {
+      vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry)
+      const tools = createKnowledgeTools(mockStore, writeOpts())
+      const lines = await byName(tools, 'updateKnowledgeEntry').describeConfirmation!(
+        { id: 'e1', content: 'New body text', changeSummary: 'clarify fees' },
+        ctx,
+      )
+      expect(lines?.join('\n')).toContain('Vault')
+      expect(lines?.join('\n')).toContain('acme/kb')
+      expect(lines?.join('\n')).toContain('clarify fees')
     })
   })
 })

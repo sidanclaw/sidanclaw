@@ -10,10 +10,14 @@
  *   - Uses app-web's mirrored `OFFICIAL_OAUTH_SCOPES` + `ConnectorIcon`
  *     instead of `@sidanclaw/shared` (app-web does not depend on shared).
  *
- * INFRA NOTE (degraded): the OAuth "Connect" path builds the Google authorize
- * URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID` (unset in app-web).
- * Non-OAuth connectors ("Add" → backend connect) and the skills tab work
- * regardless. See the connectors page header for the full infra-pending list.
+ * INFRA NOTE (connector OAuth env): the OAuth "Connect" path builds the Google
+ * authorize URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID`, which must
+ * reach the browser bundle as a real `NEXT_PUBLIC_*` build var — Turborepo
+ * strict env mode strips bare `GOOGLE_CLIENT_ID` unless it's declared in
+ * `sidanclaw/turbo.json` build.env, which `next.config.ts` maps to it; missing
+ * either ships an empty `client_id`. Non-OAuth connectors ("Add" → backend
+ * connect) and the skills tab work regardless. See the connectors page header
+ * and docs/architecture/platform/deployment.md → "Turbo strict env mode".
  *
  * [COMP:app-web/browse-directory]
  */

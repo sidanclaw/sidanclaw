@@ -129,6 +129,21 @@ export type SkillManageApprovalsStore = {
     }
     originatingAssistantId: string | null
   }): Promise<{ approvalId: string }>
+
+  /** Dedupe reads — a pending proposal for the same target blocks staging
+   *  another (at most ONE pending `staged_skill_update` per target skill,
+   *  and ONE pending `staged_skill_creation` per proposed slug, per
+   *  workspace). Without this gate a busy session re-stages a
+   *  near-identical proposal every review tick until a human acts. */
+  findPendingStagedSkillUpdate(params: {
+    workspaceId: string
+    targetSkillId: string
+  }): Promise<{ approvalId: string } | null>
+
+  findPendingStagedSkillCreation(params: {
+    workspaceId: string
+    slug: string
+  }): Promise<{ approvalId: string } | null>
 }
 
 /** Per-assistant enablement binding. Used when an `auto-generated` skill is
@@ -219,7 +234,13 @@ const INPUT_SCHEMA = z.discriminatedUnion('action', [
 
 export type SkillManageInput = z.infer<typeof INPUT_SCHEMA>
 
-export type SkillManageActionTaken = 'direct' | 'queued_for_approval'
+export type SkillManageActionTaken =
+  | 'direct'
+  | 'queued_for_approval'
+  /** A pending approval for the same target already exists — staging was
+   *  skipped, `approvalId` names the existing row. Not an error: the
+   *  worker treats it as a no-op (no cap spend, no failure log). */
+  | 'skipped_pending_approval'
 
 export type SkillManageResult =
   | {
@@ -250,7 +271,7 @@ Choose the action in this order — try each one and only fall through when it d
 
 4. create_umbrella — Create a new class-level umbrella. ONLY when nothing above fits. The name must describe a class of task — not a session-specific bug, error, date, or PR number. Names like "fix-...", "debug-...", "audit-...", "today-...", "2026-...", "pr-...", or anything containing a literal error message will be rejected.
 
-Routing is automatic — you do not need to consider it. Auto-generated skills are patched directly; user-authored and community skills are queued for the workspace owner's approval; new umbrella creations are always queued. The tool result tells you which path was taken.`
+Routing is automatic — you do not need to consider it. Auto-generated skills are patched directly; user-authored and community skills are queued for the workspace owner's approval; new umbrella creations are always queued. If an equivalent proposal is already waiting for the owner's decision, the tool skips staging a duplicate and reports skipped_pending_approval. The tool result tells you which path was taken.`
 
 // ── Factory ───────────────────────────────────────────────────────
 
@@ -381,7 +402,20 @@ async function runPatch(
     return { actionTaken: 'direct', targetSkillId: skill.rowId }
   }
 
-  // user / community → queue for approval.
+  // user / community → queue for approval. Dedupe first: while a proposal
+  // for this skill sits unresolved, a busy session would re-stage a
+  // near-identical one every review tick.
+  const pending = await deps.approvalsStore.findPendingStagedSkillUpdate({
+    workspaceId: deps.workspaceId,
+    targetSkillId: skill.rowId,
+  })
+  if (pending) {
+    return {
+      actionTaken: 'skipped_pending_approval',
+      targetSkillId: skill.rowId,
+      approvalId: pending.approvalId,
+    }
+  }
   const { approvalId } = await deps.approvalsStore.createStagedSkillUpdate({
     workspaceId: deps.workspaceId,
     targetSkillId: skill.rowId,
@@ -448,6 +482,20 @@ async function runAddSupportFile(
     return { actionTaken: 'direct', targetSkillId: skill.rowId }
   }
 
+  // Same dedupe gate as the patch path — an added file rides the same
+  // `staged_skill_update` kind, so one pending proposal per skill blocks
+  // both shapes.
+  const pending = await deps.approvalsStore.findPendingStagedSkillUpdate({
+    workspaceId: deps.workspaceId,
+    targetSkillId: skill.rowId,
+  })
+  if (pending) {
+    return {
+      actionTaken: 'skipped_pending_approval',
+      targetSkillId: skill.rowId,
+      approvalId: pending.approvalId,
+    }
+  }
   const { approvalId } = await deps.approvalsStore.createStagedSkillUpdate({
     workspaceId: deps.workspaceId,
     targetSkillId: skill.rowId,
@@ -504,6 +552,21 @@ async function runCreateUmbrella(
   const slug = slugify(umbrella.name)
   if (!slug) {
     return { error: 'Umbrella name must contain at least one alphanumeric character.' }
+  }
+
+  // Dedupe on the proposed slug: the same umbrella re-derived from an
+  // overlapping transcript on the next tick must not stack a second
+  // pending creation.
+  const pending = await deps.approvalsStore.findPendingStagedSkillCreation({
+    workspaceId: deps.workspaceId,
+    slug,
+  })
+  if (pending) {
+    return {
+      actionTaken: 'skipped_pending_approval',
+      targetSkillId: pending.approvalId,
+      approvalId: pending.approvalId,
+    }
   }
 
   // Every create goes through the approvals queue. The spec is explicit:

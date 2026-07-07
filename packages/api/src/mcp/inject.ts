@@ -19,7 +19,7 @@
  */
 
 import { buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createKnowledgeTools } from '@sidanclaw/core'
-import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi } from '@sidanclaw/core'
+import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi } from '@sidanclaw/core'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
@@ -231,6 +231,21 @@ export async function injectMcpTools(params: {
   assistantConnectorStore?: AssistantConnectorStore
   userTimezone?: string
   knowledgeStore?: KnowledgeStoreInterface
+  /**
+   * KB repo write-back port (docs/architecture/features/knowledge-base.md →
+   * "Assistant direct edits"). Only meaningful with `allowKnowledgeWrites`.
+   */
+  knowledgeRepoWriter?: KnowledgeRepoWriter
+  /**
+   * Whether this surface may expose the KB WRITE tools
+   * (`updateKnowledgeEntry`, `addKnowledgeEntry` repo mode). Set `true`
+   * ONLY on interactive surfaces with a live in-conversation Approve/Deny
+   * loop (web chat, platform channel pipeline). Workflow, A2A, scheduled,
+   * and public-API paths keep the default `false` — the tools are then
+   * neither injected nor `mcp_search`-discoverable (closed world). Fail
+   * closed.
+   */
+  allowKnowledgeWrites?: boolean
   gdriveFilesStore?: GDriveFilesStore
   /**
    * Stage 4/5 of the team-connector promotion: when the turn is on a
@@ -307,13 +322,27 @@ export async function injectMcpTools(params: {
    * Absent → attachment requests fail honestly; plain sends unchanged.
    */
   filesApi?: FilesApi
+  /**
+   * The on-demand introspection lane (ability audit §6-c/d): operational-
+   * visibility read tools (pending approvals, scheduled jobs, research runs,
+   * session history, ...) registered as an `mcp_search` LOCAL SOURCE
+   * (`serverName: 'introspection'`), never direct-injected — "whenever it's
+   * triggered → inject", so the per-turn prompt cost stays flat. The call
+   * site passes them only for workspace PRIMARY assistants (they read
+   * workspace-operational state). All read-only; they bypass the L1/L2
+   * connector-policy pipeline by design (first-party reads, no policy rows).
+   * See `docs/architecture/engine/introspection-tools.md`.
+   */
+  introspectionTools?: Tool[]
 }): Promise<McpInjectionResult> {
   const {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
-    userTimezone, knowledgeStore, gdriveFilesStore,
+    userTimezone, knowledgeStore, knowledgeRepoWriter, allowKnowledgeWrites = false,
+    gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
     keepBuiltinsDirect = false, engineHooks, actorIdentity, filesApi,
+    introspectionTools,
   } = params
 
   const unavailable: string[] = []
@@ -826,14 +855,45 @@ export async function injectMcpTools(params: {
       const hasEntries = await knowledgeStore.hasEntriesForAssistant(assistantId)
       const sources = await knowledgeStore.listSourcesForAssistant(assistantId)
       if (hasEntries || sources.length > 0) {
+        const repoConnected = sources.length > 0
+
+        // KB write exposure (docs/architecture/features/knowledge-base.md →
+        // "Assistant direct edits"): repo write tools exist only when this
+        // surface allows knowledge writes (interactive chat), the writer
+        // port is wired, AND a source's cached PAT probe says push access
+        // (`write_access` — migration 310; NULL/false = read-only, fail
+        // closed). Not injected ⇒ not `mcp_search`-discoverable.
+        const writableSources = sources
+          .filter((s) => s.writeAccess === true)
+          .map((s) => ({ id: s.id, repo: s.repo }))
+        const writeEnabled =
+          allowKnowledgeWrites && !!knowledgeRepoWriter && writableSources.length > 0
+
         const kbTools = createKnowledgeTools(knowledgeStore, {
-          repoConnected: sources.length > 0,
+          repoConnected,
+          allowWrites: allowKnowledgeWrites,
+          repoWriter: writeEnabled ? knowledgeRepoWriter : undefined,
+          writableSources: writeEnabled ? writableSources : [],
+          requesterLabel: actorIdentity?.email ?? null,
         })
         for (const tool of kbTools) {
           tools.set(tool.name, tool)
           kbToolNames.push(tool.name)
         }
-        console.debug(`[mcp-inject] Knowledge: injected ${kbTools.length} tools (repo connected: ${sources.length > 0})`)
+
+        // Capability honesty: on a write-capable surface with a repo-synced
+        // KB but no writable source, say so precisely — the model can then
+        // explain the fix instead of hunting for a tool that isn't there.
+        if (allowKnowledgeWrites && repoConnected && !writeEnabled) {
+          const repos = sources.map((s) => s.repo).join(', ')
+          unavailable.push(
+            knowledgeRepoWriter
+              ? `knowledge base editing (the GitHub token backing ${repos} is read-only — needs push permission; reconnect it with a read-write token in Studio → Connectors to enable assistant edits)`
+              : 'knowledge base editing (not configured on this server)',
+          )
+        }
+
+        console.debug(`[mcp-inject] Knowledge: injected ${kbTools.length} tools (repo connected: ${repoConnected}, writable sources: ${writableSources.length}, writes: ${writeEnabled})`)
       }
     } catch (err) {
       console.error('[mcp-inject] Knowledge injection failed:', err)
@@ -896,6 +956,22 @@ export async function injectMcpTools(params: {
         localSources.push({ kind: 'local', serverName: 'knowledge', tools: kbLocalTools })
       }
     }
+  }
+
+  // Introspection bucket — the on-demand lane for operational-visibility
+  // reads (pending approvals, scheduled jobs, research runs, session
+  // history, ...). These tools never sat in the direct `tools` map (no pluck
+  // needed): they enter ONLY through the search index, so the model discovers
+  // them via `mcp_search` exactly when the turn asks an operational question
+  // ("what's pending on me?", "did that research finish?") and calls via
+  // `mcp_call` — the founder-locked "whenever it's triggered → inject"
+  // contract (ability audit §6-c/d). Gated to the workflow-direct path too:
+  // `keepBuiltinsDirect` skips search-pair plucking but introspection reads
+  // are chat-surface tools — the call site only passes them for interactive
+  // workspace-primary turns.
+  if (!keepBuiltinsDirect && introspectionTools && introspectionTools.length > 0) {
+    localSources.push({ kind: 'local', serverName: 'introspection', tools: introspectionTools })
+    console.log(`[mcp-inject] introspection lane: ${introspectionTools.length} on-demand tools`)
   }
 
   // Build + inject the search pair whenever **any** source is present.

@@ -111,6 +111,7 @@ export function WorkspaceChrome({
     sidebarOpen,
     setSidebarOpen,
     studioSetupIncomplete,
+    feedProfiles,
     handleNewDraft,
     handleAddChild,
     handleSave,
@@ -217,6 +218,11 @@ export function WorkspaceChrome({
     }
   }, [workspaceId]);
   const studioNudge = studioSetupIncomplete === true && !nudgeDismissed;
+
+  // Feed availability — hosted workspaces with a connected distribution
+  // profile get the nav row + ⌘5 (the probe lives in the sidebar-data
+  // provider; see `feedProfiles` there).
+  const feedEnabled = (feedProfiles?.length ?? 0) > 0;
   const onDismissStudioNudge = useCallback(() => {
     setNudgeDismissed(true);
     try {
@@ -243,6 +249,9 @@ export function WorkspaceChrome({
       "2": "brain",
       "3": "studio",
       "4": "workflow",
+      // ⌘5 only while the Feed nav row is visible — a hidden surface
+      // shouldn't have a live shortcut.
+      ...(feedEnabled ? { "5": "feed" } : {}),
     };
     const onKey = (e: KeyboardEvent) => {
       if (!surfaceShortcutModifierPressed(e)) return;
@@ -263,7 +272,7 @@ export function WorkspaceChrome({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [router, workspaceId]);
+  }, [router, workspaceId, feedEnabled]);
 
   return (
     <div className="relative flex h-full w-full overflow-hidden">
@@ -337,6 +346,7 @@ export function WorkspaceChrome({
           activeSurface={activeSurface}
           studioNudge={studioNudge}
           onDismissStudioNudge={onDismissStudioNudge}
+          feedEnabled={feedEnabled}
         />
       </div>
 

@@ -450,6 +450,34 @@ export default function WorkflowDetailPage({
     requestWorkflowRefresh(result.workflow.workspaceId);
   };
 
+  // Mig 308 — lifecycle controls: the pin veto and the archived restore.
+  const onTogglePinned = async () => {
+    setError(null);
+    setSaving(true);
+    const result = await updateWorkflow(workflow.id, { pinned: !workflow.pinned });
+    setSaving(false);
+    if (!result.ok) {
+      setError(result.error || t.workflowPage.builder.saveFail);
+      return;
+    }
+    setWorkflow(result.workflow);
+    setDraft(result.workflow);
+  };
+
+  const onRestoreLifecycle = async () => {
+    setError(null);
+    setSaving(true);
+    const result = await updateWorkflow(workflow.id, { lifecycleState: "active" });
+    setSaving(false);
+    if (!result.ok) {
+      setError(result.error || t.workflowPage.builder.saveFail);
+      return;
+    }
+    setWorkflow(result.workflow);
+    setDraft(result.workflow);
+    requestWorkflowRefresh(result.workflow.workspaceId);
+  };
+
   // The "Edit" button has no node context — focus the start step so the
   // panel opens on something.
   const enterEditFromButton = () => {
@@ -525,6 +553,21 @@ export default function WorkflowDetailPage({
                 <h1 className="text-xl font-semibold flex items-center gap-2">
                   {workflow.name}
                   <EnabledBadge enabled={workflow.enabled} t={t} />
+                  {workflow.lifecycleState === "stale" && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-400 uppercase tracking-wide">
+                      {t.workflowPage.lifecycle.staleBadge}
+                    </span>
+                  )}
+                  {workflow.lifecycleState === "archived" && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground uppercase tracking-wide">
+                      {t.workflowPage.lifecycle.archivedBadge}
+                    </span>
+                  )}
+                  {workflow.pinned && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary uppercase tracking-wide">
+                      {t.workflowPage.lifecycle.pinnedBadge}
+                    </span>
+                  )}
                 </h1>
                 {!workflow.enabled && workflow.pausedReason ? (
                   <p className="mt-1 text-xs rounded-md border border-amber-300/60 bg-amber-500/10 text-amber-700 dark:text-amber-400 px-2 py-1.5">
@@ -532,6 +575,11 @@ export default function WorkflowDetailPage({
                       {t.workflowPage.builder.stormPausedTitle}
                     </span>{" "}
                     {workflow.pausedReason}
+                  </p>
+                ) : null}
+                {workflow.lifecycleState !== "active" && workflow.lifecycleReason ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {workflow.lifecycleReason}
                   </p>
                 ) : null}
               </>
@@ -562,6 +610,48 @@ export default function WorkflowDetailPage({
             ) : null}
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {workflow.lifecycleState === "archived" && (
+              <button
+                type="button"
+                onClick={onRestoreLifecycle}
+                disabled={saving}
+                className="px-3 py-1.5 rounded-md border border-border text-sm font-medium hover:bg-muted disabled:opacity-50"
+              >
+                {t.workflowPage.lifecycle.restore}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onTogglePinned}
+              disabled={saving}
+              title={
+                workflow.pinned
+                  ? t.workflowPage.lifecycle.unpinHint
+                  : t.workflowPage.lifecycle.pinHint
+              }
+              aria-pressed={workflow.pinned ?? false}
+              className={cn(
+                "p-1.5 rounded-md border text-sm disabled:opacity-50 transition-colors",
+                workflow.pinned
+                  ? "border-primary/50 bg-primary/10 text-primary"
+                  : "border-border text-muted-foreground hover:bg-muted",
+              )}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill={workflow.pinned ? "currentColor" : "none"}
+                stroke="currentColor"
+                strokeWidth="1.85"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <path d="M12 17v5" />
+                <path d="M9 3h6l-1 7 3 3H7l3-3-1-7Z" />
+              </svg>
+            </button>
             <button
               type="button"
               onClick={onRunNow}

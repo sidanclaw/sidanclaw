@@ -40,6 +40,7 @@ import { AssistantAvatar } from "@/components/assistant-avatar";
 import { SuggestedFileDrop } from "@/components/doc/suggested-file-drop";
 import { getAssistantIdentity, type AssistantIdentity } from "@/lib/api/views";
 import { refreshHomeDock, type ResolvedNeed } from "@/lib/api/home-dock";
+import { type PanelId } from "@/lib/doc-page-url";
 import { useSidebarData } from "./doc-sidebar-data";
 
 type AccentKey = "review" | "approve" | "resume" | "workflow";
@@ -76,9 +77,18 @@ type Props = {
   assistantId?: string;
   userName?: string | null;
   onBuild?: (text: string) => void;
+  /** Open a needs-you panel (Approvals / Autopilot) as a doc-shell tab. When
+   *  absent (e.g. a non-shell host), the cards fall back to their route link. */
+  onOpenPanel?: (panel: PanelId) => void;
 };
 
-export function SuggestedView({ workspaceId, assistantId, userName, onBuild }: Props) {
+export function SuggestedView({
+  workspaceId,
+  assistantId,
+  userName,
+  onBuild,
+  onOpenPanel,
+}: Props) {
   const t = useT().docPage.suggested;
   const { dock, dockLoading: loading, reloadDock, setDock } = useSidebarData();
   const [assistant, setAssistant] = useState<AssistantIdentity | null>(null);
@@ -256,7 +266,13 @@ export function SuggestedView({ workspaceId, assistantId, userName, onBuild }: P
                 {/* A lone card spans the column; two share the row 2-up. */}
                 <div className={cn("grid grid-cols-1 gap-3", needsYou.length > 1 && "sm:grid-cols-2")}>
                   {needsYou.map((card) => (
-                    <ActionCard key={card.kind} card={card} workspaceId={workspaceId} t={t} />
+                    <ActionCard
+                      key={card.kind}
+                      card={card}
+                      workspaceId={workspaceId}
+                      t={t}
+                      onOpenPanel={onOpenPanel}
+                    />
                   ))}
                 </div>
               </>
@@ -405,10 +421,12 @@ function ActionCard({
   card,
   workspaceId,
   t,
+  onOpenPanel,
 }: {
   card: ResolvedNeed;
   workspaceId: string;
   t: SuggestedT;
+  onOpenPanel?: (panel: PanelId) => void;
 }) {
   const cfg =
     card.kind === "brain_review"
@@ -418,6 +436,8 @@ function ActionCard({
           // Deep-link straight into the Reviews section (brain/page.tsx seeds
           // section='reviews' from ?pending=true), not the grouped overview.
           href: `/w/${workspaceId}/brain?pending=true`,
+          // Brain is a full surface, not a doc-shell panel.
+          panel: null as PanelId | null,
           title: t.reviewTitle,
           fallbackCaption: t.reviewCaption,
           cta: t.reviewCta,
@@ -426,7 +446,10 @@ function ActionCard({
         ? {
             accent: "approve" as const,
             Icon: CheckCircle2,
+            // The route redirects to the panel; `onOpenPanel` opens it as a tab
+            // directly (the href is the no-JS / other-host fallback).
             href: `/w/${workspaceId}/approvals`,
+            panel: "approvals" as PanelId | null,
             title: t.approvalsTitle,
             fallbackCaption: t.approvalsCaption,
             cta: t.approvalsCta,
@@ -438,19 +461,18 @@ function ActionCard({
             accent: "workflow" as const,
             Icon: Target,
             href: `/w/${workspaceId}/goals`,
+            panel: "goals" as PanelId | null,
             title: t.autopilotTitle,
             fallbackCaption: t.autopilotCaption,
             cta: t.autopilotCta,
           };
   const a = ACCENT[cfg.accent];
-  return (
-    <Link
-      href={cfg.href}
-      className={cn(
-        "group relative flex flex-col rounded-2xl border border-border bg-card p-4 text-left transition-all hover:shadow-md",
-        a.hover,
-      )}
-    >
+  const cardClass = cn(
+    "group relative flex flex-col rounded-2xl border border-border bg-card p-4 text-left transition-all hover:shadow-md",
+    a.hover,
+  );
+  const inner = (
+    <>
       <div className="mb-3 flex items-center">
         <span className={cn("grid size-9 place-items-center rounded-[10px]", a.chip)}>
           <cfg.Icon className="size-[18px]" strokeWidth={1.8} aria-hidden />
@@ -472,6 +494,22 @@ function ActionCard({
         {cfg.cta}
         <ChevronRight className="size-3.5" aria-hidden />
       </span>
+    </>
+  );
+
+  // Panel cards (Approvals / Autopilot) open as a doc-shell tab when the shell
+  // provides a handler; otherwise (and for the Brain card) they route-link.
+  if (cfg.panel && onOpenPanel) {
+    const panel = cfg.panel;
+    return (
+      <button type="button" onClick={() => onOpenPanel(panel)} className={cardClass}>
+        {inner}
+      </button>
+    );
+  }
+  return (
+    <Link href={cfg.href} className={cardClass}>
+      {inner}
     </Link>
   );
 }

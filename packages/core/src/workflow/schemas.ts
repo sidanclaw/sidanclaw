@@ -174,14 +174,16 @@ const assistantCallStepSchema = z.object({
   researchMode: z.boolean().optional(),
   maxTurns: z.number().int().min(1).max(60).nullable().optional(),
   /**
-   * Optional blueprint to FILL on a research step (structural-synthesis P4). When
-   * set together with a page anchor on a `researchMode`/`deep` step, the executor
-   * runs the research fan-out as the gather, then fills this blueprint into the
-   * anchored page via `synthesizeFromSource` (the structured authoring half)
-   * instead of free-form authoring. The value is a blueprint slug: a built-in
-   * skill id, a workspace skill slug, or a page-template id. Absent → the step
-   * authors freely. See docs/architecture/brain/structural-synthesis.md →
-   * "The three fill modes" (Research).
+   * The step's OUTPUT blueprint (blueprint output contract). On a research +
+   * page-anchored step the executor runs the fan-out as the gather and the
+   * synthesis engine fills the blueprint (record-first, page projected —
+   * structural-synthesis P4). On any other step kind the callee is directed
+   * to persist its deliverable as the blueprint's typed record via
+   * `saveBlueprintRecord`. Either way the record stamps the run id, which the
+   * next run reads as `{{lastRun.output.<key>}}`. The value is a blueprint
+   * slug: a built-in skill id, a workspace skill slug, or a page-template id.
+   * Absent → the step's output is unbound (free-form). See
+   * docs/architecture/brain/structural-synthesis.md → "The record".
    */
   blueprintId: z.string().min(1).max(128).optional(),
 })
@@ -270,10 +272,31 @@ export const WorkflowStepSchema = z.discriminatedUnion('type', [
   branchStepSchema,
 ])
 
+/**
+ * A step, tolerating the JSON-string form. Models recurrently emit
+ * JSON-SERIALISED step objects (`steps: ["{\"id\": \"step_1\", ...}"]`) —
+ * 4 authoring failures in 14 prod days plus the 2026-07-07 incident
+ * session's "Validation Probe" turns burned discovering the shape. A string
+ * that parses to an object is unwrapped before validation; anything else
+ * falls through to the normal discriminated-union error. See
+ * docs/architecture/engine/tool-input-tolerance.md.
+ */
+const tolerantStepSchema = z.preprocess((v) => {
+  if (typeof v === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(v)
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+    } catch {
+      // Invalid JSON — let the raw string hit the union for a normal error.
+    }
+  }
+  return v
+}, WorkflowStepSchema)
+
 export const WorkflowDefinitionSchema = z
   .object({
     startStepId: stepIdSchema,
-    steps: z.array(WorkflowStepSchema).min(1).max(50),
+    steps: z.array(tolerantStepSchema).min(1).max(50),
   })
   .superRefine((def, ctx) => {
     // Step IDs must be unique.

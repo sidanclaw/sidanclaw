@@ -70,6 +70,8 @@ import {
   type ViewMetadata,
 } from "@/lib/api/views";
 import { hasAnyConnectedConnector } from "@/lib/api/studio";
+import { fetchFeedTeamProfiles, type FeedProfile } from "@/lib/api/feed";
+import { isHostedEdition } from "@/lib/edition";
 import { fetchHomeDock, type ResolvedDock } from "@/lib/api/home-dock";
 import { isDesktopAuth } from "@/lib/desktop-auth-source";
 import { idbGet, idbSet } from "@/lib/offline/idb";
@@ -142,6 +144,16 @@ type SidebarData = {
    * same signal — no second connectors fetch.
    */
   studioSetupIncomplete: boolean | null;
+  /**
+   * The workspace's connected feed (distribution) profiles — the Feed
+   * surface's availability signal, probed once per workspace like the
+   * connectors probe above. `null` while undecided or when the probe failed
+   * (an OSS/creds-less backend 404s the whole `/api/distribution` family),
+   * `[]` when the backend answered with no connections. The Feed nav row
+   * shows only for a non-empty list; `FeedSidebarPanel` reuses the same rows
+   * for its platform pill (no second fetch).
+   */
+  feedProfiles: FeedProfile[] | null;
   /**
    * The workspace's resolved home dock ("Suggested for you"), fetched here —
    * once per workspace, revalidated on every list reload — so the sidebar
@@ -233,6 +245,27 @@ export function DocSidebarDataProvider({
       .catch(() => {
         // Defensive: a failed probe never *shows* a setup affordance.
         if (!cancelled) setStudioSetupIncomplete(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  // ── Feed availability probe (single profiles fetch, non-blocking) ─────
+  // Hosted-only: the OSS edition never probes (the surface is edition-gated
+  // anyway), so an OSS backend sees zero /api/distribution traffic. Errors
+  // (route family not mounted) resolve to `null` → the nav row stays hidden.
+  const [feedProfiles, setFeedProfiles] = useState<FeedProfile[] | null>(null);
+  useEffect(() => {
+    if (!workspaceId || !isHostedEdition()) return;
+    let cancelled = false;
+    setFeedProfiles(null);
+    fetchFeedTeamProfiles(workspaceId)
+      .then((profiles) => {
+        if (!cancelled) setFeedProfiles(profiles);
+      })
+      .catch(() => {
+        if (!cancelled) setFeedProfiles(null);
       });
     return () => {
       cancelled = true;
@@ -656,6 +689,7 @@ export function DocSidebarDataProvider({
       sidebarOpen,
       setSidebarOpen,
       studioSetupIncomplete,
+      feedProfiles,
       dock,
       dockLoading,
       reloadDock,
@@ -687,6 +721,7 @@ export function DocSidebarDataProvider({
       sidebarCollapsed,
       sidebarOpen,
       studioSetupIncomplete,
+      feedProfiles,
       dock,
       dockLoading,
       reloadDock,

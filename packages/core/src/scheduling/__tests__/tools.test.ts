@@ -171,6 +171,12 @@ function makeFakeWorkflowStore(): WorkflowStore & { rows: WorkflowRecord[] } {
         maxTurns: params.maxTurns ?? null,
         researchMode: params.researchMode ?? false,
         nameManuallySet: false,
+        lifecycleState: 'active' as const,
+        lifecycleTransitionedAt: null,
+        lifecycleReason: null,
+        pinned: false,
+        digestedAt: null,
+        digestVerdict: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       }

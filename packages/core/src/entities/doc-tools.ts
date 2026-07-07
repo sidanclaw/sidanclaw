@@ -85,7 +85,7 @@ const dataPatchSchema = z.record(propertyNameSchema, cellValueSchema)
 
 // ── Input / output types ─────────────────────────────────────────────
 
-export type ListEntityTypesInput = { workspaceId: string }
+export type ListEntityTypesInput = { workspaceId?: string }
 export type ListEntityTypesOutput = { types: EntityType[] }
 
 export type CreateEntityTypeInput = {
@@ -151,7 +151,11 @@ export type QueryEntitiesOutput = {
 // ── Zod schemas ──────────────────────────────────────────────────────
 
 const listEntityTypesInputSchema: z.ZodType<ListEntityTypesInput> = z.object({
-  workspaceId: idSchema.describe('Workspace whose entity types to list.'),
+  workspaceId: idSchema
+    .optional()
+    .describe(
+      'Omit this — the current workspace is resolved from context. (Never pass a workspace name or domain; ids are UUIDs.)',
+    ),
 })
 
 const createEntityTypeInputSchema: z.ZodType<CreateEntityTypeInput> = z.object({
@@ -311,10 +315,24 @@ export function createListEntityTypesTool(
     isConcurrencySafe: true,
     timeoutMs: 15_000,
 
-    async execute(input) {
+    async execute(input, context) {
+      // Context-first workspace resolution. The model-supplied workspaceId
+      // was the prod failure mode (`{ workspaceId: "fls.com.hk" }` → DB
+      // `invalid input syntax for type uuid`): the model has no legitimate
+      // reason to pick a workspace — this surface is always injected
+      // workspace-bound (see packages/api/src/doc/inject.ts, which gates on
+      // `assistant.workspaceId`). Input stays accepted as a deprecated
+      // fallback for context-less callers only.
+      const workspaceId = context?.workspaceId ?? input.workspaceId
+      if (!workspaceId) {
+        return {
+          data: 'listEntityTypes requires a workspace-bound context.',
+          isError: true,
+        }
+      }
       try {
-        const builtIns = deps.listBuiltInEntityTypes(input.workspaceId)
-        const userDefined = await deps.store.listEntityTypes(input.workspaceId)
+        const builtIns = deps.listBuiltInEntityTypes(workspaceId)
+        const userDefined = await deps.store.listEntityTypes(workspaceId)
         const types: EntityType[] = [...builtIns, ...userDefined]
         return { data: { types } }
       } catch (err) {

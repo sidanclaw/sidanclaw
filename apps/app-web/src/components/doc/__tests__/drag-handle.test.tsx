@@ -22,6 +22,7 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { browserDocExtensions } from "../doc-schema";
+import { skillBodySchemaExtensions } from "@/lib/skill-markdown";
 
 vi.mock("tippy.js", () => ({
   default: () => ({
@@ -56,24 +57,27 @@ afterEach(() => {
   editorEl = null;
 });
 
-function mountEditor(): Editor {
+function mountEditor(extensions = browserDocExtensions()): Editor {
   editorEl = document.createElement("div");
   document.body.appendChild(editorEl);
   return new Editor({
     element: editorEl,
-    extensions: browserDocExtensions(),
+    extensions,
     content: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "hi" }] }] },
   });
 }
 
-function render(ed: Editor | null) {
+function render(ed: Editor | null, opts: { pageContext?: boolean } = { pageContext: true }) {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
   act(() => {
     root!.render(
       <I18nProvider locale="en" dict={dict}>
-        <DocDragHandle editor={ed} workspaceId="w1" pageId="p1" />
+        <DocDragHandle
+          editor={ed}
+          {...(opts.pageContext ? { workspaceId: "w1", pageId: "p1" } : {})}
+        />
       </I18nProvider>,
     );
   });
@@ -100,6 +104,18 @@ describe("[COMP:app-web/drag-handle] DocDragHandle", () => {
     // It is NOT inside the React host tree — it lives under the editor DOM, so
     // React never tries to reconcile it (the insertBefore-crash guard).
     expect(host!.contains(grip)).toBe(false);
+  });
+
+  it("mounts on the skill body editor's md schema without page context", () => {
+    // The skill body editor reuses this handle over its md-restricted
+    // non-collab schema and passes NO workspaceId/pageId (the menu's
+    // Copy-link row gates on them). The grip must still build — the plugin's
+    // Yjs remap paths no-op without a y-sync plugin state.
+    editor = mountEditor([...skillBodySchemaExtensions]);
+    render(editor, { pageContext: false });
+    const grip = document.querySelector(".doc-drag-handle") as HTMLElement | null;
+    expect(grip).not.toBeNull();
+    expect(grip!.draggable).toBe(true);
   });
 });
 

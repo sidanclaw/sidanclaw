@@ -47,6 +47,11 @@ export * from './templates.js'
 // package; this leaf stays DB-free. See doc-templates.md -> "Custom templates".
 export * from './custom-template-types.js'
 
+// Blueprint records — the typed output-contract half of the blueprint
+// primitive: field validation, completeness, and the page PROJECTION of a
+// record. See structural-synthesis.md -> "The record".
+export * from './blueprint-record.js'
+
 // Phase 1 chat tools
 export * from './tools.js'
 

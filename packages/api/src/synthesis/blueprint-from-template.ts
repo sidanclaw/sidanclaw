@@ -1,28 +1,51 @@
 // [COMP:api/blueprint-from-template] — render a page-template `extraction` spec
 // into a runnable blueprint body.
 //
-// A "document" blueprint (a page template carrying an extraction spec) is filled
-// by the SAME synthesis engine as a skill blueprint — the engine only ever
-// consumes `body` + `title`. This turns the structured spec (sections + capture)
-// into the recipe string that becomes the loop's system prompt, so v2 is a
-// resolver swap, not a new engine. See structural-synthesis.md → "The blueprint object".
+// A "document" blueprint (a page template carrying an extraction contract) is
+// filled by the SAME synthesis engine as a skill blueprint — but a document
+// blueprint is RECORD-FIRST: the loop's sink is the typed `writeField` tool,
+// and the page (when this surface renders one) is projected FROM the record
+// afterwards. This turns the structured contract into the recipe string that
+// becomes the loop's system prompt; the engine adds the source-specific gather
+// + cite envelope. See structural-synthesis.md → "The blueprint object".
 
-import type { ExtractionSpec } from '@sidanclaw/core'
+import type { ExtractionField, ExtractionSpec } from '@sidanclaw/core'
 
-function shapeWord(outputType: ExtractionSpec['sections'][number]['outputType']): string {
-  if (outputType === 'list') return 'a bulleted list'
-  if (outputType === 'table') return 'a table'
-  return 'a tight paragraph'
+function shapeWord(outputType: ExtractionField['outputType']): string {
+  if (outputType === 'list') return 'a markdown bulleted list'
+  if (outputType === 'table') return 'a markdown table'
+  return 'a tight markdown paragraph'
 }
 
-/** Render a blueprint's extraction spec into the recipe body the engine runs. */
+/** One-line value guidance per contract field type. */
+function valueGuidance(field: ExtractionField): string {
+  switch (field.type) {
+    case 'markdown':
+      return `Write ${shapeWord(field.outputType)}.`
+    case 'string':
+      return 'Write a short plain-text value (one line).'
+    case 'number':
+      return 'Write a plain number (no units, no formatting).'
+    case 'date':
+      return 'Write an ISO date: YYYY-MM-DD.'
+    case 'boolean':
+      return 'Write true or false.'
+    case 'enum':
+      return `Write exactly one of: ${(field.options ?? []).join(', ')}.`
+    case 'entityRef':
+      return `Name the ${field.entityKind ?? 'entity'} it refers to (pass { "name": "..." }).`
+  }
+}
+
+/** Render a blueprint's extraction contract into the recipe body the engine runs. */
 export function extractionToBlueprintBody(name: string, spec: ExtractionSpec): string {
-  const sections = spec.sections
-    .map((s, i) => {
+  const fields = spec.fields
+    .map((f, i) => {
+      const requiredTag = f.required ? ' (REQUIRED)' : ''
       return [
-        `### ${i + 1}. ${s.heading}`,
+        `### ${i + 1}. ${f.heading} — \`${f.key}\`${requiredTag}`,
         '',
-        `Query \`searchRecording\` for this, then \`patchPage\` ${shapeWord(s.outputType)} onto the page. ${s.instruction.trim()} Cite the \`start_ms\` for every claim.`,
+        `${f.instruction.trim()} Pull what you need from the source tool first, then save the value with \`writeField("${f.key}", …)\`. ${valueGuidance(f)}`,
       ].join('\n')
     })
     .join('\n\n')
@@ -33,16 +56,16 @@ export function extractionToBlueprintBody(name: string, spec: ExtractionSpec): s
           '',
           '## Capture',
           '',
-          `Also write these brain records (search the brain first to dedupe): ${spec.capture.join(', ')}. Use the save tools and inherit the recording's sensitivity.`,
+          `Also write these brain records (search the brain first to dedupe): ${spec.capture.join(', ')}. Use the save tools and inherit the source's sensitivity.`,
         ].join('\n')
       : ''
 
   return [
     `# ${name}`,
     '',
-    'Fill this brief page section by section from the source. Synthesize — never paste raw transcript.',
+    'Fill this blueprint field by field from the source. Synthesize — never paste raw source text. Every field lands via `writeField`; fields you cannot ground in the source stay unwritten (never invent).',
     '',
-    sections,
+    fields,
     capture,
   ]
     .join('\n')

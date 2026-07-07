@@ -5,9 +5,10 @@
  * `vars` / `input` are this run's accumulated state + trigger payload;
  * `lastRun` is the distilled outcome of the workflow's most recent terminal
  * run (`{{lastRun.summary}}` / `.todo` / `.blockers` / `.state.X` / `.logs` /
- * `.status`) — the cross-run loop substrate. Absent on the first run, so any
- * `{{lastRun.X}}` resolves to empty string. See
- * docs/architecture/features/workflow.md → "Cross-run state".
+ * `.status` / `.output.<key>` — the prior run's blueprint-record fields, plus
+ * `.outputStatus` for its completeness) — the cross-run loop substrate.
+ * Absent on the first run, so any `{{lastRun.X}}` resolves to empty string.
+ * See docs/architecture/features/workflow.md → "Cross-run state".
  *
  * Substitution only — no expressions, no operators. Anything richer goes
  * through a `branch` step.

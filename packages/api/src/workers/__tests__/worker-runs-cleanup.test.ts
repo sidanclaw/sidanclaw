@@ -29,6 +29,7 @@ function makeStore(): WorkerRunsStore & {
     recordCompletion: vi.fn(),
     loadForSession: vi.fn(async () => []),
     deleteTerminalOlderThan: spy,
+    listRecentForWorkspace: vi.fn(async () => []),
   }
 }
 

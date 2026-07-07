@@ -41,6 +41,7 @@ const WORKSPACE_SURFACES = new Set([
   "brain",
   "studio",
   "workflow",
+  "feed",
   "approvals",
   "knowledge-base",
   "memories",

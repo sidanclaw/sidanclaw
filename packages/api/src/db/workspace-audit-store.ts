@@ -46,6 +46,12 @@ export type WorkspaceAuditEventType =
   | 'workflow.auto_disabled'
   // Event-dispatch storm guard (workflow.md → "Event run queue")
   | 'workflow.storm_paused'
+  // Lifecycle sweep (workflow-lifecycle.md) — mig 308
+  | 'workflow.lifecycle_staled'
+  | 'workflow.lifecycle_archived'
+  | 'workflow.lifecycle_reactivated'
+  | 'workflow.lifecycle_deleted'
+  | 'workflow.digested'
   // Phase C — workflow approval flow (Q4 §12)
   | 'workflow.approval_requested'
   | 'workflow.approval_approved'

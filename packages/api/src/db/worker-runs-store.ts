@@ -131,5 +131,48 @@ export function createDbWorkerRunsStore(): WorkerRunsStore {
         history: Array.isArray(r.historyJson) ? (r.historyJson as Message[]) : [],
       }))
     },
+
+    async listRecentForWorkspace(workspaceId, limit) {
+      // Backs the read-only `listResearchRuns` introspection tool. System
+      // read — `worker_runs` has no user column, so visibility is bounded by
+      // the workspace the tool passes from `ToolContext.workspaceId` (the
+      // caller already established workspace membership). Newest-first;
+      // `limit` is clamped in the tool layer (max 50) and defensively
+      // clamped here too so a bad caller can't over-fetch. We deliberately
+      // do NOT select `history_json` / `result` — the tool only needs the
+      // summary fields, and the JSONB history can be large.
+      const clamped = Math.max(1, Math.min(limit, 50))
+      const result = await query<{
+        id: string
+        status: 'running' | 'completed' | 'failed' | 'stopped'
+        description: string
+        prompt: string
+        sessionId: string
+        createdAt: Date
+        updatedAt: Date
+      }>(
+        `SELECT id,
+                status,
+                description,
+                prompt,
+                session_id  AS "sessionId",
+                created_at  AS "createdAt",
+                updated_at  AS "updatedAt"
+         FROM worker_runs
+         WHERE workspace_id = $1
+         ORDER BY created_at DESC
+         LIMIT $2`,
+        [workspaceId, clamped],
+      )
+      return result.rows.map((r) => ({
+        id: r.id,
+        status: r.status,
+        description: r.description,
+        prompt: r.prompt,
+        sessionId: r.sessionId,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      }))
+    },
   }
 }
