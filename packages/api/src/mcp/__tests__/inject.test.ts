@@ -767,6 +767,114 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
   })
 })
 
+describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
+  // Incident 2026-07-08 (fls.com.hk): a workspace assistant sent mail from a
+  // PERSONAL Gmail that was never exposed to the workspace. The team-grant
+  // overlay gated injection on the connector_grant existing, but resolved the
+  // refresh token via connectorStore.getCredentials(grantor, 'gmail') =
+  // `ORDER BY created_at ASC LIMIT 1` — the grantor's OLDEST connected Gmail,
+  // i.e. the personal account — instead of binding to the GRANTED instance.
+  beforeEach(() => {
+    getConnectorConfig.mockImplementation((provider: string) =>
+      provider === 'google' ? { clientId: 'app-id', clientSecret: 'app-secret' } : undefined,
+    )
+    refreshGoogleAccessToken.mockClear()
+  })
+  afterEach(() => {
+    getConnectorConfig.mockReset()
+    getConnectorConfig.mockReturnValue(undefined)
+  })
+
+  function stores() {
+    // getCredentials returns the PERSONAL (oldest-by-created_at) refresh token —
+    // the legacy provider-wide path the fix must NOT take.
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([
+        { id: 'ci-gm-personal', connectorId: 'gmail', name: 'Gmail', connected: true, url: null, custom: false, createdAt: new Date('2026-04-14T00:00:00Z') },
+        { id: 'ci-gm-exposed', connectorId: 'gmail', name: 'hinson.wong@deltadefi.io', connected: true, url: null, custom: false, createdAt: new Date('2026-07-07T00:00:00Z') },
+        // A connected but UNGRANTED sibling Google service (Calendar).
+        { id: 'ci-gc-personal', connectorId: 'gcal', name: 'Google Calendar', connected: true, url: null, custom: false, createdAt: new Date('2026-04-14T00:00:00Z') },
+      ]),
+      getCredentials: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-PERSONAL-oldest' }),
+      getConfig: vi.fn().mockResolvedValue({}),
+      setConnected: vi.fn(),
+    }
+    // getCredentialsSystem is instance-bound: token = refresh-<instanceId>.
+    const connectorInstanceStore = {
+      getCredentialsSystem: vi.fn(async (id: string) => ({ client_id: 'google_refresh', client_secret: `refresh-${id}` })),
+      updateCredentialsSystem: vi.fn(),
+      markHealth: vi.fn(),
+      // No team-native rows — the grant overlay is the only Google source.
+      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+    }
+    const connectorGrantStore = {
+      listForTargetSystem: vi.fn().mockResolvedValue([
+        {
+          grantedByUserId: 'grantor-1',
+          instance: {
+            id: 'ci-gm-exposed', scope: 'user', userId: 'grantor-1', workspaceId: null,
+            provider: 'gmail', label: 'hinson.wong@deltadefi.io', url: null, custom: false,
+            connected: true, healthStatus: 'ok', config: {}, sensitivity: 'internal',
+          },
+        },
+      ]),
+    }
+    return { connectorStore, connectorInstanceStore, connectorGrantStore }
+  }
+
+  it('sends from the GRANTED instance, never the grantor\'s oldest personal account', async () => {
+    isSoloWorkspaceSystem.mockResolvedValueOnce(false) // multi-member → base load suppressed
+    const tools = new Map()
+    const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
+
+    await injectMcpTools({
+      userId: 'owner-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-fls',
+      keepBuiltinsDirect: true,
+    })
+
+    // Gmail tools ARE injected (the grant exists)...
+    expect([...tools.keys()]).toContain('gmailSendMessage')
+    // ...bound to the exposed instance's credentials, resolved by instance id.
+    expect(connectorInstanceStore.getCredentialsSystem).toHaveBeenCalledWith('ci-gm-exposed')
+    const exchanged = refreshGoogleAccessToken.mock.calls.map((c) => c[0])
+    expect(exchanged).toContain('refresh-ci-gm-exposed')
+    // The personal (oldest) account's token was NEVER exchanged — the leak.
+    expect(exchanged).not.toContain('refresh-PERSONAL-oldest')
+    expect(exchanged).not.toContain('refresh-ci-gm-personal')
+  })
+
+  it('does not let an ungranted sibling Google service ride along on a granted one', async () => {
+    isSoloWorkspaceSystem.mockResolvedValueOnce(false)
+    const tools = new Map()
+    const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
+
+    await injectMcpTools({
+      userId: 'owner-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-fls',
+      keepBuiltinsDirect: true,
+    })
+
+    const names = [...tools.keys()]
+    // Only Gmail was granted — the connected-but-ungranted Calendar must not appear.
+    expect(names).toContain('gmailSendMessage')
+    expect(names.some((n) => n.startsWith('googleCalendar'))).toBe(false)
+    expect(names.some((n) => n.startsWith('googleTasks'))).toBe(false)
+  })
+})
+
 describe('[COMP:integrations/connector-health] team-native connector health gate', () => {
   function teamGithub(healthStatus: 'ok' | 'auth_failed') {
     return {
