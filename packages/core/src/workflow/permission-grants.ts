@@ -16,7 +16,7 @@ export type WorkflowPermissionGrant = {
   granted_by?: string
 }
 
-export type PermissionGrantDecision =
+type PermissionGrantDecision =
   | { kind: 'allow'; workflowRunId: string; grant: WorkflowPermissionGrant }
   | { kind: 'ask'; workflowRunId: string; grant: WorkflowPermissionGrant }
   | { kind: 'block'; workflowRunId: string; grant: WorkflowPermissionGrant }
