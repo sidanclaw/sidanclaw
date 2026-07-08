@@ -701,14 +701,37 @@ export async function injectMcpTools(params: {
           continue
         }
         const grantorConnectors = await connectorStore.list(g.grantedByUserId).catch(() => [])
+        // Bind the granted built-in connector to the EXACT exposed instance
+        // (`g.instance.id`), NOT `connectorStore.getCredentials(grantor, provider)`.
+        // That lookup is `ORDER BY created_at ASC LIMIT 1` — the grantor's OLDEST
+        // connected account of this provider — which can be a personal instance
+        // that carries no `connector_grant` and was never exposed to the
+        // workspace. Threading only the health-probe `instanceId` (below) left
+        // credential resolution on the legacy provider-wide path, so a workspace
+        // assistant sent mail from a personal Gmail (incident 2026-07-08,
+        // fls.com.hk: exposed hinson.wong@deltadefi.io lost to older personal
+        // wongkahinhinson@gmail.com). Mirrors the team-native overlay's
+        // `getCredentialsSystem(inst.id)` binding. See
+        // docs/architecture/integrations/mcp.md → "Grant overlay instance binding".
+        // Fail-closed: without `connectorInstanceStore` we cannot bind to the
+        // instance, so we inject nothing rather than risk the wrong account.
+        const boundGrantCreds = async (): Promise<string | null> => {
+          if (!connectorInstanceStore) return null
+          const creds = await connectorInstanceStore.getCredentialsSystem(g.instance.id)
+          return creds?.client_secret ?? null
+        }
         if (p === 'github') {
-          await injectGitHubTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, undefined, undefined, undefined, { report: reportHealth, instanceId: g.instance.id })
+          await injectGitHubTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, boundGrantCreds, undefined, undefined, { report: reportHealth, instanceId: g.instance.id })
         } else if (p === 'notion') {
-          await injectNotionTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, undefined, undefined, undefined, { report: reportHealth, instanceId: g.instance.id })
+          await injectNotionTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, boundGrantCreds, undefined, undefined, { report: reportHealth, instanceId: g.instance.id })
         } else if (p === 'fathom') {
           await injectFathomTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined)
         } else if (p === 'gcal' || p === 'gmail' || p === 'gdrive') {
-          await injectGoogleTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, userTimezone, undefined, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi)
+          // Scope the injector to the GRANTED provider only. `injectGoogleTools`
+          // injects every connected Google provider it sees in `connectors`, so
+          // passing the grantor's full list would let an ungranted sibling
+          // service (e.g. a personal Calendar) ride along on a granted Gmail.
+          await injectGoogleTools([{ connectorId: p, connected: true }], connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, userTimezone, undefined, gdriveFilesStore, { [p]: boundGrantCreds }, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi)
         } else if (g.instance.custom && g.instance.url) {
           // Custom remote MCP shared via a grant. Respect Layer-2 enablement
           // (keyed on the provider UUID, like the team-native custom path),
