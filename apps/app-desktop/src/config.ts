@@ -45,6 +45,14 @@ export interface DesktopConfig {
   readonly targetAuth: TargetAuth;
   /** Human indicator for the menu/tray/title, e.g. `Local Brain (localhost:3003)`. */
   readonly targetLabel: string;
+  /**
+   * True when `SIDANCLAW_APP_URL` overrode the target (dev). The persisted
+   * record is ignored for this launch, so `main.ts` refuses target switching
+   * with an explanation while this is set — otherwise a switch persists the
+   * record but never survives the relaunch, which reads as it silently not
+   * working. The indicator label becomes `Dev override (<host>)`.
+   */
+  readonly envTargetOverride: boolean;
   /** Accelerator string for the global quick-capture hotkey. */
   readonly quickCaptureHotkey: string;
   /** Custom URL scheme for deep links + the auth callback. */
@@ -121,7 +129,10 @@ export function resolveConfig(
     apiUrl,
     target: target?.kind ?? "cloud",
     targetAuth: target?.auth ?? "pkce",
-    targetLabel: target?.label ?? "sidanclaw Cloud",
+    targetLabel: envAppUrl
+      ? `Dev override (${new URL(appUrl).host})`
+      : target?.label ?? "sidanclaw Cloud",
+    envTargetOverride: Boolean(envAppUrl),
     quickCaptureHotkey,
     protocolScheme: PROTOCOL_SCHEME,
     bundled,

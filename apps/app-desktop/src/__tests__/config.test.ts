@@ -103,6 +103,7 @@ describe("[COMP:app-desktop/config] resolveConfig target resolution (§2.1)", ()
     expect(cfg.target).toBe("cloud");
     expect(cfg.targetAuth).toBe("pkce");
     expect(cfg.targetLabel).toBe("sidanclaw Cloud");
+    expect(cfg.envTargetOverride).toBe(false);
     expect(cfg.appUrl).toBe("https://app.sidan.ai");
     expect(cfg.apiUrl).toBe("https://api.sidan.ai");
   });
@@ -134,7 +135,7 @@ describe("[COMP:app-desktop/config] resolveConfig target resolution (§2.1)", ()
     expect(cfg.appUrl).toBe("https://app.sidan.ai");
   });
 
-  it("lets the env override win the whole target (dev semantics, PKCE auth)", () => {
+  it("lets the env override win the whole target (dev semantics, PKCE auth) and flags it honestly", () => {
     const cfg = resolveConfig(
       { SIDANCLAW_APP_URL: "http://localhost:3003" },
       serializePersistedTarget("local", "http://myserver:3003"),
@@ -143,6 +144,10 @@ describe("[COMP:app-desktop/config] resolveConfig target resolution (§2.1)", ()
     expect(cfg.apiUrl).toBe("http://localhost:4000");
     expect(cfg.target).toBe("cloud");
     expect(cfg.targetAuth).toBe("pkce");
+    // The flag lets main.ts refuse a target switch that could never survive
+    // the relaunch, and the label stops the indicator claiming "Cloud".
+    expect(cfg.envTargetOverride).toBe(true);
+    expect(cfg.targetLabel).toBe("Dev override (localhost:3003)");
   });
 
   it("lets an explicit SIDANCLAW_API_URL override a persisted local pairing", () => {

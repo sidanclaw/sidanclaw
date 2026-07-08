@@ -1383,6 +1383,10 @@ if (!gotLock) {
   // keeping the local address remembered for the return trip.
   ipcMain.handle("sidanclaw:run-local", async (_event, rawUrl: unknown) => {
     const input = typeof rawUrl === "string" && rawUrl.trim() ? rawUrl : DEFAULT_LOCAL_APP_URL;
+    // The dev env override outranks the persisted record (§2.1 precedence),
+    // so a switch would persist but never survive the relaunch — refuse with
+    // an explanation instead of silently reopening in the same place.
+    if (cfg.envTargetOverride) return { ok: false, error: "env-override", url: input };
     const target = localTarget(input);
     if (!target) return { ok: false, error: "invalid-url", url: input };
     if (!(await probeLocalBrain(target.apiUrl))) {

@@ -364,6 +364,16 @@
         el("local-secondary-btn").disabled = busy;
       }
 
+      function localFailureMessage(res, url) {
+        if (res && res.error === "invalid-url") {
+          return "That doesn't look like a URL. Include http:// or https://.";
+        }
+        if (res && res.error === "env-override") {
+          return "The SIDANCLAW_APP_URL dev override is active, so targets are ignored. Unset it and reopen sidanclaw to switch.";
+        }
+        return "No brain answered at " + url + ". Is it running?";
+      }
+
       function connectLocal() {
         var url = el("local-input").value.trim() || DEFAULT_LOCAL_URL;
         if (!desktop.runLocal) return;
@@ -377,11 +387,7 @@
               return;
             }
             setLocalBusy(false);
-            setLocalStatus(
-              res && res.error === "invalid-url"
-                ? "That doesn't look like a URL. Include http:// or https://."
-                : "No brain answered at " + url + ". Is it running?",
-            );
+            setLocalStatus(localFailureMessage(res, url));
           })
           .catch(function () {
             // The invoke itself failed (e.g. a stale shell process without the
@@ -410,6 +416,9 @@
             btn.textContent = RUN_LOCAL_LABEL;
             cameFromSignin = true;
             configureLocal("setup", (res && res.url) || DEFAULT_LOCAL_URL);
+            if (res && res.error === "env-override") {
+              setLocalStatus(localFailureMessage(res, ""));
+            }
           })
           .catch(function () {
             // The invoke itself failed (e.g. a stale shell process without the
