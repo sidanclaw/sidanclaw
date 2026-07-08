@@ -19,11 +19,21 @@
  * `respondByKind` to the dedicated `/api/skills/approvals` endpoints; their
  * cards render the proposed umbrella, or a current-vs-proposed line diff
  * (`lib/line-diff.ts`) built from the `listSkillApprovalDetails`
- * target-skill snapshot, with a shrink warning against fragment patches
- * that would clobber the body, and approve blocked when the target skill
- * is gone. Only `distribution_draft` (feed) and `question` (chat) still
- * list with a native-surface hint — the unified respond route 422s them
- * by design. Filterable by kind / assistant / age.
+ * target-skill snapshot — with the first changed lines previewed inline
+ * on the collapsed card (`previewChanges`), the target skill's slug, a
+ * shrink warning against fragment patches that would clobber the body,
+ * and approve blocked when the target skill is gone. Every card carries a
+ * provenance meta line (proposing assistant, raised time, expiry when
+ * set); `workflow_step`/`tool_invocation` cards name the exact tool and
+ * expose the frozen tool input behind a toggle (`ToolCallBody`). Tool
+ * calls the queue recognises render a rich per-tool preview instead of
+ * the JSON view (`lib/approval-previews.ts` parses, `ToolPreview` in
+ * `approval-tool-previews.tsx` renders — first: `gmailSendMessage` as a
+ * mail-client-style email card), with the raw input kept one toggle away
+ * and the generic view as the fallback for everything else. Only
+ * `distribution_draft` (feed) and `question` (chat) still list with a
+ * native-surface hint — the unified respond route 422s them by design.
+ * Filterable by kind / assistant / age.
  *
  * app-web is single-workspace-per-route (no chrome workspace switcher),
  * so the queue scopes to the route workspace via `activeId` from the
@@ -60,6 +70,7 @@ import {
   collapseContext,
   diffLines,
   diffStats,
+  previewChanges,
   type DiffRow,
 } from "@/lib/line-diff";
 import {
@@ -72,6 +83,12 @@ import {
   type AgeFilter,
   type ApprovalFilter,
 } from "@/lib/approvals-filter";
+import {
+  extractAttachmentLines,
+  parseToolPreview,
+  type ToolPreviewData,
+} from "@/lib/approval-previews";
+import { ToolPreview } from "./approval-tool-previews";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -378,6 +395,7 @@ export function ApprovalsPanel() {
               row={row}
               skillDetail={skillDetails?.[row.id]}
               skillDetailsLoaded={skillDetails !== null}
+              assistantNames={assistantNames}
               selectable={isActionable(row.kind)}
               selected={selected.has(row.id)}
               batchBusy={batchBusy}
@@ -594,6 +612,7 @@ function ApprovalCard({
   row,
   skillDetail,
   skillDetailsLoaded,
+  assistantNames,
   selectable,
   selected,
   batchBusy,
@@ -603,6 +622,7 @@ function ApprovalCard({
   row: PendingApprovalRow;
   skillDetail?: SkillApprovalDetail;
   skillDetailsLoaded: boolean;
+  assistantNames: Record<string, string>;
   selectable: boolean;
   selected: boolean;
   batchBusy: boolean;
@@ -643,6 +663,17 @@ function ApprovalCard({
   const approveBlocked =
     row.kind === "staged_skill_update" && !skillDetail?.targetSkill;
 
+  // Tool-specific rich preview (an email as an email), for the kinds whose
+  // `arguments` are a frozen tool input. Null → the generic raw-input view.
+  // When a preview renders, the payload displayLines are suppressed — they
+  // narrate the same call the preview already shows.
+  const toolPreview: ToolPreviewData | null =
+    row.kind === "tool_invocation" ||
+    row.kind === "workflow_step" ||
+    row.kind === "staged_write"
+      ? parseToolPreview(row.toolName, row.arguments)
+      : null;
+
   // Provenance for agent-origin staged writes: which credential class the
   // agent acted through, plus a human label (or credential-id prefix).
   const stagedSurface =
@@ -654,6 +685,31 @@ function ApprovalCard({
     (row.approvalPayload.credentialId
       ? `${row.approvalPayload.credentialId.slice(0, 8)}…`
       : "");
+
+  // Card meta: who proposed it, when it was raised, when it lapses. The
+  // assistant-name map is the same one backing the filter labels; a name
+  // still loading falls back to the id-prefix label.
+  const proposerName = row.originatingAssistantId
+    ? (assistantNames[row.originatingAssistantId] ??
+      format(t.approvalsPage.filters.assistantFallback, {
+        id: row.originatingAssistantId.slice(0, 8),
+      }))
+    : null;
+  const metaLine = [
+    ...(proposerName
+      ? [format(t.approvalsPage.proposedBy, { assistant: proposerName })]
+      : []),
+    format(t.approvalsPage.age, {
+      when: new Date(row.createdAt).toLocaleString(),
+    }),
+    ...(row.expiresAt
+      ? [
+          format(t.approvalsPage.expires, {
+            when: new Date(row.expiresAt).toLocaleString(),
+          }),
+        ]
+      : []),
+  ].join(" · ");
 
   async function respond(decision: "approved" | "rejected") {
     setBusy(true);
@@ -704,16 +760,29 @@ function ApprovalCard({
         <div className="flex-1 min-w-0 flex flex-col gap-2">
           <div>
             <div className="text-sm font-medium truncate">{headline}</div>
-            {row.approvalPayload.displayLines?.map((line, i) => (
-              <div key={i} className="text-xs text-muted-foreground truncate">
-                {line}
-              </div>
-            ))}
+            {!toolPreview &&
+              row.approvalPayload.displayLines?.map((line, i) => (
+                <div key={i} className="text-xs text-muted-foreground truncate">
+                  {line}
+                </div>
+              ))}
             {row.kind === "staged_write" && (
               <>
-                <pre className="mt-1.5 text-[11px] font-mono bg-muted/50 border border-border rounded px-2 py-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all max-w-2xl">
-                  {JSON.stringify(row.arguments, null, 2)}
-                </pre>
+                {toolPreview ? (
+                  <div className="flex flex-col items-start gap-1">
+                    <ToolPreview
+                      preview={toolPreview}
+                      attachmentLines={extractAttachmentLines(
+                        row.approvalPayload.displayLines,
+                      )}
+                    />
+                    <RawInputToggle args={row.arguments} />
+                  </div>
+                ) : (
+                  <pre className="mt-1.5 text-[11px] font-mono bg-muted/50 border border-border rounded px-2 py-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all max-w-2xl">
+                    {JSON.stringify(row.arguments, null, 2)}
+                  </pre>
+                )}
                 <div className="text-xs text-muted-foreground mt-1.5">
                   {format(t.approvalsPage.stagedWrite.provenance, {
                     surface: stagedSurface ?? "",
@@ -721,6 +790,10 @@ function ApprovalCard({
                   })}
                 </div>
               </>
+            )}
+            {(row.kind === "workflow_step" ||
+              row.kind === "tool_invocation") && (
+              <ToolCallBody row={row} preview={toolPreview} />
             )}
             {row.kind === "staged_skill_creation" && (
               <SkillCreationBody row={row} />
@@ -733,9 +806,7 @@ function ApprovalCard({
               />
             )}
             <div className="text-xs text-muted-foreground mt-0.5">
-              {format(t.approvalsPage.age, {
-                when: new Date(row.createdAt).toLocaleString(),
-              })}
+              {metaLine}
             </div>
           </div>
 
@@ -787,6 +858,65 @@ function ApprovalCard({
         </div>
       </div>
     </li>
+  );
+}
+
+/** Detail body for `workflow_step` / `tool_invocation` cards — the exact
+ *  tool that will run (shown when the headline is a human description, so
+ *  the ident is never lost), a tool-specific rich preview when the queue
+ *  recognises the action (an outgoing email as an email), and the frozen
+ *  input it will run with, behind a toggle to keep the queue scannable. */
+function ToolCallBody({
+  row,
+  preview,
+}: {
+  row: PendingApprovalRow;
+  preview: ToolPreviewData | null;
+}) {
+  const hasInput = Object.keys(row.arguments ?? {}).length > 0;
+  const described = Boolean(row.approvalPayload.description?.trim());
+  if (!(described && row.toolName) && !hasInput) return null;
+  return (
+    <div className="flex flex-col items-start gap-1 mt-0.5">
+      {described && row.toolName && (
+        <div className="text-[11px] font-mono text-muted-foreground/80">
+          {row.toolName}
+        </div>
+      )}
+      {preview && (
+        <ToolPreview
+          preview={preview}
+          attachmentLines={extractAttachmentLines(
+            row.approvalPayload.displayLines,
+          )}
+        />
+      )}
+      {hasInput && <RawInputToggle args={row.arguments} />}
+    </div>
+  );
+}
+
+/** "View tool input" toggle over the frozen arguments JSON — the ground
+ *  truth under every preview, and the whole view when no preview exists. */
+function RawInputToggle({ args }: { args: Record<string, unknown> }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  if (Object.keys(args ?? {}).length === 0) return null;
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-xs text-primary hover:underline"
+      >
+        {open ? t.approvalsPage.hideToolInput : t.approvalsPage.viewToolInput}
+      </button>
+      {open && (
+        <pre className="w-full text-[11px] font-mono bg-muted/50 border border-border rounded px-2 py-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all max-w-2xl">
+          {JSON.stringify(args, null, 2)}
+        </pre>
+      )}
+    </>
   );
 }
 
@@ -843,10 +973,12 @@ function SkillCreationBody({ row }: { row: PendingApprovalRow }) {
   );
 }
 
-/** Proposal body for a `staged_skill_update` card — added support files,
- *  an added/removed summary, a shrink warning against fragment patches
- *  that would clobber the body, and a toggleable current-vs-proposed
- *  line diff built from the fetched target snapshot. */
+/** Proposal body for a `staged_skill_update` card — the target skill's
+ *  slug, added support files, an added/removed summary, a shrink warning
+ *  against fragment patches that would clobber the body, an inline preview
+ *  of the first changed lines (so the substance is visible without a
+ *  click), and a toggleable full current-vs-proposed line diff built from
+ *  the fetched target snapshot. */
 function SkillUpdateBody({
   row,
   detail,
@@ -879,6 +1011,9 @@ function SkillUpdateBody({
   );
   const stats = useMemo(() => (diff ? diffStats(diff) : null), [diff]);
   const diffRows = useMemo(() => (diff ? collapseContext(diff) : null), [diff]);
+  // First few changed lines, shown inline while the full diff is closed —
+  // the reviewer sees what the proposal actually says at a glance.
+  const preview = useMemo(() => (diff ? previewChanges(diff) : null), [diff]);
   // A proposal much shorter than the current body usually means the curator
   // sent a fragment — approving would replace the whole skill with it.
   const shrinkPercent =
@@ -890,6 +1025,11 @@ function SkillUpdateBody({
 
   return (
     <div className="flex flex-col items-start gap-1 mt-0.5">
+      {target?.slug && (
+        <div className="text-[11px] font-mono text-muted-foreground/80">
+          {target.slug}
+        </div>
+      )}
       {!detailsLoaded ? (
         <div className="text-xs text-muted-foreground">
           {t.approvalsPage.skill.updateTargetLoading}
@@ -929,6 +1069,18 @@ function SkillUpdateBody({
           })}
         </div>
       )}
+      {!open && preview && preview.rows.length > 0 && (
+        <>
+          <DiffView rows={preview.rows} />
+          {preview.moreChanges > 0 && (
+            <div className="text-[11px] text-muted-foreground/70">
+              {format(t.approvalsPage.skill.moreChanges, {
+                count: preview.moreChanges,
+              })}
+            </div>
+          )}
+        </>
+      )}
       {hasBodyProposal && (
         <button
           type="button"
@@ -937,7 +1089,9 @@ function SkillUpdateBody({
         >
           {open
             ? t.approvalsPage.skill.hideChanges
-            : t.approvalsPage.skill.viewChanges}
+            : preview && preview.rows.length > 0
+              ? t.approvalsPage.skill.viewAllChanges
+              : t.approvalsPage.skill.viewChanges}
         </button>
       )}
       {open && diffRows ? (

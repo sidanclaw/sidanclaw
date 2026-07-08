@@ -10,6 +10,7 @@ import {
   collapseContext,
   diffLines,
   diffStats,
+  previewChanges,
   type DiffLine,
 } from "../line-diff";
 
@@ -82,5 +83,30 @@ describe("[COMP:app-web/approvals] collapseContext", () => {
       2,
     );
     expect(rows.some((r) => r.type === "gap")).toBe(false);
+  });
+});
+
+describe("[COMP:app-web/approvals] previewChanges", () => {
+  it("returns only changed lines, in document order", () => {
+    const { rows, moreChanges } = previewChanges(
+      diffLines("keep\nold\nkeep2", "keep\nnew\nkeep2"),
+    );
+    expect(join(rows)).toEqual(["-old", "+new"]);
+    expect(moreChanges).toBe(0);
+  });
+
+  it("truncates past maxRows and counts the rest", () => {
+    const before = Array.from({ length: 10 }, (_, i) => `line ${i}`).join("\n");
+    const after = Array.from({ length: 10 }, (_, i) => `LINE ${i}`).join("\n");
+    // 10 dels + 10 adds = 20 changed lines.
+    const { rows, moreChanges } = previewChanges(diffLines(before, after), 6);
+    expect(rows).toHaveLength(6);
+    expect(moreChanges).toBe(14);
+  });
+
+  it("is empty for identical documents", () => {
+    const { rows, moreChanges } = previewChanges(diffLines("a\nb", "a\nb"));
+    expect(rows).toEqual([]);
+    expect(moreChanges).toBe(0);
   });
 });
