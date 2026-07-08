@@ -91,6 +91,23 @@ function lcsDiff(a: string[], b: string[]): DiffLine[] {
   return reversed.reverse();
 }
 
+/**
+ * The first `maxRows` changed lines (adds/dels only, document order) plus
+ * how many changed lines were left out. Powers the collapsed skill-update
+ * card's inline preview — the reviewer sees the substance of the proposal
+ * without opening the full diff.
+ */
+export function previewChanges(
+  lines: readonly DiffLine[],
+  maxRows = 6,
+): { rows: DiffLine[]; moreChanges: number } {
+  const changed = lines.filter((l) => l.type !== "same");
+  return {
+    rows: changed.slice(0, maxRows),
+    moreChanges: Math.max(0, changed.length - maxRows),
+  };
+}
+
 /** Added/removed line counts for the summary chip. */
 export function diffStats(lines: readonly DiffLine[]): {
   added: number;
