@@ -267,6 +267,15 @@ function createWindow(): BrowserWindow {
       event.preventDefault();
       win.setTitle(targetWindowTitle(title, { kind: cfg.target, label: cfg.targetLabel }));
     });
+    // A hosted-edition brain 404s the local-owner mint (the trigger route only
+    // mounts local+oss) — a 404 page isn't a load failure, so did-fail-load
+    // never fires. Catch it here and explain, instead of stranding the user on
+    // a bare 404.
+    win.webContents.on("did-navigate", (_event, url, httpResponseCode) => {
+      if (httpResponseCode === 404 && url.startsWith(localMintUrl(cfg.appUrl))) {
+        showLocalDown(win, "auth");
+      }
+    });
   }
 
   // Outbound links and untrusted origins open in the system browser; sign-in
@@ -489,25 +498,22 @@ function showLocalDown(win: BrowserWindow, reason: "unreachable" | "auth" = "unr
 }
 
 /**
- * The menu/tray "Switch to ..." action. Cloud → local re-probes the
- * remembered address first: reachable → persist + relaunch; not → the
- * landing's custom-URL view, never a silent failure. Local → cloud always
- * switches (the local address stays remembered for the way back).
+ * The menu/tray "Switch to ..." action. Cloud → local ALWAYS opens the
+ * landing's chooser (`local-choose`, prefilled with the remembered address):
+ * the user confirms or edits the URL, and Connect probes + switches. Never
+ * silently adopt whatever answers on the default port — a dev running the
+ * hosted-edition stack there gets the wrong brain with familiar data, which
+ * reads as a bug. Local → cloud always switches (the local address stays
+ * remembered for the way back).
  */
-async function switchTargetFromMenu(): Promise<void> {
+function switchTargetFromMenu(): void {
   if (cfg.target === "local") {
     persistTargetAndRelaunch("cloud", rememberedLocalAppUrl());
     return;
   }
-  const url = rememberedLocalAppUrl();
-  const target = localTarget(url);
-  if (target && (await probeLocalBrain(target.apiUrl))) {
-    persistTargetAndRelaunch("local", target.appUrl);
-    return;
-  }
   const win = ensureWindow();
   void win.webContents
-    .loadFile(SIGNIN_PAGE, { query: { mode: "local-setup", url } })
+    .loadFile(SIGNIN_PAGE, { query: { mode: "local-choose", url: rememberedLocalAppUrl() } })
     .then(() => focusWindow(win));
 }
 

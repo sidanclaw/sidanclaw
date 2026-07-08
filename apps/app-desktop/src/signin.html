@@ -7,11 +7,13 @@
          addition to the strict baseline.
 
          Views (docs/plans/consumer-local-experience.md §2.2):
-           #signin  (default)          Sign in to Cloud, or "Run locally"
-           #signing                    the system browser is completing PKCE
-           #local   ?mode=local-setup  probe failed: custom URL entry
-                    ?mode=local-down   the active local target is unreachable
-                                       (&reason=auth: the session mint bounced)
+           #signin  (default)           Sign in to Cloud, or "Run locally"
+           #signing                     the system browser is completing PKCE
+           #local   ?mode=local-choose  the menu/tray switch: confirm or edit
+                                        the address, Connect probes + switches
+                    ?mode=local-setup   probe failed: custom URL entry
+                    ?mode=local-down    the active local target is unreachable
+                                        (&reason=auth: the session mint bounced)
          main.ts picks the view via loadFile query params. -->
     <meta
       http-equiv="Content-Security-Policy"
@@ -288,9 +290,10 @@
       el("retry-signin-btn").addEventListener("click", startSignIn);
 
       // ── Local target (§2.2) ──────────────────────────────────
-      // variant "setup": probing found no brain; enter an address.
-      // variant "down":  the ACTIVE local target is unreachable (or, with
-      //                  reason=auth, refused the local-owner session mint).
+      // variant "choose": the menu/tray switch — confirm or edit the address.
+      // variant "setup":  probing found no brain; enter an address.
+      // variant "down":   the ACTIVE local target is unreachable (or, with
+      //                   reason=auth, refused the local-owner session mint).
       var localVariant = "setup";
       var cameFromSignin = false;
 
@@ -310,6 +313,9 @@
               : "Can't reach your local brain at " +
                 url +
                 ". sidanclaw reconnects automatically when it's back.";
+        } else if (variant === "choose") {
+          msg =
+            "Connect to a local or self-hosted brain. Use the default address or enter your own, then Connect.";
         } else {
           msg =
             "No local brain answered at " +
@@ -416,8 +422,11 @@
           qs.get("target") || DEFAULT_LOCAL_URL,
           qs.get("reason") || "unreachable",
         );
-      } else if (mode === "local-setup") {
-        configureLocal("setup", qs.get("url") || DEFAULT_LOCAL_URL);
+      } else if (mode === "local-setup" || mode === "local-choose") {
+        configureLocal(
+          mode === "local-choose" ? "choose" : "setup",
+          qs.get("url") || DEFAULT_LOCAL_URL,
+        );
       } else {
         show("signin");
       }
