@@ -55,10 +55,14 @@ export function openFeedStream(opts: {
     if (closed) return;
     // Base is only consulted when API_URL is dev's blanked "" (next.config
     // inlines "" so fetches ride the /api rewrite); an absolute API_URL
-    // (prod, desktop bundle) ignores it, so file:// can't leak in.
+    // (prod, desktop bundle) ignores it, so file:// can't leak in. Guard the
+    // `window` read so the module is safe under SSR / node (tests) where an
+    // absolute API_URL makes the base irrelevant anyway.
+    const base =
+      typeof window !== "undefined" ? window.location.origin : undefined;
     const url = new URL(
       `${API_URL}/api/distribution/t/${opts.workspaceId}/events`,
-      window.location.origin,
+      base,
     );
     if (lastEventId) url.searchParams.set("lastEventId", lastEventId);
     // EventSource can't set headers — pass the access_token as a query
