@@ -1382,7 +1382,9 @@ if (!gotLock) {
     if (!(await probeLocalBrain(target.apiUrl))) {
       return { ok: false, error: "unreachable", url: target.appUrl };
     }
-    setImmediate(() => persistTargetAndRelaunch("local", target.appUrl));
+    // A short delay (not setImmediate) so the ok-reply actually flushes to the
+    // renderer and the landing paints "Restarting..." before the process dies.
+    setTimeout(() => persistTargetAndRelaunch("local", target.appUrl), 150);
     return { ok: true, url: target.appUrl };
   });
   ipcMain.on("sidanclaw:use-cloud", () =>

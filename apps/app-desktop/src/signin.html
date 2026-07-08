@@ -336,19 +336,28 @@
         if (!desktop.runLocal) return;
         setLocalBusy(true);
         setLocalStatus("Checking " + url + " ...");
-        desktop.runLocal(url).then(function (res) {
-          if (res && res.ok) {
-            // The shell persists the target and relaunches; leave busy.
-            setLocalStatus("Connected. Restarting sidanclaw...");
-            return;
-          }
-          setLocalBusy(false);
-          setLocalStatus(
-            res && res.error === "invalid-url"
-              ? "That doesn't look like a URL. Include http:// or https://."
-              : "No brain answered at " + url + ". Is it running?",
-          );
-        });
+        desktop.runLocal(url)
+          .then(function (res) {
+            if (res && res.ok) {
+              // The shell persists the target and relaunches; leave busy.
+              setLocalStatus("Connected. Restarting sidanclaw...");
+              return;
+            }
+            setLocalBusy(false);
+            setLocalStatus(
+              res && res.error === "invalid-url"
+                ? "That doesn't look like a URL. Include http:// or https://."
+                : "No brain answered at " + url + ". Is it running?",
+            );
+          })
+          .catch(function () {
+            // The invoke itself failed (e.g. a stale shell process without the
+            // handler). Never leave the button stuck.
+            setLocalBusy(false);
+            setLocalStatus(
+              "Something went wrong talking to the app shell. Quit and reopen sidanclaw, then try again.",
+            );
+          });
       }
       el("local-connect-btn").addEventListener("click", connectLocal);
 
@@ -357,16 +366,28 @@
         if (!desktop.runLocal) return;
         btn.disabled = true;
         btn.textContent = "Looking for a local brain...";
-        desktop.runLocal(null).then(function (res) {
-          if (res && res.ok) {
-            btn.textContent = "Connected. Restarting...";
-            return;
-          }
-          btn.disabled = false;
-          btn.textContent = "Run locally";
-          cameFromSignin = true;
-          configureLocal("setup", (res && res.url) || DEFAULT_LOCAL_URL);
-        });
+        desktop.runLocal(null)
+          .then(function (res) {
+            if (res && res.ok) {
+              btn.textContent = "Connected. Restarting...";
+              return;
+            }
+            btn.disabled = false;
+            btn.textContent = "Run locally";
+            cameFromSignin = true;
+            configureLocal("setup", (res && res.url) || DEFAULT_LOCAL_URL);
+          })
+          .catch(function () {
+            // The invoke itself failed (e.g. a stale shell process without the
+            // handler). Reset and say so instead of sticking on "Looking...".
+            btn.disabled = false;
+            btn.textContent = "Run locally";
+            cameFromSignin = true;
+            configureLocal("setup", DEFAULT_LOCAL_URL);
+            setLocalStatus(
+              "Something went wrong talking to the app shell. Quit and reopen sidanclaw, then try again.",
+            );
+          });
       });
 
       el("local-retry-btn").addEventListener("click", function () {
