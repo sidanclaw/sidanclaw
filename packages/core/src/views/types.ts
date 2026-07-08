@@ -114,7 +114,7 @@ type ViewColumnFilter = {
   value?: string | number | boolean | string[] | null
 }
 
-export type ViewDisplay = {
+type ViewDisplay = {
   /** Per-column pixel widths, keyed by column `field`. */
   columnWidths?: Record<string, number>
   /** Column `field` order (a permutation/subset of the binding's columns). */
