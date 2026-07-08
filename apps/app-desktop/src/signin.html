@@ -148,6 +148,34 @@
         filter: saturate(0.4) brightness(0.95);
         transform: none;
       }
+      /* Quietest action: a text link in button's clothing (keeps :disabled).
+         Neutralizes every base-button treatment. */
+      button.linklike,
+      button.linklike:hover,
+      button.linklike:active {
+        background: none;
+        border: 0;
+        box-shadow: none;
+        transform: none;
+        filter: none;
+        padding: 4px 6px;
+      }
+      button.linklike {
+        color: inherit;
+        opacity: 0.55;
+        font-size: 12.5px;
+        font-weight: 500;
+        text-decoration: underline;
+        text-underline-offset: 3px;
+        text-decoration-color: rgba(52, 211, 255, 0.65);
+      }
+      button.linklike:hover {
+        opacity: 0.85;
+      }
+      button.linklike:disabled {
+        opacity: 0.45;
+        text-decoration: none;
+      }
       /* Quiet secondary action: a ghost button next to the glowing CTA. */
       button.secondary {
         color: inherit;
@@ -232,10 +260,9 @@
       <div id="signin">
         <p>You're signed out. Sign in to open your workspace.</p>
         <button id="signin-btn" type="button">Sign In</button>
-        <p class="sub">Running sidanclaw yourself?</p>
-        <div class="stack">
-          <button id="run-local-btn" type="button" class="secondary">
-            Run locally
+        <div class="sub">
+          <button id="run-local-btn" type="button" class="linklike">
+            Running sidanclaw yourself? Run locally
           </button>
         </div>
       </div>
@@ -367,6 +394,7 @@
       }
       el("local-connect-btn").addEventListener("click", connectLocal);
 
+      var RUN_LOCAL_LABEL = "Running sidanclaw yourself? Run locally";
       el("run-local-btn").addEventListener("click", function () {
         var btn = el("run-local-btn");
         if (!desktop.runLocal) return;
@@ -379,7 +407,7 @@
               return;
             }
             btn.disabled = false;
-            btn.textContent = "Run locally";
+            btn.textContent = RUN_LOCAL_LABEL;
             cameFromSignin = true;
             configureLocal("setup", (res && res.url) || DEFAULT_LOCAL_URL);
           })
@@ -387,7 +415,7 @@
             // The invoke itself failed (e.g. a stale shell process without the
             // handler). Reset and say so instead of sticking on "Looking...".
             btn.disabled = false;
-            btn.textContent = "Run locally";
+            btn.textContent = RUN_LOCAL_LABEL;
             cameFromSignin = true;
             configureLocal("setup", DEFAULT_LOCAL_URL);
             setLocalStatus(
