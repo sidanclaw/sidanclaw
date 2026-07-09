@@ -151,6 +151,7 @@ import { publishSessionEvent, startSessionEventBus, subscribeSessionEvents } fro
 import { createDbMcpSettingsStore } from './db/mcp-settings-store.js'
 import { createDbConnectorStore } from './db/connector-store.js'
 import { createConnectorInstanceStore } from './db/connector-instance-store.js'
+import { createWorkspaceToolPolicyStore } from './db/workspace-tool-policy-store.js'
 import { buildOpenSyncCredentials } from './build-sync-credentials.js'
 import { createDbAssistantConnectorStore } from './db/assistant-connector-store.js'
 import { createDbAssistantConnectorGrantsStore } from './db/assistant-connector-grants-store.js'
@@ -588,6 +589,7 @@ export interface BootContext {
   taskStore: ReturnType<typeof createDbTaskStore>
   connectorStore: ReturnType<typeof createDbConnectorStore>
   connectorInstanceStore: ReturnType<typeof createConnectorInstanceStore>
+  workspaceToolPolicyStore: ReturnType<typeof createWorkspaceToolPolicyStore>
   mcpSettingsStore: ReturnType<typeof createDbMcpSettingsStore>
   assistantConnectorStore: ReturnType<typeof createDbAssistantConnectorStore>
   assistantConnectorGrantsStore: ReturnType<typeof createDbAssistantConnectorGrantsStore>
@@ -868,6 +870,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const mcpSettingsStore = createDbMcpSettingsStore()
   const credKey = env.CHANNEL_CREDENTIAL_KEY ? loadChannelCredentialKey(env.CHANNEL_CREDENTIAL_KEY) : null
   const connectorInstanceStore = createConnectorInstanceStore(credKey)
+  // Shared workspace tool policy (migration 312) — governs allow/ask/block for
+  // team-owned connector tools. See workspace-owned-connector-transfer.md §2C.
+  const workspaceToolPolicyStore = createWorkspaceToolPolicyStore()
   // Ingest-rules store is closed (Studio ▸ Ingestion control plane lives in the
   // platform). Carried on ctx as `unknown` for closed routes; open never reads.
   const ingestRulesStore: unknown = undefined
@@ -1298,6 +1303,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     assistantConnectorStore,
     connectorGrantStore,
     connectorInstanceStore,
+    workspaceToolPolicyStore,
     knowledgeStore,
     gdriveFilesStore,
     capabilityStore,
@@ -1470,6 +1476,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         assistantConnectorStore,
         connectorGrantStore,
         connectorInstanceStore,
+        workspaceToolPolicyStore,
         knowledgeStore,
         gdriveFilesStore,
         // Evaluated per-run (this closure fires post-boot), so the late
@@ -1754,7 +1761,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const {
     proposeWorkflow, createWorkflow: createWorkflowTool, updateWorkflow,
-    getWorkflow, runWorkflow, listWorkflows, getWorkflowRun, listSlackChannels,
+    getWorkflow, runWorkflow, listWorkflows, getWorkflowRun, listSlackChannels, listSlackMembers,
   } = createWorkflowTools({
     workflowStore,
     runStore: workflowRunStore,
@@ -1762,6 +1769,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     validateDeliveryTarget: workflowDependencyPreflight.validateDeliveryTarget,
     preflightConnectorTool: workflowDependencyPreflight.preflightConnectorTool,
     listSlackChannels: workflowDependencyPreflight.listSlackChannels,
+    listSlackMembers: workflowDependencyPreflight.listSlackMembers,
     resolvePageAnchor: async (userId, pageId) => {
       const view = await savedViewStore.getById(userId, pageId)
       return view ? { workspaceId: view.workspaceId, state: view.state, name: view.name } : null
@@ -1804,6 +1812,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('listWorkflows', listWorkflows)
   allTools.set('getWorkflowRun', getWorkflowRun)
   allTools.set('listSlackChannels', listSlackChannels)
+  allTools.set('listSlackMembers', listSlackMembers)
 
   allTools.set('findPage', createFindPageTool({ savedViewStore, docPageStore: createDbDocPageStore() }))
 
@@ -2329,6 +2338,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     assistantConnectorStore,
     connectorGrantStore,
     connectorInstanceStore,
+    workspaceToolPolicyStore,
     workerManager,
     workerRunsStore,
     knowledgeStore,
@@ -3653,6 +3663,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     generateSynthesize,
     connectorStore,
     connectorInstanceStore,
+    workspaceToolPolicyStore,
     mcpSettingsStore,
     assistantConnectorStore,
     assistantConnectorGrantsStore,

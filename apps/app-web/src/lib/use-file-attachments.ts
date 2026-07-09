@@ -57,6 +57,16 @@ export type FileAttachmentsApi = {
   upload: (files: FileList | File[]) => Promise<void>;
   remove: (localId: string) => void;
   clear: () => void;
+  /**
+   * Empty the tray on send WITHOUT revoking the ready (`done`) chips' preview
+   * object URLs — ownership of those URLs transfers to the just-sent user
+   * message, which renders them as thumbnails until a reload rebuilds the image
+   * from the server-persisted copy. Uploading / errored chips are dropped and
+   * their URLs revoked as usual. The host snapshots the chips it needs from
+   * `attachments` (same render) before calling this, so it returns nothing.
+   * `clear()` (revokes everything) is still the right call for an abandoned tray.
+   */
+  detach: () => void;
 };
 
 type UploadResponse = {
@@ -103,11 +113,36 @@ export function markStagedError(
   );
 }
 
+/**
+ * The ready (`done`, uploaded) chips — the ones that ride the send and whose
+ * previews the sent message adopts. The single definition of "handed off";
+ * both `readyFileIds` (turn body) and `previewUrlsToRevokeOnDetach` (which URLs
+ * to keep alive) derive from it, so the revoke side can never disagree with the
+ * snapshot side and orphan-revoke a URL the message still shows.
+ */
+export function readyAttachments(
+  attachments: ReadonlyArray<Attachment>,
+): Attachment[] {
+  return attachments.filter((a) => a.status === "done" && !!a.fileId);
+}
+
 /** Ready (`done`) file ids, in chip order. */
 export function readyFileIds(attachments: ReadonlyArray<Attachment>): string[] {
+  return readyAttachments(attachments).map((a) => a.fileId!);
+}
+
+/**
+ * The preview object URLs to revoke when the tray is detached on send: every
+ * chip's URL EXCEPT the ready ones, whose URLs are handed to the sent message
+ * and must stay valid for the thumbnail. Pure — unit-tested without a DOM.
+ */
+export function previewUrlsToRevokeOnDetach(
+  attachments: ReadonlyArray<Attachment>,
+): string[] {
+  const keep = new Set(readyAttachments(attachments).map((a) => a.localId));
   return attachments
-    .filter((a) => a.status === "done" && !!a.fileId)
-    .map((a) => a.fileId!);
+    .filter((a) => !!a.previewUrl && !keep.has(a.localId))
+    .map((a) => a.previewUrl!);
 }
 
 /**
@@ -198,10 +233,21 @@ export function useFileAttachments(
     });
   }, []);
 
+  const detach = React.useCallback(() => {
+    setAttachments((prev) => {
+      // Keep the handed-off (ready) chips' object URLs alive — the sent message
+      // now owns them. Revoke only the chips being dropped (uploading/errored).
+      for (const url of previewUrlsToRevokeOnDetach(prev)) {
+        URL.revokeObjectURL(url);
+      }
+      return [];
+    });
+  }, []);
+
   const fileIds = React.useCallback(() => readyFileIds(attachments), [attachments]);
 
   const uploading = attachments.some((a) => a.status === "uploading");
   const hasReady = attachments.some((a) => a.status === "done" && !!a.fileId);
 
-  return { attachments, uploading, hasReady, fileIds, upload, remove, clear };
+  return { attachments, uploading, hasReady, fileIds, upload, remove, clear, detach };
 }

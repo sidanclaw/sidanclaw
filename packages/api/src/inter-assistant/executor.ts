@@ -102,6 +102,7 @@ export type CalleeExecutorOptions = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   /** Stage 5: enables team-native connector_instance consumption. */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
+  workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
   /**
@@ -462,6 +463,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           gdriveFilesStore: options.gdriveFilesStore,
           connectorGrantStore: options.connectorGrantStore,
           connectorInstanceStore: options.connectorInstanceStore,
+          workspaceToolPolicyStore: options.workspaceToolPolicyStore,
           assistantTeamId: calleeAssistant.workspaceId ?? null,
           engineHooks: options.engineHooks,
           // KB write tools are chat-only (D2): the A2A callee path strips
@@ -1234,11 +1236,23 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         ? `\n\n## Output contract\nThis step's deliverable is bound to blueprint \`${params.blueprintId}\`. Before finishing, persist the result as its typed record: call \`saveBlueprintRecord\` with blueprint "${params.blueprintId}", a \`subject\` naming what this run is about, and \`fields\` keyed by the blueprint's field keys (call \`listBlueprints\` first if unsure of the keys). Saving the record is part of completing the step — the record, not your reply text, is what later steps and other workflows read.`
         : ''
 
+    // Slack-delivery formatting: this step's text output is pushed to a Slack
+    // channel after the consult (`deliver.channelType === 'slack'`). Slack
+    // mentions only notify via real member ids, so tell the callee up front —
+    // it copies ids from the step prompt instead of improvising `@name` text
+    // (the mis-tagged standup incident). Dynamic injection gated on the
+    // ACTUAL delivery target, never a static Layer-1 claim.
+    const deliveryFormatBlock =
+      params.deliverTarget?.channelType === 'slack'
+        ? `\n\n## Delivery formatting\nYour final message text will be posted to a Slack channel. To mention (notify) a person, use Slack mention syntax \`<@MEMBER_ID>\` with a real member id (ids look like \`U0123ABCD\` and are given in the task prompt when tagging is expected) — copy ids exactly as provided. Never write \`<@handle>\` or plain \`@name\`: both render as inert text and notify nobody. If no member id was provided for a person, refer to them by plain name without the @ sign.`
+        : ''
+
     // The synthesis loop sees the gathered findings (research fan-out only);
     // compaction above used the un-injected prompt, which is correct.
     const loopSystemPrompt =
       (researchContext ? buildPreflightPrompt(fullSystemPrompt, researchContext) : fullSystemPrompt) +
-      outputBindingBlock
+      outputBindingBlock +
+      deliveryFormatBlock
 
     // When the blueprint-research fill authored the page above, SKIP the
     // free-form authoring loop (don't double-author) — but stay inside this

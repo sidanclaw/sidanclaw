@@ -13,6 +13,8 @@ import {
   applyUploadResult,
   imageFilesFromClipboard,
   markStagedError,
+  previewUrlsToRevokeOnDetach,
+  readyAttachments,
   readyFileIds,
   type Attachment,
 } from "../use-file-attachments";
@@ -81,6 +83,41 @@ describe("[COMP:app-web/file-attachments] upload reconciliation", () => {
       { ...staged("d"), status: "done", fileId: "file_d" },
     ];
     expect(readyFileIds(list)).toEqual(["file_a", "file_d"]);
+  });
+
+  it("readyAttachments keeps only done+fileId chips (the ones handed to the message)", () => {
+    const list: Attachment[] = [
+      { ...staged("a"), status: "done", fileId: "file_a" },
+      { ...staged("b"), status: "done" }, // done but no fileId — not ready
+      { ...staged("c"), status: "uploading" },
+    ];
+    expect(readyAttachments(list).map((a) => a.localId)).toEqual(["a"]);
+  });
+});
+
+describe("[COMP:app-web/file-attachments] detach preview-URL retention", () => {
+  function withPreview(a: Attachment, url: string): Attachment {
+    return { ...a, previewUrl: url };
+  }
+
+  it("revokes ONLY the dropped chips' URLs, keeping the handed-off (ready) ones alive", () => {
+    // The just-sent message adopts the ready image's object URL for its
+    // thumbnail — detach must NOT revoke it, or the thumbnail breaks on
+    // re-render. The dropped uploading/errored chips' URLs are freed.
+    const list: Attachment[] = [
+      withPreview({ ...staged("ready"), status: "done", fileId: "f1" }, "blob:ready"),
+      withPreview({ ...staged("err"), status: "error", error: "x" }, "blob:err"),
+      withPreview({ ...staged("up"), status: "uploading" }, "blob:up"),
+    ];
+    expect(previewUrlsToRevokeOnDetach(list)).toEqual(["blob:err", "blob:up"]);
+  });
+
+  it("ignores chips with no previewUrl (non-image files)", () => {
+    const list: Attachment[] = [
+      { ...staged("pdf"), status: "done", fileId: "f1" }, // no previewUrl
+      withPreview({ ...staged("txt"), status: "error", error: "x" }, "blob:txt"),
+    ];
+    expect(previewUrlsToRevokeOnDetach(list)).toEqual(["blob:txt"]);
   });
 });
 

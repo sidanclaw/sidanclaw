@@ -158,7 +158,10 @@ import {
   extractToolUses,
   fetchLatestSession,
   fetchSessionMessages,
+  parseMessageAttachments,
+  type MessageAttachmentRef,
 } from "@/lib/api/sessions";
+import { MessageAttachments } from "@/components/doc/message-attachment-card";
 import {
   fetchPendingQuestion,
   submitAnswer,
@@ -170,7 +173,11 @@ import { useT, format } from "@/lib/i18n/client";
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
 import type { AssistantRunState } from "@sidanclaw/doc-model";
 import { cn } from "@/lib/utils";
-import { imageFilesFromClipboard, useFileAttachments } from "@/lib/use-file-attachments";
+import {
+  imageFilesFromClipboard,
+  readyAttachments,
+  useFileAttachments,
+} from "@/lib/use-file-attachments";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { useAutoGrowTextarea } from "@/lib/use-auto-grow-textarea";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
@@ -278,7 +285,18 @@ type ViewAttachment = {
 };
 
 /** Extends chat-ui's Message with the per-message view list. */
-type MessageWithViews = Message & { views?: ViewAttachment[] };
+type MessageWithViews = Message & {
+  views?: ViewAttachment[];
+  /**
+   * The user's OWN uploaded attachments (pasted screenshots, picked/dropped
+   * files), shown as thumbnail/file cards on their message bubble. On the live
+   * send path these carry object-URL previews handed off from the composer
+   * tray; on session restore they carry base64 thumbnails parsed from the
+   * persisted `<attached_file>` blocks. Distinct from `fileAttachments`, which
+   * are the assistant's outbound `sendFile` download cards.
+   */
+  userAttachments?: MessageAttachmentRef[];
+};
 
 /**
  * `ToolUsed` extended with optional per-op build-log lines for `patchPage`.
@@ -800,6 +818,23 @@ export function FloatingChat({
   // Per-turn buffers — keyed by toolUseId / URL so re-emits replace prior entry.
   const turnViewsRef = useRef<ViewAttachment[]>([]);
   const turnTextRef = useRef("");
+  // A multi-step turn streams text in segments separated by tool activity:
+  // any prose the model emits alongside/around an intermediate tool step is
+  // step narration, NOT the answer — the answer is the LAST text segment
+  // (the tool-free synthesis turn). Without segmenting, a stray token the
+  // model glues onto a tool-call turn (observed: Gemini echoing a `"20"`
+  // text part next to an `inspectMyActivity(limit:20)` call) gets concatenated
+  // in front of the real answer, e.g. "20I have diagnosed…".
+  //
+  // `tool_start` arms this flag (once per segment) and clears the live stream
+  // buffer immediately, so the stale segment stops showing in the reply
+  // preview while the tool runs. The next `text_delta` then discards the prior
+  // segment from the finalized-message buffer (`turnTextRef`) before appending.
+  // The finalized-buffer discard is deliberately LAZY (arm-then-discard-on-
+  // next-text) rather than eager: a turn that answers and THEN calls a
+  // bookkeeping tool (text, then `saveMemory`, then end-of-turn) has no later
+  // text to trigger the discard, so `turnTextRef` keeps that answer.
+  const pendingAnswerResetRef = useRef(false);
   const turnCitationsRef = useRef<CitationSource[]>([]);
   // Outbound file attachments (`sendFile`) — set by the `attachments` SSE
   // event, merged into the finalized assistant message at stream end.
@@ -1093,6 +1128,7 @@ export function FloatingChat({
   const resetTurnBuffers = useCallback(() => {
     turnViewsRef.current = [];
     turnTextRef.current = "";
+    pendingAnswerResetRef.current = false;
     turnCitationsRef.current = [];
     turnFileAttachmentsRef.current = [];
     turnToolsRef.current = [];
@@ -1165,14 +1201,29 @@ export function FloatingChat({
       const anchorBlockId = override?.docAnchorBlockId;
 
       const localUserId = `local-${Date.now()}`;
-      session.appendMessage({
+      // Snapshot the ready chips (this render) so the sent bubble shows the
+      // user's own images/files immediately — otherwise they upload + ride the
+      // turn as `fileIds` but leave no visible record. Reuse each chip's preview
+      // object URL as the thumbnail; `att.detach()` (below) clears the tray
+      // WITHOUT revoking these, transferring URL ownership to the message.
+      const userAttachments: MessageAttachmentRef[] = readyAttachments(
+        att.attachments,
+      ).map((a) => ({
+        id: a.fileId!,
+        name: a.fileName,
+        mime: a.mimeType,
+        ...(a.previewUrl ? { dataUrl: a.previewUrl } : {}),
+      }));
+      const userMessage: MessageWithViews = {
         id: localUserId,
         role: "user",
         text: trimmed,
         timestamp: new Date(),
-      });
+        ...(userAttachments.length > 0 ? { userAttachments } : {}),
+      };
+      session.appendMessage(userMessage);
       setInput("");
-      att.clear();
+      att.detach();
       setError(null);
       setNotice(null);
       setResumePolling(false);
@@ -1254,6 +1305,16 @@ export function FloatingChat({
             case "text_delta": {
               const delta = typeof payload.text === "string" ? payload.text : "";
               if (delta) {
+                // A new answer segment is starting after intermediate tool
+                // activity — the prior segment was step narration, not the
+                // answer. Discard it from the finalized-message buffer so only
+                // the last segment survives. (`tool_start` already cleared the
+                // live stream buffer when it armed this flag.) See
+                // `pendingAnswerResetRef` above.
+                if (pendingAnswerResetRef.current) {
+                  pendingAnswerResetRef.current = false;
+                  turnTextRef.current = "";
+                }
                 turnTextRef.current += delta;
                 session.dispatch({ type: "stream/append", text: delta });
               }
@@ -1303,6 +1364,18 @@ export function FloatingChat({
               // Dedup — re-emits keep the existing row (status may already
               // be `done` from a retry replay).
               if (turnToolsRef.current.some((t) => t.id === id)) break;
+              // A tool step is beginning: any answer prose accumulated so far
+              // was step narration, not the final answer. Arm the segment
+              // reset so the NEXT `text_delta` discards it from the finalized
+              // buffer (lazy — an answer-then-tool turn with no trailing text
+              // keeps its answer), and clear the live stream buffer now so the
+              // stale segment doesn't linger in the reply preview while the
+              // tool runs. Guarded to fire once per segment (no redundant
+              // dispatches across a multi-tool step). See `pendingAnswerResetRef`.
+              if (!pendingAnswerResetRef.current) {
+                pendingAnswerResetRef.current = true;
+                session.dispatch({ type: "stream/reset" });
+              }
               toolStartTimesRef.current.set(id, performance.now());
               const workerId =
                 typeof payload.workerId === "string"
@@ -2734,10 +2807,10 @@ function coercePayload(data: unknown): Record<string, unknown> {
 function mapSessionRows(
   rows: Awaited<ReturnType<typeof fetchSessionMessages>>,
   narration: NarrationDict,
-): Message[] {
+): MessageWithViews[] {
   return rows
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => {
+    .map((m): MessageWithViews => {
       const toolsUsed =
         m.role === "assistant"
           ? extractToolUses(m.content).map((use): ToolUsed => {
@@ -2755,6 +2828,12 @@ function mapSessionRows(
               };
             })
           : [];
+      // User rows: split the persisted body into clean text + structured
+      // attachment refs (base64 image thumbnails), so a restored message shows
+      // the same thumbnail cards as the live send — not the "📎 filename"
+      // placeholder `extractMessageText` leaves behind.
+      const parsedUser =
+        m.role === "user" ? parseMessageAttachments(m.content) : null;
       return {
         id: m.id,
         role: m.role as "user" | "assistant",
@@ -2763,15 +2842,23 @@ function mapSessionRows(
         text:
           m.role === "assistant"
             ? stripFollowUps(extractMessageText(m.content))
-            : extractMessageText(m.content),
+            : (parsedUser?.text ?? extractMessageText(m.content)),
         timestamp: new Date(m.timestamp),
         ...(toolsUsed.length > 0 ? { toolsUsed } : {}),
         ...(m.attachments && m.attachments.length > 0
           ? { fileAttachments: m.attachments }
           : {}),
+        ...(parsedUser && parsedUser.attachments.length > 0
+          ? { userAttachments: parsedUser.attachments }
+          : {}),
       };
     })
-    .filter((m) => m.text.trim().length > 0 || m.fileAttachments?.length);
+    .filter(
+      (m) =>
+        m.text.trim().length > 0 ||
+        m.fileAttachments?.length ||
+        m.userAttachments?.length,
+    );
 }
 
 /**
@@ -3021,9 +3108,18 @@ function MessageBubble({
             small accents (sparkle/spinner); a full-blue bubble was the loudest,
             least-cohesive element on the dark theme and white-on-blue missed
             WCAG AA (≈3.9:1). `--secondary` reads ~9:1 in both modes. */}
-        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] text-secondary-foreground shadow-sm break-words whitespace-pre-wrap">
-          {message.text}
-        </div>
+        {message.text ? (
+          <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] text-secondary-foreground shadow-sm break-words whitespace-pre-wrap">
+            {message.text}
+          </div>
+        ) : null}
+        {/* The user's own uploaded attachments (pasted images / picked files) —
+            image thumbnails or file cards, right-aligned under the bubble. */}
+        {message.userAttachments?.length ? (
+          <div className="w-full max-w-[280px]">
+            <MessageAttachments attachments={message.userAttachments} />
+          </div>
+        ) : null}
         {message.text ? (
           <div className="flex items-center gap-1 -mr-1 pt-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
             <IconActionButton
