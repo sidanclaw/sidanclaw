@@ -16,6 +16,14 @@ vi.mock('../../db/channels-store.js', () => ({
   findOrCreateChannelForWorkspaceConnect: vi.fn(),
 }))
 
+// Only `queryWithRLS` is stubbed (the channel-destinations read) — the rest
+// of the module stays real because other modules in the import graph pull
+// their own named exports from it at load time.
+vi.mock('../../db/client.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../db/client.js')>()),
+  queryWithRLS: vi.fn(),
+}))
+
 vi.mock('@sidanclaw/channels', () => ({
   validateSlackCredentials: vi.fn(),
   validateTelegramCredentials: vi.fn(),
@@ -53,6 +61,7 @@ import {
   createSlackApi,
 } from '@sidanclaw/channels'
 import { channelsRoutes } from '../channels.js'
+import { queryWithRLS } from '../../db/client.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { DiscordConnectorClient } from '../../discord/connector-client.js'
@@ -79,6 +88,7 @@ function buildApp(
     integrationStore?: ChannelIntegrationStore
     apiUrl?: string
     discordConnector?: DiscordConnectorClient
+    telegramBotToken?: string
   } = {},
 ) {
   const role = opts.role === undefined ? 'admin' : opts.role
@@ -91,6 +101,7 @@ function buildApp(
       integrationStore: opts.integrationStore,
       apiUrl: opts.apiUrl,
       discordConnector: opts.discordConnector,
+      telegramBotToken: opts.telegramBotToken,
     }),
     userId ? { userId } : undefined,
   )
@@ -629,6 +640,142 @@ describe('[COMP:api/slack-channels-route] GET slack-channels', () => {
   it('rejects an unauthenticated request with 401', async () => {
     const res = await request(buildApp({ userId: null })).get(
       '/api/workspaces/ws-1/slack-channels',
+    )
+    expect(res.status).toBe(401)
+  })
+})
+
+describe('[COMP:api/channel-destinations-route] GET channel-destinations', () => {
+  type DestRow = { channelType: string; channelId: string; title: string | null; lastActiveAt: Date }
+  function destRow(over: Partial<DestRow> = {}): DestRow {
+    return {
+      channelType: 'telegram',
+      channelId: '880211324',
+      title: null,
+      lastActiveAt: new Date('2026-06-29T09:45:15Z'),
+      ...over,
+    }
+  }
+  function mockRows(rows: DestRow[]) {
+    vi.mocked(queryWithRLS).mockResolvedValue({ rows } as never)
+  }
+  function telegramIntegrationStore(): ChannelIntegrationStore {
+    return {
+      listForWorkspace: vi
+        .fn()
+        .mockResolvedValue([makeIntegration({ id: 'int-tg', channelType: 'telegram' })]),
+      getForUserWithCredentials: vi
+        .fn()
+        .mockResolvedValue({ credentials: { bot_token: 'byo-token' } }),
+    } as unknown as ChannelIntegrationStore
+  }
+  function telegramApi(getChat: ReturnType<typeof vi.fn>) {
+    return { getChat } as unknown as ReturnType<typeof createTelegramApi>
+  }
+
+  it('drops rows whose id cannot be valid for their channel type', async () => {
+    mockRows([
+      // The two mistyped legacy shapes from the cross-wire delivery bug:
+      destRow({ channelType: 'slack', channelId: '3fa7eadc-5316-4677-a75c-90bdd16f739c' }),
+      destRow({ channelType: 'slack', channelId: '880211324' }),
+      destRow({ channelType: 'slack', channelId: 'C0BB4AK5BHB' }),
+      destRow({ channelType: 'telegram', channelId: 'not-a-chat-id' }),
+      destRow({ channelType: 'telegram', channelId: '-100555' }),
+      // WhatsApp JIDs pass through unfiltered.
+      destRow({ channelType: 'whatsapp', channelId: '1203630@g.us' }),
+    ])
+    const res = await request(buildApp()).get('/api/workspaces/ws-1/channel-destinations')
+    expect(res.status).toBe(200)
+    expect(res.body.destinations.map((d: { channelId: string }) => d.channelId)).toEqual([
+      'C0BB4AK5BHB',
+      '-100555',
+      '1203630@g.us',
+    ])
+  })
+
+  it('resolves a telegram group title via the BYO bot without consulting the default bot', async () => {
+    mockRows([destRow({ channelId: '-100555' })])
+    const getChat = vi.fn().mockResolvedValue({ id: -100555, type: 'supergroup', title: 'Dev Work' })
+    vi.mocked(createTelegramApi).mockReturnValue(telegramApi(getChat))
+    const res = await request(
+      buildApp({ integrationStore: telegramIntegrationStore(), telegramBotToken: 'default-token' }),
+    ).get('/api/workspaces/ws-1/channel-destinations')
+    expect(res.status).toBe(200)
+    expect(res.body.destinations[0]).toMatchObject({ channelId: '-100555', title: 'Dev Work' })
+    // BYO token is tried first; the hit short-circuits the default bot.
+    expect(vi.mocked(createTelegramApi).mock.calls[0][0]).toEqual({ token: 'byo-token' })
+    expect(getChat).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to the hosted default bot when the BYO bot cannot see the chat', async () => {
+    mockRows([destRow({ channelId: '880211324' })])
+    const byoGetChat = vi.fn().mockRejectedValue(new Error('Telegram API getChat: chat not found'))
+    const defaultGetChat = vi
+      .fn()
+      .mockResolvedValue({ id: 880211324, type: 'private', first_name: 'Hinson', last_name: 'Wong' })
+    vi.mocked(createTelegramApi)
+      .mockReturnValueOnce(telegramApi(byoGetChat))
+      .mockReturnValueOnce(telegramApi(defaultGetChat))
+    const res = await request(
+      buildApp({ integrationStore: telegramIntegrationStore(), telegramBotToken: 'default-token' }),
+    ).get('/api/workspaces/ws-1/channel-destinations')
+    expect(res.body.destinations[0].title).toBe('Hinson Wong')
+    expect(vi.mocked(createTelegramApi).mock.calls.map((c) => c[0])).toEqual([
+      { token: 'byo-token' },
+      { token: 'default-token' },
+    ])
+  })
+
+  it('falls back to @username for a private chat with no name', async () => {
+    mockRows([destRow({ channelId: '424242' })])
+    const getChat = vi.fn().mockResolvedValue({ id: 424242, type: 'private', username: 'hinson' })
+    vi.mocked(createTelegramApi).mockReturnValue(telegramApi(getChat))
+    const res = await request(
+      buildApp({ telegramBotToken: 'default-token' }),
+    ).get('/api/workspaces/ws-1/channel-destinations')
+    expect(res.body.destinations[0].title).toBe('@hinson')
+  })
+
+  it('keeps the row with a null title when no bot can resolve the chat', async () => {
+    mockRows([destRow({ channelId: '880211324' })])
+    const getChat = vi.fn().mockRejectedValue(new Error('Telegram API getChat: chat not found'))
+    vi.mocked(createTelegramApi).mockReturnValue(telegramApi(getChat))
+    const res = await request(
+      buildApp({ integrationStore: telegramIntegrationStore(), telegramBotToken: 'default-token' }),
+    ).get('/api/workspaces/ws-1/channel-destinations')
+    expect(res.status).toBe(200)
+    expect(res.body.destinations[0]).toMatchObject({ channelId: '880211324', title: null })
+  })
+
+  it('skips resolution entirely when no bot token is configured', async () => {
+    mockRows([destRow({ channelId: '880211324' })])
+    const res = await request(buildApp()).get('/api/workspaces/ws-1/channel-destinations')
+    expect(res.status).toBe(200)
+    expect(res.body.destinations[0].title).toBeNull()
+    expect(vi.mocked(createTelegramApi)).not.toHaveBeenCalled()
+  })
+
+  it('never overwrites a session title with a resolved name', async () => {
+    mockRows([destRow({ channelId: '880211324', title: 'Standup thread' })])
+    const getChat = vi.fn()
+    vi.mocked(createTelegramApi).mockReturnValue(telegramApi(getChat))
+    const res = await request(
+      buildApp({ telegramBotToken: 'default-token' }),
+    ).get('/api/workspaces/ws-1/channel-destinations')
+    expect(res.body.destinations[0].title).toBe('Standup thread')
+    expect(getChat).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-member with 403', async () => {
+    const res = await request(buildApp({ role: null })).get(
+      '/api/workspaces/ws-1/channel-destinations',
+    )
+    expect(res.status).toBe(403)
+  })
+
+  it('rejects an unauthenticated request with 401', async () => {
+    const res = await request(buildApp({ userId: null })).get(
+      '/api/workspaces/ws-1/channel-destinations',
     )
     expect(res.status).toBe(401)
   })

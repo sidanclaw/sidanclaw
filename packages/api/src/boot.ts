@@ -304,6 +304,7 @@ import { internalIngestRoutes } from './doc/internal-ingest-route.js'
 import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanout.js'
+import { setMediaTokenSecret } from './media-token.js'
 import { setTaskEventDispatcher } from './task-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
@@ -709,6 +710,9 @@ export interface ChannelHostHooks {
   slackIngestChannelMediaRef?: Parameters<typeof slackRoutes>[0]['ingestChannelMediaRef']
   /** GCS channel-media intake for Discord attachments (closed). */
   discordIngestChannelMediaRef?: Parameters<typeof discordRoutes>[0]['ingestChannelMediaRef']
+  /** GCS channel-media intake for Telegram BYO files (closed; the official
+   *  shared-bot route stays closed and uses the same closed builder). */
+  telegramIngestChannelMediaRef?: Parameters<typeof telegramByoRoutes>[0]['ingestChannelMediaRef']
   /** Recording-to-brain transcription + credit surcharge (closed). */
   recordingIngest?: import('./routes/telegram-byo.js').ChannelRecordingIngest
 }
@@ -823,6 +827,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (!env.JWT_SECRET) {
     throw new Error('[boot] JWT_SECRET is required to run this service.')
   }
+  // Bind the media-token signing secret for the channel pipeline's actor
+  // media tokens (late-bound seam — see media-token.ts).
+  setMediaTokenSecret(env.JWT_SECRET)
 
   const app = express()
   const port = parseInt(env.PORT || new URL(env.API_URL).port || '4000')
@@ -4565,6 +4572,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       integrationStore: integrationStore ?? undefined,
       apiUrl: env.API_URL,
       discordConnector,
+      // Fallback bot for naming sessions-derived telegram delivery destinations.
+      telegramBotToken: env.TELEGRAM_BOT_TOKEN,
     }))
 
     // Telegram / Slack account linking — web-side of the link-code handshake.
@@ -4583,11 +4592,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         assistantConnectorStore, connectorGrantStore, connectorInstanceStore, knowledgeStore,
         gdriveFilesStore, workspaceFilesStore, filesApi: filesApi ?? undefined, analytics,
         skillStore, pendingMessageStore, deferredConfirmationStore, episodicStore,
-        sessionStateStore, voiceTranscription,
+        sessionStateStore, voiceTranscription, workspaceToolPolicyStore,
         recordingIngest: channelHosts.recordingIngest,
+        ingestChannelMediaRef: channelHosts.telegramIngestChannelMediaRef,
+        artifactPromoter, fileStore,
       }))
       app.use('/webhook/slack', slackRoutes({
         ingestChannelMediaRef: channelHosts.slackIngestChannelMediaRef,
+        artifactPromoter,
         provider, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, integrationStore, channelUserStore, linkedAccountStore, linkCodeStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -4600,6 +4612,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       if (env.DISCORD_CONNECTOR_SECRET) {
         app.use('/internal/discord', discordRoutes({
           ingestChannelMediaRef: channelHosts.discordIngestChannelMediaRef,
+          artifactPromoter,
           connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools, capabilityStore, memoryStore, usageStore, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,

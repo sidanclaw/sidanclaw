@@ -95,6 +95,14 @@ export type ChannelsRouteOptions = {
    * if missing.
    */
   discordConnector?: DiscordConnectorClient
+  /**
+   * Hosted default Telegram bot token (`env.TELEGRAM_BOT_TOKEN`). Fallback bot
+   * for resolving display names of sessions-derived telegram delivery
+   * destinations when the workspace has no BYO bot (or its bot isn't in the
+   * chat). Optional — a deployment without a default bot skips resolution and
+   * the picker shows raw chat ids.
+   */
+  telegramBotToken?: string
 }
 
 const updateSchema = z.object({
@@ -135,6 +143,33 @@ const connectDiscordSchema = z.object({
   defaultAssistantId: z.string().uuid().nullish(),
   displayName: z.string().min(1).max(200).optional(),
 }).strict()
+
+/**
+ * Per-type plausibility of a sessions-derived destination id. Rows whose
+ * `channel_id` cannot be a valid id for their `channel_type` are dropped from
+ * the deliver picker's option list: the pre-fix cross-wire delivery bug minted
+ * `channel_type='slack'` session rows keyed by a Telegram chat id and by an
+ * internal `channels.id` UUID, and those rows persist in `sessions`. Filtering
+ * server-side keeps them out of every consumer, including stale clients.
+ * WhatsApp JID shapes vary too much to police — they pass through unfiltered.
+ */
+const DESTINATION_ID_SHAPE: Record<string, RegExp> = {
+  telegram: /^-?\d+$/,
+  slack: /^[CDG][A-Z0-9]+$/,
+}
+
+/** Per-`getChat` budget — naming is a nicety, never worth a slow editor load. */
+const TELEGRAM_GETCHAT_TIMEOUT_MS = 1500
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms)
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v) },
+      (e) => { clearTimeout(timer); reject(e) },
+    )
+  })
+}
 
 function serializeChannel(
   c: Channel,
@@ -205,11 +240,67 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     return new Map(rows.map((r) => [r.channelId, r]))
   }
 
+  /**
+   * Resolve display names for telegram destination chat ids via Bot API
+   * `getChat`. A chat is only visible to a bot that is in it, so the
+   * workspace's BYO bot is tried first, the hosted default bot second.
+   * Best-effort throughout: any failure (wrong bot, deleted chat, API down,
+   * timeout) leaves that id unnamed and the client falls back to the raw id.
+   * Tokens are used server-side only and never returned.
+   */
+  async function resolveTelegramTitles(
+    userId: string,
+    workspaceId: string,
+    chatIds: string[],
+  ): Promise<Map<string, string>> {
+    const names = new Map<string, string>()
+    if (chatIds.length === 0) return names
+
+    const tokens: string[] = []
+    if (opts.integrationStore) {
+      try {
+        const rows = await opts.integrationStore.listForWorkspace(userId, workspaceId)
+        const telegram = rows.find((r) => r.channelType === 'telegram')
+        if (telegram) {
+          const withCreds = await opts.integrationStore.getForUserWithCredentials(userId, telegram.id)
+          const byoToken = withCreds && (withCreds.credentials as { bot_token?: string }).bot_token
+          if (byoToken) tokens.push(byoToken)
+        }
+      } catch (err) {
+        console.warn('[channels/channel-destinations] BYO telegram lookup failed:', err instanceof Error ? err.message : err)
+      }
+    }
+    if (opts.telegramBotToken && !tokens.includes(opts.telegramBotToken)) {
+      tokens.push(opts.telegramBotToken)
+    }
+    if (tokens.length === 0) return names
+
+    const apis = tokens.map((token) => createTelegramApi({ token }))
+    await Promise.all(chatIds.map(async (chatId) => {
+      for (const api of apis) {
+        try {
+          const chat = await withTimeout(api.getChat(chatId), TELEGRAM_GETCHAT_TIMEOUT_MS)
+          const personal = [chat.first_name, chat.last_name].filter(Boolean).join(' ')
+          const name = chat.title ?? (personal || (chat.username ? `@${chat.username}` : ''))
+          if (name) { names.set(chatId, name); return }
+        } catch {
+          // Not this bot's chat (or transient failure) — try the next token.
+        }
+      }
+    }))
+    return names
+  }
+
   // GET /workspaces/:workspaceId/channel-destinations — recent distinct
   // (channel_type, channel_id) tuples from `sessions` joined to the
   // workspace's assistants. Powers the workflow editor's "deliver to"
   // picker so authors can pick a known chat the assistant has spoken in.
-  // Excludes the `notifications` placeholder channel id.
+  // Excludes the `notifications` placeholder channel id. Rows failing the
+  // per-type id-shape check are dropped (see DESTINATION_ID_SHAPE), and
+  // telegram ids are resolved to display names via `getChat` — both
+  // documented in docs/architecture/features/workflow.md → "Deliver
+  // destination picker (web builder)".
+  // [COMP:api/channel-destinations-route]
   router.get('/workspaces/:workspaceId/channel-destinations', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
@@ -238,11 +329,19 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
        LIMIT 200`,
       [workspaceId],
     )
+    const rows = result.rows.filter((r) => {
+      const shape = DESTINATION_ID_SHAPE[r.channelType]
+      return !shape || shape.test(r.channelId)
+    })
+    const unnamedTelegramIds = [...new Set(
+      rows.filter((r) => r.channelType === 'telegram' && !r.title).map((r) => r.channelId),
+    )]
+    const telegramNames = await resolveTelegramTitles(userId, workspaceId, unnamedTelegramIds)
     res.json({
-      destinations: result.rows.map((r) => ({
+      destinations: rows.map((r) => ({
         channelType: r.channelType,
         channelId: r.channelId,
-        title: r.title,
+        title: r.title ?? telegramNames.get(r.channelId) ?? null,
         lastActiveAt: r.lastActiveAt.toISOString(),
       })),
     })

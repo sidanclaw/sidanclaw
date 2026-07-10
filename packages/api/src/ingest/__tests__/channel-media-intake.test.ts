@@ -67,6 +67,19 @@ describe('[COMP:brain/channel-media-intake] ingestChannelMedia', () => {
     )
   })
 
+  it('AV → stamps sourceRef.storageUri when the ref is BYO (and omits it otherwise)', async () => {
+    const byoDeps = makeDeps()
+    await ingestChannelMedia({ ...baseRef, storageUri: 'gs://byo-bucket/ws-1/channel-media/abc' }, byoDeps)
+    expect((byoDeps.createEpisode as ReturnType<typeof vi.fn>).mock.calls[0][1].sourceRef).toMatchObject({
+      gcsKey: 'ws-1/channel-media/abc',
+      storageUri: 'gs://byo-bucket/ws-1/channel-media/abc',
+    })
+
+    const platformDeps = makeDeps()
+    await ingestChannelMedia(baseRef, platformDeps) // no storageUri
+    expect((platformDeps.createEpisode as ReturnType<typeof vi.fn>).mock.calls[0][1].sourceRef.storageUri).toBeUndefined()
+  })
+
   it('AV → resolves the workspace default blueprint at the enqueue edge and stores it on the job', async () => {
     const resolveWorkspaceDefaultBlueprint = vi.fn(async () => 'tpl-default')
     const deps = makeDeps({ resolveWorkspaceDefaultBlueprint })
@@ -90,10 +103,10 @@ describe('[COMP:brain/channel-media-intake] ingestChannelMedia', () => {
   })
 
   it('document → calls the document ingestor, never the recording path', async () => {
-    const ingestDocument = vi.fn(async () => ({ episodeId: 'doc-ep-1' }))
+    const ingestDocument = vi.fn(async () => ({ status: 'accepted' as const, episodeId: 'doc-ep-1' }))
     const deps = makeDeps({ ingestDocument })
     const res = await ingestChannelMedia({ ...baseRef, mime: 'application/pdf', fileName: 'spec.pdf' }, deps)
-    expect(res).toEqual({ status: 'ingested', kind: 'document', episodeId: 'doc-ep-1' })
+    expect(res).toEqual({ status: 'ingested', kind: 'document', episodeId: 'doc-ep-1', fileName: 'spec.pdf' })
     expect(ingestDocument).toHaveBeenCalledOnce()
     expect(deps.enqueueRecordingJob).not.toHaveBeenCalled()
   })
@@ -101,6 +114,56 @@ describe('[COMP:brain/channel-media-intake] ingestChannelMedia', () => {
   it('document with no handler wired → rejected', async () => {
     const res = await ingestChannelMedia({ ...baseRef, mime: 'application/pdf' }, makeDeps())
     expect(res).toEqual({ status: 'rejected', reason: 'no_document_handler' })
+  })
+
+  it('document over the parse cap → doc_too_large with MB numbers for the handoff copy', async () => {
+    const ingestDocument = vi.fn(async () => ({
+      status: 'too_large' as const,
+      sizeBytes: 30 * 1024 * 1024,
+      limitBytes: 25 * 1024 * 1024,
+    }))
+    const deps = makeDeps({ ingestDocument })
+    const res = await ingestChannelMedia({ ...baseRef, mime: 'application/pdf', fileName: 'big.pdf' }, deps)
+    expect(res).toEqual({ status: 'rejected', reason: 'doc_too_large', sizeMb: 30, limitMb: 25 })
+  })
+
+  it('document accepted on the artifact path carries fileId + path for the route reply', async () => {
+    const ingestDocument = vi.fn(async () => ({
+      status: 'accepted' as const,
+      episodeId: null,
+      fileId: 'wf-77',
+      path: '/uploads/channel/x-brief.pdf',
+    }))
+    const deps = makeDeps({ ingestDocument })
+    const res = await ingestChannelMedia({ ...baseRef, mime: 'application/pdf', fileName: 'brief.pdf' }, deps)
+    expect(res).toEqual({
+      status: 'ingested',
+      kind: 'document',
+      episodeId: null,
+      fileName: 'brief.pdf',
+      fileId: 'wf-77',
+      path: '/uploads/channel/x-brief.pdf',
+    })
+  })
+
+  it('document storage-quota failure → doc_storage_quota rejection', async () => {
+    const ingestDocument = vi.fn(async () => ({ status: 'storage_quota' as const }))
+    const deps = makeDeps({ ingestDocument })
+    const res = await ingestChannelMedia({ ...baseRef, mime: 'text/plain' }, deps)
+    expect(res).toEqual({ status: 'rejected', reason: 'doc_storage_quota' })
+  })
+
+  it('document with no assistant / empty parse → skipped arms (routes stay quiet)', async () => {
+    const noAssistant = vi.fn(async () => ({ status: 'skipped_no_assistant' as const }))
+    const resA = await ingestChannelMedia(
+      { ...baseRef, mime: 'text/plain' },
+      makeDeps({ ingestDocument: noAssistant }),
+    )
+    expect(resA).toEqual({ status: 'skipped', kind: 'document', reason: 'no_assistant' })
+
+    const empty = vi.fn(async () => ({ status: 'empty' as const }))
+    const resB = await ingestChannelMedia({ ...baseRef, mime: 'text/plain' }, makeDeps({ ingestDocument: empty }))
+    expect(resB).toEqual({ status: 'skipped', kind: 'document', reason: 'empty' })
   })
 
   it('unsupported mime → rejected, nothing created', async () => {
@@ -129,7 +192,7 @@ describe('[COMP:brain/channel-media-intake] ingestChannelMedia', () => {
 
 function makePreflight(overrides: Partial<NonNullable<ChannelMediaIntakeDeps['preflightConfirm']>> = {}) {
   return {
-    signedReadUrl: vi.fn(async (k: string) => `https://signed/${k}`),
+    signedReadUrl: vi.fn(async ({ gcsKey }: { gcsKey: string; workspaceId: string; storageUri?: string | null }) => `https://signed/${gcsKey}`),
     probeDurationMs: vi.fn(async () => 600_000), // 10 min
     surchargeCredits: vi.fn((s: number) => (s > 180 ? 1 : 0)),
     storePending: vi.fn(async () => ({ inserted: true })),

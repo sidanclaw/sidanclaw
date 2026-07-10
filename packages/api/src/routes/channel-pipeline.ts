@@ -28,6 +28,7 @@ import type { FilesApi, OutboundAttachment } from '@sidanclaw/core'
 import type { OutgoingDocument } from '@sidanclaw/channels'
 import { parseFollowUps } from '@sidanclaw/shared'
 import { runProactiveCompaction } from './proactive-compaction.js'
+import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { resolveReplyText } from './_reply-context.js'
@@ -43,6 +44,7 @@ import type {
   SessionStateStore, SessionStateRecord,
 } from '@sidanclaw/core'
 
+import { mintActorMediaToken } from '../media-token.js'
 import { findUserById } from '../db/users.js'
 import {
   findOrCreateSession, addSessionMessage, setSessionMessageChannelId,
@@ -56,6 +58,9 @@ import type { AssistantConnectorStore } from '../db/assistant-connector-store.js
 import type { PendingMessageStore } from '../db/pending-message-store.js'
 import type { SkillStore } from '../db/skill-store.js'
 import { injectMcpTools } from '../mcp/inject.js'
+import { createKnowledgeRepoWriter } from '../knowledge/repo-writer.js'
+import { createDbKnowledgeStore } from '../db/knowledge-store.js'
+import { createSyncCredentialProvider } from '../knowledge/sync-credentials.js'
 import { buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget } from './route-helpers.js'
 import { getConnectorUserId, getWorkspacePurpose, getWorkspacePlan, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import {
@@ -64,6 +69,8 @@ import {
 } from '../db/pending-recording-confirmations-store.js'
 import { buildPendingContext } from '../inter-assistant/pending-context.js'
 import { billingPartyForAssistant } from '../billing-party.js'
+import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
+import type { ArtifactPromoter } from '../files/artifact-promote.js'
 
 /**
  * Per-turn memory index cap — see chat.ts for the rationale and
@@ -298,6 +305,13 @@ export type ChannelPipelineParams = {
    * sent (channel + email + userId still are). See tool-hooks.md.
    */
   actorChannelId?: string | null
+  /**
+   * Pin the per-turn media token to a specific recording episode. Set by the
+   * WhatsApp video auto-turn to the episode it fired for, so media-fetching
+   * connectors (e.g. the highlights MCP) act on THAT video rather than the
+   * user's latest. Absent (interactive chat, non-video turns) ⇒ latest.
+   */
+  mediaEpisodeId?: string | null
   /** The incoming message text (used for pattern extraction & preflight). */
   messageText: string
   /**
@@ -305,6 +319,17 @@ export type ChannelPipelineParams = {
    * (Slack) build these before calling the pipeline.
    */
   userContentBlocks: ContentBlock[]
+  /**
+   * The adapter's raw inbound message text (`incoming.text`) BEFORE any
+   * attachment-context prefix or voice-transcript wrapper was prepended.
+   * When present, over the paste-promotion threshold, and `artifactPromoter`
+   * is wired, the pipeline promotes it to a durable workspace_files artifact
+   * and rewrites `messageText` + `userContentBlocks` to carry the manifest +
+   * head excerpt instead of the blob. Absent (or below threshold) ⇒ the turn
+   * is untouched. See large-content-artifacts §Phase 3.2 +
+   * sidanclaw/packages/api/src/files/paste-promotion.ts.
+   */
+  rawUserText?: string
   /** Whether this is a group chat (affects context assembly). */
   isGroupChat: boolean
   /**
@@ -362,6 +387,7 @@ export type ChannelPipelineParams = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   /** Stage 5: enables team-native connector_instance consumption. */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
+  workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace files store (Q3 §10). When set + the assistant has the
@@ -374,6 +400,13 @@ export type ChannelPipelineParams = {
    *  `turn_complete` for document delivery. Absent (dev without a blob
    *  client) → `sendFile` errors honestly on its missing-collector gate. */
   filesApi?: FilesApi
+  /**
+   * Promotes an over-threshold paste to a durable workspace_files artifact
+   * (large-content-artifacts §Phase 3.2, decision D6). Wired once at boot from
+   * the channel route options. Absent/null ⇒ pastes pass through untouched.
+   * See sidanclaw/packages/api/src/files/artifact-promote.ts.
+   */
+  artifactPromoter?: ArtifactPromoter | null
   skillStore?: SkillStore
   pendingMessageStore?: PendingMessageStore
   workerManager?: import('@sidanclaw/core').WorkerManager
@@ -410,15 +443,78 @@ export type ChannelPipelineParams = {
   voiceTranscriptionUsage?: { usage: TokenUsage | null; model: string } | null
 }
 
+// ── Large-paste intercept ────────────────────────────────────────
+
+/**
+ * Central large-paste promotion (large-content-artifacts §Phase 3.2, decision
+ * D6). A giant text paste arriving over any messaging channel is promoted to a
+ * durable workspace_files artifact; the returned `messageText` +
+ * `userContentBlocks` carry the manifest + head excerpt in place of the blob,
+ * so neither the persisted user turn nor the LLM input inlines the raw content.
+ *
+ * Returns the inputs untouched (a paste is never lost) when there is no
+ * `rawUserText`, no promoter, no workspace, the paste is below the token
+ * threshold, promotion fails, or `rawUserText` is not the literal tail of
+ * `messageText` (a shape we can't splice — the adapter prefixed a voice
+ * transcript or edit wrapper). The rebuilt `userContentBlocks` reaches BOTH
+ * the stored row and the LLM turn because the pipeline re-reads the persisted
+ * user message from the DB before the query loop.
+ *
+ * Tagged `[COMP:api/channel-paste-promotion]`.
+ */
+export async function promoteChannelPaste(input: {
+  rawUserText: string | undefined
+  messageText: string
+  userContentBlocks: ContentBlock[]
+  workspaceId: string | null
+  actingUserId: string
+  assistantId: string
+  artifactPromoter: ArtifactPromoter | null | undefined
+  channelType: string
+}): Promise<{ messageText: string; userContentBlocks: ContentBlock[] }> {
+  const { rawUserText, messageText, userContentBlocks, workspaceId, artifactPromoter } = input
+  if (!rawUserText || !artifactPromoter || !workspaceId || !shouldPromotePaste(rawUserText)) {
+    return { messageText, userContentBlocks }
+  }
+  if (!messageText.endsWith(rawUserText)) {
+    console.warn(
+      `[${input.channelType}] paste-promotion: message text does not end with the raw paste; keeping original`,
+    )
+    return { messageText, userContentBlocks }
+  }
+  try {
+    const promoted = await promotePastedText({
+      text: rawUserText,
+      workspaceId,
+      actingUserId: input.actingUserId,
+      assistantId: input.assistantId,
+      promote: artifactPromoter,
+    })
+    if (!promoted) return { messageText, userContentBlocks }
+    const splice = (s: string): string => s.slice(0, s.length - rawUserText.length) + promoted.replaced
+    return {
+      messageText: splice(messageText),
+      userContentBlocks: userContentBlocks.map((block) =>
+        block.type === 'text' && block.text.endsWith(rawUserText)
+          ? { ...block, text: splice(block.text) }
+          : block,
+      ),
+    }
+  } catch (err) {
+    console.error(`[${input.channelType}] paste-promotion failed (keeping original):`, err)
+    return { messageText, userContentBlocks }
+  }
+}
+
 // ── Pipeline ─────────────────────────────────────────────────────
 
 export async function processChannelMessage(params: ChannelPipelineParams): Promise<void> {
   const {
     userId, ownerId, assistant, isIdentified,
-    channelType, channelId, actorChannelId, messageText, userContentBlocks, isGroupChat,
+    channelType, channelId, actorChannelId, mediaEpisodeId, isGroupChat,
     modelAlias, adaptiveResearchEnabled, abortController,
     provider, systemPrompt, tools, memoryStore, usageStore,
-    analytics, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore, connectorInstanceStore,
+    analytics, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore,
     knowledgeStore, gdriveFilesStore, skillStore, pendingMessageStore, workerManager,
     episodicStore, sessionStateStore, workspaceFilesStore, filesApi,
     replyToMessageId, replyRaw, incomingChannelMessageId,
@@ -427,6 +523,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     hooks,
     capabilityStore,
   } = params
+
+  // `messageText` + `userContentBlocks` are `let` — the large-paste intercept
+  // below may rewrite them to a manifest + head excerpt before anything reads
+  // them (classifier, persist, query loop).
+  let messageText = params.messageText
+  let userContentBlocks = params.userContentBlocks
 
   // ── Session ──
   const session = await findOrCreateSession({
@@ -475,6 +577,21 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       await clearDowngradeNotice(session.id)
     }
   }
+  // ── Large-paste promotion (large-content-artifacts §Phase 3.2) ──
+  // Runs before the message is classified, persisted, or fed to the model, so
+  // a giant paste never reaches the classifier or the query loop as a blob.
+  // Failure keeps the original text. See `promoteChannelPaste` above.
+  ;({ messageText, userContentBlocks } = await promoteChannelPaste({
+    rawUserText: params.rawUserText,
+    messageText,
+    userContentBlocks,
+    workspaceId: assistant.workspaceId,
+    actingUserId: userId,
+    assistantId: assistant.id,
+    artifactPromoter: params.artifactPromoter,
+    channelType,
+  }))
+
   // Adaptive research entry — channels have no manual toggle, so when the
   // caller opts in we classify the message and upgrade the alias to
   // `research` (paid plans only). The downstream `resolveModel` honors plan
@@ -899,6 +1016,25 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const connectorUserId = await getConnectorUserId(ownerId, assistant.workspaceId)
   let unavailableCapabilities: string[] = []
   if (connectorStore && mcpSettingsStore) {
+    // Assistant KB repo writer — built per turn (pure closures, no I/O) over
+    // the same closed credential resolution the sync worker uses. Channel
+    // chats have a live Approve/Deny loop (`confirmationResolver` below), so
+    // this surface qualifies for `allowKnowledgeWrites` (D2 — chat-only).
+    const knowledgeRepoWriter = connectorInstanceStore && connectorGrantStore
+      ? createKnowledgeRepoWriter({
+          store: createDbKnowledgeStore(),
+          syncCredentials: createSyncCredentialProvider(connectorInstanceStore, connectorGrantStore),
+          recordEvent: ({ userId: eventUserId, eventName, metadata }) => {
+            const safe: Record<string, number | boolean | undefined | ReturnType<typeof sanitizeAnalytics>> = {}
+            for (const [k, v] of Object.entries(metadata)) {
+              if (typeof v === 'number' || typeof v === 'boolean' || v === undefined) safe[k] = v
+              else if (v === null) safe[k] = undefined
+              else safe[k] = sanitizeAnalytics(String(v))
+            }
+            analytics?.logEvent({ userId: eventUserId, eventName, channelType, metadata: safe })
+          },
+        })
+      : undefined
     try {
       const injection = await injectMcpTools({
         userId: connectorUserId,
@@ -909,10 +1045,16 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         assistantConnectorStore,
         userTimezone: channelUser?.timezone ?? undefined,
         knowledgeStore,
+        knowledgeRepoWriter,
+        allowKnowledgeWrites: true,
         gdriveFilesStore,
         connectorGrantStore,
         connectorInstanceStore,
+        workspaceToolPolicyStore,
         assistantTeamId: assistant.workspaceId ?? null,
+        // Workspace-files byte layer — `gmailSendMessage` attachments on
+        // channel turns (docs/architecture/integrations/gmail.md).
+        filesApi,
         // Actor identity for opted-in connectors. `actorChannelId` is the
         // channel-native id captured from the inbound webhook by the channel
         // route (Slack user id / Telegram @handle / WhatsApp phone); email +
@@ -923,6 +1065,16 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           id: actorChannelId ?? null,
           email: channelUser?.email ?? null,
           userId,
+          // Short-lived, user-scoped media capability token. Emitted only to
+          // connectors the user granted media access (`sendMediaToken`); lets
+          // them fetch this user's latest recording via /internal/media without
+          // any shared secret. The endpoint derives the user from the token's
+          // signed `sub`. See packages/api-platform/src/media-token.ts.
+          mediaToken: mintActorMediaToken({
+            sub: userId,
+            episodeId: mediaEpisodeId ?? undefined,
+            ttlMs: 5 * 60_000,
+          }) ?? undefined,
         },
       })
       unavailableCapabilities = injection.unavailable
@@ -1160,6 +1312,18 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           await hooks.onToolInput?.(event.id, event.name, event.input)
           break
         case 'tool_result':
+          // Realtime parity with the web chat lane (realtime-sync): a brain
+          // write from a Telegram / Slack / WhatsApp turn must repaint an
+          // open brain page the same way a web-chat write does. Same
+          // fire-and-forget map lookup chat.ts uses.
+          for (const block of event.results) {
+            if (block.type !== 'tool_result') continue
+            notifyBrainWriteIfMatch(
+              assistant.workspaceId,
+              block.name,
+              block.isError ?? false,
+            )
+          }
           await hooks.onToolResult?.(event.results)
           break
         case 'tool_confirmation_required':

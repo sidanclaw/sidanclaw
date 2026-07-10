@@ -47,6 +47,7 @@ import { billingPartyForAssistant } from '../billing-party.js'
 import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import { ensureSlackConnectorInstance } from '../ingest/slack-connector-instance.js'
+import { classifyMedia, buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 import { dispatchReactionFeedback } from '../feedback/reaction-dispatch.js'
 
 /**
@@ -124,6 +125,9 @@ type SlackRouteOptions = {
   workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
   /** Files orchestration API. Enables outbound documents (`sendFile`). */
   filesApi?: import('@sidanclaw/core').FilesApi
+  /** Promotes an over-threshold text paste to a durable artifact
+   *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
+  artifactPromoter?: import('@sidanclaw/api/files/artifact-promote.js').ArtifactPromoter | null
   /**
    * Route a pulled media reference (a download URL) through the channel-media
    * intake (audio/video → recording → brain). Boot wires this over
@@ -996,6 +1000,9 @@ type ProcessMessageParams = {
   /** Files orchestration API. Enables outbound documents (`sendFile`) —
    *  delivered via Slack's external upload flow (needs `files:write`). */
   filesApi?: import('@sidanclaw/core').FilesApi
+  /** Promotes an over-threshold text paste to a durable artifact
+   *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
+  artifactPromoter?: import('@sidanclaw/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingSlackConfirmations: Map<string, { resolver: ConfirmationResolver; toolCallId: string }>
@@ -1018,12 +1025,16 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
 
   // ── Slack-specific: download files and build content blocks ──
   const userContentBlocks: ContentBlock[] = []
-  // Route AUDIO/VIDEO attachments to the brain (transcribe → Pipeline B) — they
-  // are useless as an LLM content block. Additive: images/documents stay
-  // content blocks (existing behavior). Fire-and-forget; never blocks the reply.
+  // Route AUDIO/VIDEO + DOCUMENT attachments to the brain: AV → recording
+  // pipeline (transcribe → Pipeline B; useless as content blocks), documents →
+  // durable artifact + file_segments (large-content-artifacts §Phase 3.3).
+  // Documents ALSO stay content blocks for this turn (they ride both paths);
+  // AV stays excluded from blocks as before. Fire-and-forget; never blocks
+  // the reply.
+  const isAv = (m: string) => m.startsWith('audio/') || m.startsWith('video/')
   const brainMediaFiles =
     ingestChannelMediaRef && assistant.workspaceId && incoming.files?.length
-      ? incoming.files.filter((f) => f.mimeType.startsWith('audio/') || f.mimeType.startsWith('video/'))
+      ? incoming.files.filter((f) => classifyMedia(f.mimeType) !== 'unsupported')
       : []
   for (const f of brainMediaFiles) {
     ingestChannelMediaRef!({
@@ -1042,14 +1053,33 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         // send the templated ask. The user's reply turn drives the confirm tool.
         if (result?.status === 'pending_confirmation') {
           await adapter.sendMessage(incoming.channelId, { text: result.message, format: 'markdown' }, threadOpts)
+          return
+        }
+        // Document outcomes reply per §Phase 0.1/3.3; 'skipped' stays quiet.
+        if (result?.status === 'ingested' && result.kind === 'document') {
+          await adapter.sendMessage(
+            incoming.channelId,
+            { text: buildDocumentFiledReply(result.fileName), format: 'markdown' },
+            threadOpts,
+          )
+          return
+        }
+        if (result?.status === 'rejected' && result.reason === 'doc_too_large') {
+          await adapter.sendMessage(
+            incoming.channelId,
+            {
+              text: buildOversizeDocReply('https://app.sidan.ai', result.limitMb ?? 25, result.sizeMb ?? 0),
+              format: 'markdown',
+            },
+            threadOpts,
+          )
         }
       })
       .catch((err) => console.error('[slack] media→brain ingest failed:', err))
   }
-  // Content blocks: everything except the AV files routed to the brain above.
-  const contentBlockFiles = brainMediaFiles.length
-    ? incoming.files!.filter((f) => !brainMediaFiles.includes(f))
-    : (incoming.files ?? [])
+  // Content blocks: everything except the AV files routed to the brain above
+  // (documents ride BOTH paths — durable artifact + this turn's blocks).
+  const contentBlockFiles = (incoming.files ?? []).filter((f) => !isAv(f.mimeType))
   if (contentBlockFiles.length) {
     const downloads = await Promise.all(
       contentBlockFiles.map(async (file) => {
@@ -1167,6 +1197,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     actorChannelId: incoming.userId, // Slack user id (e.g. U0123) → X-Sidanclaw-Actor-Id
     messageText: incoming.text,
     userContentBlocks,
+    // Raw paste for the large-paste intercept (Slack has no prefix wrapper).
+    rawUserText: incoming.text ?? '',
     isGroupChat: incoming.isGroupChat,
     replyToMessageId: incoming.replyToMessageId ?? null,
     incomingChannelMessageId: incoming.messageId ?? null,
@@ -1188,6 +1220,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     gdriveFilesStore: params.gdriveFilesStore,
     workspaceFilesStore: params.workspaceFilesStore,
     filesApi: params.filesApi,
+    artifactPromoter: params.artifactPromoter ?? null,
     skillStore: params.skillStore,
     pendingMessageStore: params.pendingMessageStore,
     workerManager: params.workerManager,

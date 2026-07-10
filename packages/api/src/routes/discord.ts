@@ -21,6 +21,7 @@
  * Component tag: [COMP:api/discord-route].
  */
 
+import { timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
 import { createDiscordAdapter, respondToInteraction } from '@sidanclaw/channels'
 import type { IncomingMessage, OutgoingAction } from '@sidanclaw/channels'
@@ -37,6 +38,7 @@ import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@sidanclaw/shared'
 import { processChannelMessage } from './channel-pipeline.js'
 import { billingPartyForAssistant } from '../billing-party.js'
+import { classifyMedia, buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 
 export type DiscordRouteOptions = {
   /** Shared secret the connector presents on every call (DISCORD_CONNECTOR_SECRET). */
@@ -57,6 +59,9 @@ export type DiscordRouteOptions = {
   knowledgeStore?: import('@sidanclaw/core').KnowledgeStoreInterface
   gdriveFilesStore?: import('@sidanclaw/core').GDriveFilesStore
   workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
+  /** Promotes an over-threshold text paste to a durable artifact
+   *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
+  artifactPromoter?: import('@sidanclaw/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
@@ -125,6 +130,19 @@ const inboundSchema = z.object({
   }).passthrough(),
 })
 
+/**
+ * Constant-time shared-secret check. Fails closed: an empty/unset
+ * configured secret matches nothing — this router fronts `/channels`,
+ * which returns every Discord bot token, so a misconfigured mount must
+ * reject rather than wave callers through.
+ */
+function connectorSecretMatches(provided: unknown, expected: string): boolean {
+  if (typeof provided !== 'string' || expected.length === 0) return false
+  const a = Buffer.from(provided)
+  const b = Buffer.from(expected)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
 export function discordRoutes(options: DiscordRouteOptions): Router {
   const router = Router()
 
@@ -133,7 +151,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
 
   // ── Connector auth ────────────────────────────────────────────
   router.use((req, res, next) => {
-    if (req.headers['x-connector-secret'] !== options.connectorSecret) {
+    if (!connectorSecretMatches(req.headers['x-connector-secret'], options.connectorSecret)) {
       res.status(401).json({ error: 'Invalid or missing X-Connector-Secret' })
       return
     }
@@ -342,12 +360,14 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing, ingestChannelMediaRef } = params
     const channelId = incoming.channelId
 
-    // Route AUDIO/VIDEO attachments to the brain (transcribe → Pipeline B) — they
-    // are useless as an LLM content block. Additive: images/documents stay
-    // content blocks (existing behavior). Fire-and-forget.
+    // Route AUDIO/VIDEO + DOCUMENT attachments to the brain: AV → recording
+    // pipeline, documents → durable artifact + file_segments
+    // (large-content-artifacts §Phase 3.3). Documents ALSO stay content blocks
+    // for this turn; AV stays excluded as before. Fire-and-forget.
+    const isAv = (m: string) => m.startsWith('audio/') || m.startsWith('video/')
     const brainMediaFiles =
       ingestChannelMediaRef && assistant.workspaceId && incoming.files?.length
-        ? incoming.files.filter((f) => f.mimeType.startsWith('audio/') || f.mimeType.startsWith('video/'))
+        ? incoming.files.filter((f) => classifyMedia(f.mimeType) !== 'unsupported')
         : []
     for (const f of brainMediaFiles) {
       ingestChannelMediaRef!({
@@ -366,13 +386,23 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
           // invariant): send the ask. The user's reply drives the confirm tool.
           if (result?.status === 'pending_confirmation') {
             await adapter.sendMessage(channelId, { text: result.message })
+            return
+          }
+          // Document outcomes reply per §Phase 0.1/3.3; 'skipped' stays quiet.
+          if (result?.status === 'ingested' && result.kind === 'document') {
+            await adapter.sendMessage(channelId, { text: buildDocumentFiledReply(result.fileName) })
+            return
+          }
+          if (result?.status === 'rejected' && result.reason === 'doc_too_large') {
+            await adapter.sendMessage(channelId, {
+              text: buildOversizeDocReply('https://app.sidan.ai', result.limitMb ?? 25, result.sizeMb ?? 0),
+            })
           }
         })
         .catch((err) => console.error('[discord] media→brain ingest failed:', err))
     }
-    const contentBlockFiles = brainMediaFiles.length
-      ? incoming.files!.filter((f) => !brainMediaFiles.includes(f))
-      : (incoming.files ?? [])
+    // Documents ride BOTH paths — only AV is excluded from this turn's blocks.
+    const contentBlockFiles = (incoming.files ?? []).filter((f) => !isAv(f.mimeType))
 
     // ── Build content blocks (text + downloaded attachments) ──
     const userContentBlocks: ContentBlock[] = []
@@ -480,6 +510,8 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       channelId,
       messageText: incoming.text,
       userContentBlocks,
+      // Raw paste for the large-paste intercept (Discord has no prefix wrapper).
+      rawUserText: incoming.text ?? '',
       isGroupChat: incoming.isGroupChat,
       replyToMessageId: incoming.replyToMessageId ?? null,
       incomingChannelMessageId: incoming.messageId ?? null,
@@ -500,6 +532,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       knowledgeStore: options.knowledgeStore,
       gdriveFilesStore: options.gdriveFilesStore,
       workspaceFilesStore: options.workspaceFilesStore,
+      artifactPromoter: options.artifactPromoter ?? null,
       skillStore: options.skillStore,
       pendingMessageStore: options.pendingMessageStore,
       workerManager: options.workerManager,

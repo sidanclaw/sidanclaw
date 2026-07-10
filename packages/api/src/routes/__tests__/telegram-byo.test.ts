@@ -201,9 +201,18 @@ vi.mock('../../db/chat-lock.js', () => ({
   }),
 }))
 
+// Only the save-on-request photo cache (`channel-file-cache.ts`) resolves a
+// session in this route's import graph — the pipeline itself is mocked above.
+vi.mock('../../db/sessions.js', () => ({
+  findOrCreateSession: vi.fn(async () => ({ id: 'byo_sess_1' })),
+}))
+
 // ── Route import (must come after vi.mock calls) ───────────────
 
 import { telegramByoRoutes, persistSeenChat, telegramLinkBindsHere } from '../telegram-byo.js'
+import { findOrCreateSession } from '../../db/sessions.js'
+
+const mockFindOrCreateSession = vi.mocked(findOrCreateSession)
 
 // ── Test setup ──────────────────────────────────────────────────
 
@@ -454,6 +463,83 @@ describe('[COMP:api/telegram-byo-route] media-group buffering', () => {
     const imageBlocks = (call.userContentBlocks ?? []).filter((b) => b.type === 'image')
     expect(imageBlocks).toHaveLength(2)
     expect(imageBlocks.every((b) => b.mimeType === 'image/jpeg')).toBe(true)
+  })
+
+  it('caches media-group photos into file_cache and stamps <attached_file id> tags (save-on-request)', async () => {
+    // With a fileStore wired and a workspace assistant, each photo of the
+    // merged group is cached (data-URL row) BEFORE block-building, so the one
+    // merged turn carries a promotable `<attached_file id>` tag per photo —
+    // that id is what `saveFileToBrain` promotes when the user asks. See
+    // docs/architecture/engine/file-handling.md → "Save-on-request".
+    const { findAssistantById } = await import('../../db/users.js')
+    const prevImpl = vi.mocked(findAssistantById).getMockImplementation()
+    vi.mocked(findAssistantById).mockResolvedValue({
+      id: 'assistant_1',
+      name: 'Test Assistant',
+      ownerUserId: 'owner_1',
+      workspaceId: 'ws_1', // the cache gate requires a workspace
+      telegramModelAlias: 'gemini-flash',
+      systemPrompt: null,
+    } as never)
+    let cacheN = 0
+    const fileStore = { cache: vi.fn(async () => ({ id: `fc_${++cacheN}` })) }
+    try {
+      const app = createTestApp(
+        '/webhook/telegram-byo',
+        telegramByoRoutes({
+          provider: {} as never,
+          systemPrompt: '',
+          tools: new Map(),
+          memoryStore: {} as never,
+          integrationStore: makeIntegrationStore() as never,
+          capabilityStore: {} as never,
+          apiUrl: 'http://test',
+          fileStore: fileStore as never,
+        }),
+      )
+
+      await postUpdate(app, buildMediaGroupPhoto({
+        updateId: 601,
+        messageId: 519,
+        fileId: 'save_1_id',
+        mediaGroupId: 'mg_save_on_request',
+      }))
+      await postUpdate(app, buildMediaGroupPhoto({
+        updateId: 602,
+        messageId: 520,
+        fileId: 'save_2_id',
+        mediaGroupId: 'mg_save_on_request',
+      }))
+      await new Promise((r) => setTimeout(r, 700))
+      await flushMicrotasks()
+
+      expect(pipelineCalls).toHaveLength(1)
+      // Both photos cached, keyed to this route's own pipeline session key
+      // (userId = the CHANNEL user, not the owner-as-such — same value the
+      // pipeline passes) and stamped workspace-shared.
+      expect(mockFindOrCreateSession).toHaveBeenCalledWith({
+        assistantId: 'assistant_1',
+        userId: 'owner_1',
+        channelType: 'telegram',
+        channelId: '9001',
+      })
+      expect(fileStore.cache).toHaveBeenCalledTimes(2)
+      expect(fileStore.cache).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: 'byo_sess_1',
+        mimeType: 'image/jpeg',
+        workspaceId: 'ws_1',
+      }))
+      // The merged turn carries one promotable tag per photo.
+      const textBlock = (pipelineCalls[0].userContentBlocks ?? []).find(
+        (b) => b.type === 'text',
+      ) as { text?: string } | undefined
+      expect(textBlock?.text).toContain('<attached_file id="fc_1"')
+      expect(textBlock?.text).toContain('<attached_file id="fc_2"')
+    } finally {
+      // Restore the file-level default (workspaceId: null) — later tests'
+      // add-protection / routing behavior depends on it.
+      vi.mocked(findAssistantById).mockImplementation(prevImpl!)
+    }
   })
 
   it('downloads media-group photos in parallel (Promise.all)', async () => {

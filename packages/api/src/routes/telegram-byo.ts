@@ -35,6 +35,7 @@ import { resolveChannelUser, fetchTelegramProfile, type ChannelUserStore } from 
 import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
 import { withChatLock } from '../db/chat-lock.js'
+import { buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@sidanclaw/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@sidanclaw/core'
 import { transcribeFirstAudio } from '@sidanclaw/core'
@@ -43,6 +44,7 @@ import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@sidanclaw/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { cacheInboundImage } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { buildFileContentBlocks } from './route-helpers.js'
 import { handleConnectCommand } from './_connect-command.js'
@@ -97,12 +99,22 @@ type TelegramByoRouteOptions = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   /** Stage 5: enables team-native connector_instance consumption. */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
+  /** Shared workspace tool policy (migration 312) — team-owned connector allow/ask/block. */
+  workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
   workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
   /** Files orchestration API. Enables outbound documents (`sendFile`). */
   filesApi?: import('@sidanclaw/core').FilesApi
+  /** Transient upload cache (`file_cache`). When present, inbound photos are
+   *  cached before block-building so the `<attached_file id>` tag gives the
+   *  model a promotable reference (`saveFileToBrain` on request). See
+   *  docs/architecture/engine/file-handling.md → "Save-on-request". */
+  fileStore?: import('@sidanclaw/core').FileStore
+  /** Promotes an over-threshold text paste to a durable artifact
+   *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
+  artifactPromoter?: import('@sidanclaw/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
@@ -125,9 +137,26 @@ type TelegramByoRouteOptions = {
    * cap is routed through the transcription pipeline: confirm the duration
    * surcharge via inline buttons, then transcribe → segment → ingest → charge.
    * Omitted → audio files fall through to the normal file-attachment path. See
-   * docs/plans/recording-to-brain.md.
+   * docs/architecture/media/transcription.md.
    */
   recordingIngest?: ChannelRecordingIngest
+  /**
+   * Route inbound document / video (≤ the 20MB bot cap) through the universal
+   * channel-media intake for durability. Audio is NOT routed here on BYO — it
+   * keeps the inline `recordingIngest` port path above (queue migration is a
+   * separate remaining item). See large-content-artifacts §Phase 0.3.
+   */
+  ingestChannelMediaRef?: (input: {
+    source: { url: string }
+    mime?: string
+    fileName: string | null
+    sizeBytes: number | null
+    sender: { id: string; name: string | null }
+    conversationId: string
+    workspaceId: string
+    assistantId: string | null
+    actingUserId: string
+  }) => Promise<import('../ingest/channel-media-intake.js').ChannelMediaIntakeResult | null>
 }
 
 /**
@@ -507,7 +536,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // An audio FILE (msg.audio) is a deliberate recording; route it through the
     // transcription pipeline. Re-downloads the bytes (file_id is stable), creates
     // a provenance Episode, runs transcribe → segment → ingest → charge-on-success,
-    // then replies. See docs/plans/recording-to-brain.md.
+    // then replies. See docs/architecture/media/transcription.md.
     async function runTelegramRecording(rec: PendingRecording): Promise<void> {
       if (!options.recordingIngest) return
       try {
@@ -790,7 +819,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // 5b. Audio FILE → recording-to-brain pipeline instead of normal chat.
       //     A deliberate recording (msg.audio), routed to transcription + brain
       //     ingest with the duration surcharge. Voice notes stay on the existing
-      //     voice-transcription-to-chat path. See docs/plans/recording-to-brain.md.
+      //     voice-transcription-to-chat path. See docs/architecture/media/transcription.md.
       if (options.recordingIngest && incoming.mediaType === 'audio') {
         await handleTelegramRecordingIntake(
           incoming,
@@ -918,12 +947,20 @@ type ProcessMessageParams = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   /** Stage 5: enables team-native connector_instance consumption. */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
+  /** Shared workspace tool policy (migration 312) — team-owned connector allow/ask/block. */
+  workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
   workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
   /** Files orchestration API. Enables outbound documents (`sendFile`). */
   filesApi?: import('@sidanclaw/core').FilesApi
+  /** Transient upload cache (`file_cache`) — inbound photos cached for
+   *  save-on-request promotion. See file-handling.md → "Save-on-request". */
+  fileStore?: import('@sidanclaw/core').FileStore
+  /** Promotes an over-threshold text paste to a durable artifact
+   *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
+  artifactPromoter?: import('@sidanclaw/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingConfResolvers: Map<string, { resolver: ConfirmationResolver; chatId: string }>
@@ -936,6 +973,10 @@ type ProcessMessageParams = {
     apiKey: string
     model?: string
   }
+  /** Universal channel-media intake for document/video (large-content-artifacts §Phase 0.3). */
+  ingestChannelMediaRef?: TelegramByoRouteOptions['ingestChannelMediaRef']
+  /** Web app origin for the oversize-document handoff copy. */
+  appUrl?: string
 }
 
 async function processMessage(params: ProcessMessageParams): Promise<void> {
@@ -946,16 +987,62 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // recording sent here would otherwise fail silently. Tell the user to use the
   // web app instead of dropping the message. Duration-aware transcription of
   // large recordings lives on the web upload path (recording-to-brain Phase 2).
-  // See docs/plans/recording-to-brain.md Phase 1.
+  // See docs/architecture/media/transcription.md Phase 1.
   if (incoming.mediaSizeBytes && incoming.mediaSizeBytes > TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES) {
     const mb = Math.round(incoming.mediaSizeBytes / (1024 * 1024))
     const limitMb = Math.floor(TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES / (1024 * 1024))
     await adapter.sendMessage(incoming.channelId, {
-      text: `This file is about ${mb} MB, over the ${limitMb} MB limit I can pull through Telegram, so I can't read the copy you sent here. To transcribe and file a recording this large, upload it in the web app at app.sidan.ai and I'll process the whole thing.`,
+      text: `This file is about ${mb} MB, over the ${limitMb} MB limit I can pull through Telegram, so I can't read the copy you sent here. To bring in a file this large, upload it in the web app at app.sidan.ai and I'll process the whole thing.`,
     }).catch((err) => {
       console.error('[telegram-byo] over-limit media notice failed:', err)
     })
     return
+  }
+
+  // ── Channel-media intake (large-content-artifacts §Phase 0.3) ──
+  // Route document / video (≤ the 20MB cap) through the universal intake for
+  // durability. Audio deliberately excluded on BYO — it keeps the inline
+  // recordingIngestor path (queue migration is a separate remaining item).
+  // Fire-and-forget beside the one-turn content-block path below.
+  if (
+    incoming.mediaUrl &&
+    (incoming.mediaType === 'document' || incoming.mediaType === 'video') &&
+    params.ingestChannelMediaRef &&
+    assistant.workspaceId
+  ) {
+    const ingest = params.ingestChannelMediaRef
+    const workspaceId = assistant.workspaceId
+    adapter
+      .resolveFileUrl(incoming.mediaUrl)
+      .then((url) =>
+        ingest({
+          source: { url },
+          ...(incoming.mediaMime ? { mime: incoming.mediaMime } : {}),
+          fileName: incoming.mediaName ?? null,
+          sizeBytes: incoming.mediaSizeBytes ?? null,
+          sender: { id: channelUserId, name: null },
+          conversationId: incoming.channelId,
+          workspaceId,
+          assistantId: assistant.id,
+          actingUserId: ownerId,
+        }),
+      )
+      .then(async (result) => {
+        if (result?.status === 'pending_confirmation') {
+          await adapter.sendMessage(incoming.channelId, { text: result.message })
+          return
+        }
+        if (result?.status === 'ingested' && result.kind === 'document') {
+          await adapter.sendMessage(incoming.channelId, { text: buildDocumentFiledReply(result.fileName) })
+          return
+        }
+        if (result?.status === 'rejected' && result.reason === 'doc_too_large') {
+          await adapter.sendMessage(incoming.channelId, {
+            text: buildOversizeDocReply(params.appUrl ?? 'https://app.sidan.ai', result.limitMb ?? 25, result.sizeMb ?? 0),
+          })
+        }
+      })
+      .catch((err) => console.error('[telegram-byo] media→brain ingest failed:', err))
   }
 
   // Voice preflight — mirror the official telegram route. Transcribe the
@@ -1001,6 +1088,23 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // See docs/architecture/engine/file-handling.md.
   let mediaContentBlocks: ContentBlock[] = []
   let attachmentContext = ''
+  // Save-on-request seam: cache an inbound image into file_cache FIRST so
+  // buildFileContentBlocks stamps the `<attached_file id>` tag — that id is
+  // what `saveFileToBrain` promotes when the user asks to keep the photo.
+  // Session key mirrors this route's processChannelMessage call (userId =
+  // channelUserId). Null (non-image / no store / failure) keeps the
+  // block-only turn. See docs/architecture/engine/file-handling.md.
+  const cacheImage = (file: { buffer: Buffer; mime: string; fileName: string }) =>
+    params.fileStore
+      ? cacheInboundImage({
+          fileStore: params.fileStore,
+          channelType: 'telegram',
+          channelId: incoming.channelId,
+          userId: channelUserId,
+          assistant,
+          file,
+        })
+      : Promise.resolve(null)
   if (incoming.files && incoming.files.length > 0) {
     try {
       const downloads = await Promise.all(
@@ -1008,11 +1112,21 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           adapter.downloadMedia(f.url, { mimeHint: f.mimeType }),
         ),
       )
+      const cacheIds = await Promise.all(
+        downloads.map((dl, i) =>
+          cacheImage({
+            buffer: dl.buffer,
+            mime: dl.mime,
+            fileName: incoming.files![i].name || dl.name,
+          }),
+        ),
+      )
       const built = await buildFileContentBlocks(
         downloads.map((dl, i) => ({
           buffer: dl.buffer,
           mimeType: dl.mime,
           fileName: incoming.files![i].name || dl.name,
+          ...(cacheIds[i] ? { id: cacheIds[i]! } : {}),
         })),
       )
       mediaContentBlocks = built.contentBlocks
@@ -1030,8 +1144,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         mimeHint: incoming.mediaMime,
       })
       const fileName = incoming.mediaName ?? dl.name
+      const cacheId = await cacheImage({ buffer: dl.buffer, mime: dl.mime, fileName })
       const built = await buildFileContentBlocks([
-        { buffer: dl.buffer, mimeType: dl.mime, fileName },
+        { buffer: dl.buffer, mimeType: dl.mime, fileName, ...(cacheId ? { id: cacheId } : {}) },
       ])
       mediaContentBlocks = built.contentBlocks
       attachmentContext = built.attachmentContext
@@ -1093,6 +1208,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     actorChannelId: byoUsername ? `@${byoUsername}` : null,
     messageText: combinedText,
     userContentBlocks,
+    // Raw paste (pre-attachment-context) for the large-paste intercept.
+    rawUserText: incoming.text ?? '',
     isGroupChat: incoming.isGroupChat,
     replyToMessageId: incoming.replyToMessageId ?? null,
     replyRaw: incoming.raw,
@@ -1111,10 +1228,12 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     assistantConnectorStore: params.assistantConnectorStore,
     connectorGrantStore: params.connectorGrantStore,
     connectorInstanceStore: params.connectorInstanceStore,
+    workspaceToolPolicyStore: params.workspaceToolPolicyStore,
     knowledgeStore: params.knowledgeStore,
     gdriveFilesStore: params.gdriveFilesStore,
     workspaceFilesStore: params.workspaceFilesStore,
     filesApi: params.filesApi,
+    artifactPromoter: params.artifactPromoter ?? null,
     skillStore: params.skillStore,
     pendingMessageStore: params.pendingMessageStore,
     workerManager: params.workerManager,

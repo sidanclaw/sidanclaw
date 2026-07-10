@@ -24,6 +24,13 @@ export type ChannelMediaRef = {
   channel: 'whatsapp' | 'slack' | 'discord' | 'telegram'
   /** GCS object key the adapter wrote the bytes to. */
   gcsKey: string
+  /**
+   * Full `gs://<bucket>/<key>` URI when the bytes were written to the
+   * workspace's own (BYO) bucket. Absent → the bytes are in the platform bucket
+   * (all non-BYO workspaces and every pre-BYO ref). Recorded on the episode so
+   * every later read (worker, media-fetch) routes to the right bucket.
+   */
+  storageUri?: string | null
   mime: string
   fileName: string | null
   /** Bytes, when known (content-length / Baileys fileLength). */
@@ -36,7 +43,7 @@ export type ChannelMediaRef = {
    * to build the pre-flight-confirm correlation key so the user's reply turn can
    * find the pending row. Optional: when absent, a big recording falls back to
    * enqueueing (the confirm cannot be correlated). See
-   * docs/plans/channel-recording-preflight-confirm.md §5.
+   * docs/architecture/engine/preflight-confirmation.md §5.
    */
   conversationId?: string | null
   workspaceId: string
@@ -44,6 +51,14 @@ export type ChannelMediaRef = {
   /** Episode creator + COGS / surcharge attribution (the channel/workspace owner). */
   actingUserId: string
   sensitivity?: EpisodeSensitivity
+  /**
+   * Transcription opt-out (default: transcribe). When `false`, an audio/video
+   * `recording` Episode is still anchored at the GCS key (so media-fetch can
+   * resolve it, e.g. for an external highlights integration) but the
+   * pre-flight-confirm + transcription enqueue are skipped entirely. Set by a
+   * caller that consumes the raw media itself. Absent/true → today's behavior.
+   */
+  transcribe?: boolean
 }
 
 export type ChannelMediaKind = 'audio_video' | 'document' | 'unsupported'
@@ -77,13 +92,15 @@ export type ChannelMediaIntakeDeps = {
   /** Document path (download-bounded → parse → Pipeline B). Absent → documents rejected. */
   ingestDocument?: (args: {
     gcsKey: string
+    /** BYO storage URI when the bytes live in the workspace's own bucket; else null. */
+    storageUri?: string | null
     mime: string
     fileName: string | null
     workspaceId: string
     assistantId: string | null
     actingUserId: string
     sensitivity: EpisodeSensitivity
-  }) => Promise<{ episodeId: string | null }>
+  }) => Promise<ChannelDocumentIngestResult>
   /** Phase 6 metering. Absent → no quota enforcement. */
   checkQuota?: (ref: ChannelMediaRef) => Promise<{ ok: boolean; reason?: string }>
   /**
@@ -93,7 +110,7 @@ export type ChannelMediaIntakeDeps = {
    * ingest-only) is resolved here and stored on the job verbatim — the worker
    * never re-resolves. Absent → no default (ingest-only). Null-safe: a lookup
    * failure resolves to `null`, never blocking the recording. See
-   * docs/plans/workspace-default-recording-blueprint.md §D2.
+   * docs/architecture/brain/structural-synthesis.md §D2.
    */
   resolveWorkspaceDefaultBlueprint?: (workspaceId: string) => Promise<string | null>
   /**
@@ -106,8 +123,9 @@ export type ChannelMediaIntakeDeps = {
    * so the confirm is purely additive and fail-open.
    */
   preflightConfirm?: {
-    /** Short-lived signed READ url for ffprobe (no full download). */
-    signedReadUrl: (gcsKey: string) => Promise<string>
+    /** Short-lived signed READ url for ffprobe (no full download). Routed to the
+     *  bytes' bucket via `storageUri` (BYO) or the platform bucket when absent. */
+    signedReadUrl: (args: { gcsKey: string; workspaceId: string; storageUri?: string | null }) => Promise<string>
     /** Probe the recording's duration in ms (ffprobe over the signed url). */
     probeDurationMs: (signedUrl: string) => Promise<number>
     /** Surcharge credits for a duration; 0 == small == enqueue immediately. */
@@ -133,12 +151,31 @@ export type ChannelMediaIntakeDeps = {
   maxBytes?: number
 }
 
+/**
+ * What the injected `ingestDocument` port reports back. Every arm that a user
+ * would care about maps onto a `ChannelMediaIntakeResult` the route can turn
+ * into a reply — the silent `{ episodeId: null }` drop is dead
+ * (large-content-artifacts §Phase 0.1).
+ */
+export type ChannelDocumentIngestResult =
+  | {
+      status: 'accepted'
+      episodeId: string | null
+      /** Set on the durable-artifact path (§Phase 3.3): the workspace_files id + path. */
+      fileId?: string
+      path?: string
+    }
+  | { status: 'too_large'; sizeBytes: number; limitBytes: number }
+  | { status: 'storage_quota' }
+  | { status: 'skipped_no_assistant' }
+  | { status: 'empty' }
+
 export type ChannelMediaIntakeResult =
   | { status: 'queued'; kind: 'audio_video'; recordingId: string; jobId: string | null }
   | {
       // A BIG recording — probed, a pending confirmation stored, NOT enqueued. The
       // channel route sends `message` and waits for the user's reply turn. See
-      // docs/plans/channel-recording-preflight-confirm.md §5.
+      // docs/architecture/engine/preflight-confirmation.md §5.
       status: 'pending_confirmation'
       kind: 'audio_video'
       recordingId: string
@@ -146,8 +183,36 @@ export type ChannelMediaIntakeResult =
       surchargeCredits: number
       message: string
     }
-  | { status: 'ingested'; kind: 'document'; episodeId: string | null }
-  | { status: 'rejected'; reason: 'unsupported' | 'too_large' | 'quota' | 'no_document_handler' }
+  | {
+      status: 'ingested'
+      kind: 'document'
+      episodeId: string | null
+      fileName: string | null
+      /** Set on the durable-artifact path (§Phase 3.3). */
+      fileId?: string
+      path?: string
+    }
+  | {
+      // Document arms a route should NOT reply to: an unbound assistant or an
+      // empty/unreadable parse. Distinct from 'rejected' so routes can stay
+      // quiet without lying about an ingest that never happened.
+      status: 'skipped'
+      kind: 'document'
+      reason: 'no_assistant' | 'empty'
+    }
+  | {
+      status: 'rejected'
+      reason:
+        | 'unsupported'
+        | 'too_large'
+        | 'quota'
+        | 'no_document_handler'
+        | 'doc_too_large'
+        | 'doc_storage_quota'
+      /** Set for 'doc_too_large' so routes can build the handoff copy. */
+      sizeMb?: number
+      limitMb?: number
+    }
 
 /** Default ceiling matches the channel-media-ingest plan (≤500 MB). */
 export const DEFAULT_CHANNEL_MEDIA_MAX_BYTES = 500 * 1024 * 1024
@@ -179,6 +244,8 @@ export async function ingestChannelMedia(
       sourceKind: 'recording',
       sourceRef: {
         gcsKey: ref.gcsKey,
+        // Stamped only for BYO writes; absent → platform bucket on every read.
+        ...(ref.storageUri ? { storageUri: ref.storageUri } : {}),
         mime: ref.mime,
         fileName: ref.fileName,
         status: 'awaiting_process',
@@ -191,6 +258,13 @@ export async function ingestChannelMedia(
       createdByUserId: ref.actingUserId,
       sensitivity,
     })
+    // Store-without-transcribe (highlights-only): the caller wants the recording
+    // Episode to exist so media-fetch can resolve it (e.g. an external highlights
+    // integration pulls the raw video), but NOT the transcription pipeline. Skip
+    // the pre-flight-confirm + enqueue. See docs/architecture/channels/whatsapp.md.
+    if (ref.transcribe === false) {
+      return { status: 'queued', kind: 'audio_video', recordingId: episode.id, jobId: null }
+    }
     // Selection ladder at the enqueue edge (D2): a channel recording has no
     // human picker, so resolve the workspace default (or null = ingest-only)
     // here and store it on the job verbatim — the worker uses it as-is.
@@ -206,7 +280,11 @@ export async function ingestChannelMedia(
     // Small recordings (or any missing wiring) fall through to enqueue as today.
     if (deps.preflightConfirm && ref.conversationId) {
       try {
-        const signedUrl = await deps.preflightConfirm.signedReadUrl(ref.gcsKey)
+        const signedUrl = await deps.preflightConfirm.signedReadUrl({
+          gcsKey: ref.gcsKey,
+          workspaceId: ref.workspaceId,
+          storageUri: ref.storageUri,
+        })
         const durationMs = await deps.preflightConfirm.probeDurationMs(signedUrl)
         const durationSeconds = Math.round(durationMs / 1000)
         const surchargeCredits = deps.preflightConfirm.surchargeCredits(durationSeconds)
@@ -259,8 +337,9 @@ export async function ingestChannelMedia(
 
   // document
   if (!deps.ingestDocument) return { status: 'rejected', reason: 'no_document_handler' }
-  const { episodeId } = await deps.ingestDocument({
+  const doc = await deps.ingestDocument({
     gcsKey: ref.gcsKey,
+    storageUri: ref.storageUri,
     mime: ref.mime,
     fileName: ref.fileName,
     workspaceId: ref.workspaceId,
@@ -268,5 +347,45 @@ export async function ingestChannelMedia(
     actingUserId: ref.actingUserId,
     sensitivity,
   })
-  return { status: 'ingested', kind: 'document', episodeId }
+  switch (doc.status) {
+    case 'accepted':
+      return {
+        status: 'ingested',
+        kind: 'document',
+        episodeId: doc.episodeId,
+        fileName: ref.fileName,
+        ...(doc.fileId ? { fileId: doc.fileId } : {}),
+        ...(doc.path ? { path: doc.path } : {}),
+      }
+    case 'too_large':
+      return {
+        status: 'rejected',
+        reason: 'doc_too_large',
+        sizeMb: Math.max(1, Math.round(doc.sizeBytes / (1024 * 1024))),
+        limitMb: Math.round(doc.limitBytes / (1024 * 1024)),
+      }
+    case 'storage_quota':
+      return { status: 'rejected', reason: 'doc_storage_quota' }
+    case 'skipped_no_assistant':
+      return { status: 'skipped', kind: 'document', reason: 'no_assistant' }
+    case 'empty':
+      return { status: 'skipped', kind: 'document', reason: 'empty' }
+  }
+}
+
+/**
+ * A document over the parse cap (`DOC_PARSE_MAX_BYTES`): same web-upload
+ * handoff, but names the size so the sender understands why. Replaces the old
+ * silent drop (large-content-artifacts §Phase 0.1). Lives open with the intake
+ * (channels open-core move) — the closed acquirers re-export it.
+ */
+export function buildOversizeDocReply(uploadUrl: string, limitMb: number, sizeMb: number): string {
+  return `That document is about ${sizeMb} MB, over the ${limitMb} MB I can process from chat. Upload it at ${uploadUrl} and I'll take in the whole thing.`
+}
+
+/** Confirmation that an inbound channel document was saved + queued for indexing. */
+export function buildDocumentFiledReply(fileName: string | null): string {
+  return fileName
+    ? `Saved "${fileName}" to your workspace files and started indexing it. Give me a minute, then ask me anything about it.`
+    : `Saved that document to your workspace files and started indexing it. Give me a minute, then ask me anything about it.`
 }
