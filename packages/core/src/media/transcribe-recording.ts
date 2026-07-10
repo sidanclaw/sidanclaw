@@ -19,6 +19,18 @@
  * truncation: a response cut mid-line drops only the trailing partial line, and
  * the next window re-emits from the last COMPLETE line's timestamp.
  *
+ * Why STREAMING generate (`streamGenerateContent?alt=sse`), not a plain
+ * `generateContent`: transcribing an hour-plus recording keeps the model
+ * generating for many minutes, and a non-streaming call sits on a silent
+ * socket the whole time — Google's front end (or any middlebox on the path)
+ * drops it at ~2 minutes as idle (`UND_ERR_SOCKET: other side closed`,
+ * surfaced by undici as the opaque `TypeError: fetch failed` — the
+ * 2026-07-10 incident: every worker attempt on a 103-minute recording died
+ * at ~2 min). Undici's own 300s headers timeout is a second razor on the
+ * same path. Streaming keeps bytes flowing from the first tokens, so
+ * neither idle cutoff can fire; the per-window AbortController bounds
+ * total stream time instead.
+ *
  * Pure helpers (`parseTranscriptLines`, `mergeUtterances`) carry the parsing /
  * seam-dedup logic and unit-test without a network. The network calls take an
  * injectable `fetchFn`.
@@ -31,7 +43,13 @@ import type { TokenUsage } from '../providers/types.js'
 const FILES_BASE = 'https://generativelanguage.googleapis.com'
 const DEFAULT_MODEL = 'gemini-2.5-flash'
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_768
-const DEFAULT_TIMEOUT_MS = 300_000 // 5 min per generate window
+// Bounds one window's whole SSE stream (first byte arrives in seconds; a full
+// 32k-token window can legitimately stream for >5 min at model speed).
+const DEFAULT_TIMEOUT_MS = 600_000
+// Partial-line buffer cap for the SSE parse — same OOM rationale as the
+// provider's `streamGeminiSSE` (gemini.ts): fail fast over accumulating an
+// unterminated MB-scale line.
+const MAX_SSE_BUFFER_BYTES = 8 * 1024 * 1024
 const MAX_CONTINUATION_WINDOWS = 12
 const COVERAGE_TOLERANCE_MS = 30_000 // last line within 30s of the end = "covered"
 const FILE_ACTIVE_POLL_MS = 2_000
@@ -249,29 +267,70 @@ async function generateWindow(
     generationConfig: { temperature: 0, maxOutputTokens: opts.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS },
   }
 
+  // Stream (SSE) so the socket carries bytes from the first tokens — see the
+  // module docstring for why a non-streaming generateContent dies at ~2 min
+  // on long recordings. The AbortController bounds the WHOLE stream, and its
+  // signal survives onto the body reader (a mid-stream hang aborts too).
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
-  let res: Response
   try {
-    res = await fetchFn(`${FILES_BASE}/v1beta/models/${model}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': opts.apiKey },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    })
+    const res = await fetchFn(
+      `${FILES_BASE}/v1beta/models/${model}:streamGenerateContent?alt=sse`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': opts.apiKey },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      },
+    )
+    if (!res.ok) {
+      throw new Error(`Gemini transcription failed (HTTP ${res.status}): ${(await res.text().catch(() => '')).slice(0, 300)}`)
+    }
+    if (!res.body) throw new Error('Gemini transcription: no response body')
+
+    // Accumulate across chunks: text concatenates; finishReason + usage come
+    // on the final chunk (usageMetadata totals are cumulative — last wins).
+    let text = ''
+    let finishReason = 'STOP'
+    let usageMeta: GeminiUsageMetadata | undefined
+
+    const consume = (data: string): void => {
+      if (!data) return
+      let chunk: GeminiGenerateResponse
+      try {
+        chunk = JSON.parse(data) as GeminiGenerateResponse
+      } catch {
+        return // skip malformed JSON (same stance as streamGeminiSSE)
+      }
+      const cand = chunk.candidates?.[0]
+      text += (cand?.content?.parts ?? []).map((p) => p.text ?? '').join('')
+      if (cand?.finishReason) finishReason = cand.finishReason
+      if (chunk.usageMetadata) usageMeta = chunk.usageMetadata
+    }
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+        throw new Error(
+          `Gemini transcription SSE buffer exceeded ${MAX_SSE_BUFFER_BYTES} bytes without a newline — aborting to avoid OOM.`,
+        )
+      }
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (line.startsWith('data: ')) consume(line.slice(6).trim())
+      }
+    }
+    if (buffer.startsWith('data: ')) consume(buffer.slice(6).trim())
+
+    return { text, finishReason, usage: extractUsage(usageMeta) }
   } finally {
     clearTimeout(timer)
-  }
-  if (!res.ok) {
-    throw new Error(`Gemini transcription failed (HTTP ${res.status}): ${(await res.text().catch(() => '')).slice(0, 300)}`)
-  }
-  const payload = (await res.json()) as GeminiGenerateResponse
-  const cand = payload.candidates?.[0]
-  const text = (cand?.content?.parts ?? []).map((p) => p.text ?? '').join('')
-  return {
-    text,
-    finishReason: cand?.finishReason ?? 'STOP',
-    usage: extractUsage(payload.usageMetadata),
   }
 }
 

@@ -83,16 +83,23 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
           { status: 200 },
         )
       }
-      if (u.includes(':generateContent')) {
+      if (u.includes(':streamGenerateContent')) {
         const w = windowTexts[Math.min(gen, windowTexts.length - 1)]
         gen++
-        return new Response(
-          JSON.stringify({
-            candidates: [{ content: { parts: [{ text: w.text }] }, finishReason: w.finishReason }],
+        // SSE wire shape: the text arrives split across chunks (proving the
+        // parser accumulates), finishReason + usageMetadata ride the LAST one.
+        const mid = Math.ceil(w.text.length / 2)
+        const sse = [
+          `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: w.text.slice(0, mid) }] } }] })}`,
+          '',
+          `data: ${JSON.stringify({
+            candidates: [{ content: { parts: [{ text: w.text.slice(mid) }] }, finishReason: w.finishReason }],
             usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 500 },
-          }),
-          { status: 200 },
-        )
+          })}`,
+          '',
+          '',
+        ].join('\n')
+        return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
       }
       throw new Error('unexpected fetch url: ' + u)
     }) as unknown as typeof fetch
