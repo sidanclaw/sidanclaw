@@ -93,6 +93,24 @@ import {
   type EntityRecord,
   type EngineHooks,
   createIntrospectionTools,
+  createComputerTools,
+  createComputeTools,
+  createLocalBrowserProvider,
+  createCloudBrowserProvider,
+  createSandboxOrchestrator,
+  createInMemorySandboxTaskStore,
+  createSandboxReaper,
+  createSandboxMeter,
+  createInMemorySpendAccumulator,
+  resolveUnattendedComputerUse,
+  DEFAULT_SESSION_BUDGET_USD,
+  createE2bCloudProvider,
+  createE2bRuntime,
+  type ComputerToolPolicy,
+  type SandboxOrchestrator,
+  type SandboxProvider,
+  type SandboxTaskStore,
+  type SessionVault,
 } from '@sidanclaw/core'
 
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@sidanclaw/shared'
@@ -121,6 +139,9 @@ import { sessionQuestionRoutes } from './routes/sessions-questions.js'
 import { analyticsRoutes } from './routes/analytics.js'
 import { fileRoutes } from './routes/files.js'
 import { docFilesRoutes } from './routes/doc-files.js'
+import { browserExtensionRoutes } from './routes/browser-extension.js'
+import { computerRoutes } from './routes/computer.js'
+import { createRelayCommandTransport, relayExtensionConnected } from './sandbox/relay-transport.js'
 import { feedbackRoutes } from './routes/feedback.js'
 import { accountRoutes, accountAvatarPublicRoutes } from './routes/account.js'
 import { memoryRoutes } from './routes/memories.js'
@@ -388,6 +409,20 @@ export interface OpenApiEnv {
   SKILLS_AUTO_GEN_ENABLED?: boolean
   // Workflow staleness/digestion/archival sweep ships dark unless on.
   WORKFLOW_LIFECYCLE_ENABLED?: boolean
+  // Computer-use local mode (docs/architecture/engine/computer-use.md §4):
+  // the browser-relay's HTTP base + shared secret. Unset (open default) →
+  // the local browser backend reports not_configured.
+  BROWSER_RELAY_URL?: string
+  BROWSER_RELAY_SECRET?: string
+  // Computer-use cloud mode (§5): E2B Cloud credentials + the pre-baked
+  // sandbox template (agent-browser + python3 + unshare). Unset → the cloud
+  // backend reports not_configured and routing falls back to local.
+  E2B_API_KEY?: string
+  E2B_TEMPLATE_ID?: string
+  // Barrier 2 (§4.9): the deploy flag for the unattended acting path. The
+  // flag is necessary but NOT sufficient — boot also requires live metering
+  // (resolveUnattendedComputerUse). Ships dark.
+  COMPUTER_USE_UNATTENDED_ENABLED?: boolean
 }
 
 /**
@@ -471,6 +506,20 @@ export interface OpenApiPorts {
   // ── Chat draft-title helpers — open default: passthrough ──
   isPlaceholderTitle?: (title: string | null | undefined) => boolean
   getTitleChannelPrefix?: (title: string | null | undefined) => string | null
+
+  // ── Computer use (closed halves) — open default: undefined ──
+  /**
+   * The encrypted session vault (§4.4) — closed impl over `browser_sessions`
+   * (envelope-encrypted, owner-RLS). Absent → cloud browsing works but no
+   * session reuse: every login-guarded task needs a fresh Take-Over.
+   */
+  browserSessionVault?: SessionVault
+  /**
+   * Durable sandbox-task ledger (§4.10) — closed impl over `sandbox_tasks`.
+   * Absent → in-memory task binding (fine for OSS; a restart just costs a
+   * fresh sandbox, the vault holds the durable session).
+   */
+  sandboxTaskStore?: SandboxTaskStore
 
   // ── Closed stores fronted as ports — open default: undefined (routes guard) ──
   /** Self-heal candidate queue; absent → reclassification + self-heal worker off. */
@@ -2288,6 +2337,210 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }
   }
 
+  // ── Computer use (browser tool surface) ──
+  // docs/architecture/engine/computer-use.md §3-§4: five discrete browser
+  // tools over the BrowserProvider seam. Local mode drives the user's own
+  // Chrome through the browser-relay (BROWSER_RELAY_URL/SECRET; unset →
+  // honest not_configured errors). The cloud backend arrives with the
+  // SandboxProvider phase and stays not_configured here. Governance mirrors
+  // the files pattern: L1/L2 strictest-wins policy over mcp_tool_settings
+  // (serverName='computer'), metadata-only analytics audit, and the
+  // in-tool send gate + autonomous-path block (§8).
+  const browserRelayTransport =
+    env.BROWSER_RELAY_URL && env.BROWSER_RELAY_SECRET
+      ? createRelayCommandTransport({
+          relayUrl: env.BROWSER_RELAY_URL,
+          relaySecret: env.BROWSER_RELAY_SECRET,
+        })
+      : null
+  // Cloud mode (§5): E2B behind the SandboxProvider seam. providers/e2b is
+  // the only E2B-SDK importer; everything here talks to the interface.
+  const sandboxProvider: SandboxProvider | null = env.E2B_API_KEY
+    ? createE2bCloudProvider(
+        createE2bRuntime({ apiKey: env.E2B_API_KEY, defaultTemplateId: env.E2B_TEMPLATE_ID }),
+      )
+    : null
+  // The §4.9 meter: all three COGS lines record through the usage spine, and
+  // the per-session dollar cap accumulates on the task row. Barrier 2 rides
+  // meteringActive(): no usage store → unattended can never enable.
+  const sandboxTaskStoreImpl = ports.sandboxTaskStore ?? createInMemorySandboxTaskStore()
+  const sandboxMeter = createSandboxMeter({
+    usageStore: usageStore ?? null,
+    addSpend: sandboxTaskStoreImpl.addSpend
+      ? sandboxTaskStoreImpl.addSpend.bind(sandboxTaskStoreImpl)
+      : createInMemorySpendAccumulator(DEFAULT_SESSION_BUDGET_USD).addSpend,
+  })
+  const unattendedComputerUse = () =>
+    resolveUnattendedComputerUse({
+      flagEnabled: env.COMPUTER_USE_UNATTENDED_ENABLED === true,
+      meter: sandboxMeter,
+    })
+  const sandboxOrchestrator: SandboxOrchestrator | null = sandboxProvider
+    ? createSandboxOrchestrator({
+        provider: sandboxProvider,
+        taskStore: sandboxTaskStoreImpl,
+        meter: sandboxMeter,
+        vault: ports.browserSessionVault ?? null,
+        budget: {
+          // The workspace credit-cap gate (§4.9): a blocked workspace cannot
+          // start a cloud computer task. Mirrors the goals-driver pattern —
+          // plan resolved system-side, transient gate errors fail OPEN (the
+          // per-session dollar cap + fuse remain as backstops).
+          checkCreditBudget: creditGate
+            ? async (browseCtx) => {
+                let status: string
+                try {
+                  const plan = await getWorkspacePlan(browseCtx.workspaceId)
+                  status = (await creditGate(browseCtx.workspaceId, plan)).status
+                } catch (err) {
+                  console.error('[computer] credit gate check failed, allowing:', err)
+                  return
+                }
+                if (status === 'blocked') {
+                  throw new Error(
+                    'This workspace is out of credit for the current period, so a cloud browser task cannot start. Upgrade the plan or wait for the period to reset.',
+                  )
+                }
+              }
+            : undefined,
+        },
+        // Downloads auto-pull into workspace_files (§4.12) — scoped by the
+        // TASK's workspace, resolved above the provider seam.
+        saveDownload: filesApi
+          ? async (dlCtx, file) => {
+              const name = file.path.split('/').pop() || 'download'
+              await filesApi!.writeBytes(
+                { userId: dlCtx.userId, workspaceId: dlCtx.workspaceId, assistantId: null, assistantKind: 'standard' },
+                {
+                  path: `computer/downloads/${Date.now()}-${name.replace(/[^\w.-]+/g, '_')}`,
+                  bytes: file.bytes,
+                  mime: 'application/octet-stream',
+                  title: name,
+                },
+              )
+            }
+          : undefined,
+      })
+    : null
+  const COMPUTER_CONNECTOR_ID = 'computer'
+  const computerToolDefaults = new Map(
+    (OFFICIAL_CONNECTOR_TOOLS[COMPUTER_CONNECTOR_ID] ?? []).map((t) => [t.name, t.defaultPolicy]),
+  )
+  const COMPUTER_POLICY_STRICTNESS: Record<string, number> = { allow: 0, ask: 1, block: 2 }
+  const resolveComputerToolPolicy = async (
+    toolName: string,
+    context: { userId: string; assistantId: string },
+  ): Promise<ComputerToolPolicy> => {
+    const fallback = (computerToolDefaults.get(toolName) ?? 'allow') as ComputerToolPolicy
+    const [l1, l2] = await Promise.all([
+      mcpSettingsStore.getPolicy({
+        assistantId: APP_LEVEL_ASSISTANT_ID, userId: context.userId,
+        serverName: COMPUTER_CONNECTOR_ID, toolName,
+      }),
+      mcpSettingsStore.getPolicy({
+        assistantId: context.assistantId, userId: context.userId,
+        serverName: COMPUTER_CONNECTOR_ID, toolName,
+      }),
+    ])
+    const a = (l1?.policy as ComputerToolPolicy) ?? fallback
+    const b = (l2?.policy as ComputerToolPolicy) ?? fallback
+    return (COMPUTER_POLICY_STRICTNESS[a] ?? 0) >= (COMPUTER_POLICY_STRICTNESS[b] ?? 0) ? a : b
+  }
+  const computerTools = createComputerTools({
+    local: createLocalBrowserProvider({ transport: browserRelayTransport }),
+    cloud: createCloudBrowserProvider({
+      provider: sandboxProvider,
+      binding: sandboxOrchestrator?.binding ?? null,
+    }),
+    cloudAvailable: () => sandboxProvider !== null,
+    // Channel escalate-to-web (§4.8): a cloud login wall surfaces a deep link
+    // into the Take-Over live view for this chat session.
+    takeoverLinkFor: (toolCtx) =>
+      toolCtx.workspaceId
+        ? `${(env.AUTHED_APP_URL ?? env.APP_URL).replace(/\/$/, '')}/w/${toolCtx.workspaceId}/computer/${toolCtx.sessionId}`
+        : null,
+    onCloudLoginWall: sandboxOrchestrator
+      ? async (toolCtx) => sandboxOrchestrator.pauseForTakeover(toolCtx.sessionId)
+      : undefined,
+    resolvePolicy: resolveComputerToolPolicy,
+    // Barrier 2 (§4.9): the flag alone cannot enable unattended computer-use
+    // — resolveUnattendedComputerUse also requires live metering, so a
+    // metering-absent boot stays attended-only no matter the env.
+    unattendedEnabled: unattendedComputerUse,
+    onEvent: (evt, ctx) => {
+      analytics.logEvent({
+        userId: ctx.userId,
+        assistantId: ctx.assistantId,
+        sessionId: ctx.sessionId,
+        channelType: ctx.channelType,
+        eventName: 'browser_action',
+        metadata: {
+          op: sanitizeAnalytics(evt.op),
+          backend: sanitizeAnalytics(evt.backend),
+          host: sanitizeAnalytics(evt.host ?? ''),
+          ok: evt.ok,
+          ...(evt.code ? { code: sanitizeAnalytics(evt.code) } : {}),
+        },
+      })
+    },
+  })
+  allTools.set('browserNavigate', computerTools.browserNavigate)
+  allTools.set('browserSnapshot', computerTools.browserSnapshot)
+  allTools.set('browserClick', computerTools.browserClick)
+  allTools.set('browserType', computerTools.browserType)
+  allTools.set('browserCurrentUrl', computerTools.browserCurrentUrl)
+
+  // Isolated Python + the workspace-scoped file-bridge (§4.7, §4.12). The
+  // files port wraps FilesApi so every byte movement stays under workspace
+  // RLS; the workspace id always comes from the ToolContext, never input.
+  const computeTools = createComputeTools({
+    provider: sandboxProvider,
+    binding: sandboxOrchestrator?.binding ?? null,
+    files: filesApi
+      ? {
+          readBytes: async (fctx, fileIdOrPath) => {
+            const res = await filesApi!.readBytes(
+              { userId: fctx.userId, workspaceId: fctx.workspaceId, assistantId: null, assistantKind: 'standard' },
+              fileIdOrPath,
+            )
+            if (!res.ok) return null
+            return {
+              bytes: new Uint8Array(res.value.bytes),
+              name: res.value.file.path.split('/').pop() || res.value.file.path,
+            }
+          },
+          writeBytes: async (fctx, params) => {
+            const res = await filesApi!.writeBytes(
+              { userId: fctx.userId, workspaceId: fctx.workspaceId, assistantId: null, assistantKind: 'standard' },
+              { path: params.path, bytes: params.bytes, mime: 'application/octet-stream', title: params.title },
+            )
+            if (!res.ok) throw new Error('Could not save the file to the workspace (quota or conflict).')
+            return { fileId: res.value.id, path: res.value.path }
+          },
+        }
+      : null,
+    getWorkspacePlan,
+    resolvePolicy: resolveComputerToolPolicy,
+    unattendedEnabled: unattendedComputerUse,
+    onEvent: (evt, ctx) => {
+      analytics.logEvent({
+        userId: ctx.userId,
+        assistantId: ctx.assistantId,
+        sessionId: ctx.sessionId,
+        channelType: ctx.channelType,
+        eventName: 'computer_compute',
+        metadata: {
+          kind: sanitizeAnalytics(evt.type),
+          ok: evt.ok,
+          ...(evt.detail !== undefined ? { detail: evt.detail } : {}),
+        },
+      })
+    },
+  })
+  allTools.set('runPython', computeTools.runPython)
+  allTools.set('loadFromWorkspace', computeTools.loadFromWorkspace)
+  allTools.set('saveToWorkspace', computeTools.saveToWorkspace)
+
   // ── Agent capability toolset ──
   const agentControlPlaneReader = createControlPlaneReader({
     capabilityStore,
@@ -2694,6 +2947,33 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/workspaces/:workspaceId/oauth-authorizations', requireAuth(env.JWT_SECRET), oauthAuthorizationsRoutes({
     authorizationStore: oauthAuthorizationStore,
     workspaceStore,
+  }))
+
+  // Browser-extension pairing (computer-use local mode, P1.3). The relay's
+  // WS endpoint derives from the HTTP base: https://relay → wss://relay/ext.
+  const browserRelayWsUrl = env.BROWSER_RELAY_URL
+    ? `${env.BROWSER_RELAY_URL.replace(/\/$/, '').replace(/^http/, 'ws')}/ext`
+    : null
+  // Take-Over live view + Session Management (computer-use.md §5, §7).
+  app.use('/api/computer', requireAuth(env.JWT_SECRET), computerRoutes({
+    orchestrator: sandboxOrchestrator,
+    provider: sandboxProvider,
+    vault: ports.browserSessionVault ?? null,
+  }))
+
+  app.use('/api/browser-extension', requireAuth(env.JWT_SECRET), browserExtensionRoutes({
+    jwtSecret: env.JWT_SECRET,
+    workspaceStore,
+    relayWsUrl: browserRelayWsUrl,
+    extensionConnected:
+      env.BROWSER_RELAY_URL && env.BROWSER_RELAY_SECRET
+        ? (userId) =>
+            relayExtensionConnected({
+              relayUrl: env.BROWSER_RELAY_URL as string,
+              relaySecret: env.BROWSER_RELAY_SECRET as string,
+              userId,
+            })
+        : null,
   }))
 
   app.use('/api', publicShareRoutes({
@@ -3423,6 +3703,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) workflowLifecycleWorker.start()
+
+  // ── Sandbox lifecycle reaper (computer-use.md §7) — kills tasks idle past
+  //    the Take-Over abandonment window + runs the vault's per-plan purge.
+  //    Only exists when a sandbox provider is configured. ──
+  if (sandboxOrchestrator) {
+    const sandboxReaper = createSandboxReaper({
+      orchestrator: sandboxOrchestrator,
+      vault: ports.browserSessionVault ?? null,
+      onEvent: (event) => {
+        if (event.reaped > 0 || event.purged > 0) {
+          console.log(`[sandbox-reaper] tick — reaped:${event.reaped} purged:${event.purged}`)
+        }
+      },
+    })
+    if (runWorkers) sandboxReaper.start()
+  }
 
   // ── Classifier self-heal worker — needs the closed pending-classification
   //    queue. Only started when injected (platform); open omits it. ──

@@ -1568,6 +1568,7 @@ export const ja: Dictionary = {
         llmKey: "Gemini API キー",
         plan: "プラン",
         usage: "使用状況",
+        browserSessions: "ブラウザセッション",
       },
       body: {
         notificationsComingSoon: "詳細な通知設定はまだ利用できません。チャネルや通知オフ時間をここから選べるようになる予定です。",
@@ -4068,10 +4069,16 @@ export const ja: Dictionary = {
       loadError: "チャネルを読み込めませんでした。再読み込みしてお試しください。",
       emptyTitle: "チャネルはまだありません",
       emptyBody: "上の「+ チャネルを追加」から Slack または Telegram のボットを接続してください。",
+      railAriaLabel: "ワークスペースのチャネル",
+      selectPrompt: "管理するチャネルを選択してください。",
+      sectionAttention: "要対応",
+      sectionActive: "稼働中",
+      sectionOfficial: "公式ボット",
       platforms: {
         telegram: "Telegram",
         slack: "Slack",
         discord: "Discord",
+        whatsapp: "WhatsApp",
       },
       status: {
         active: "有効",
@@ -4109,6 +4116,7 @@ export const ja: Dictionary = {
       routingModelLocked: "プランが必要",
       disconnect: {
         cta: "切断",
+        confirmTitle: "このチャネルを切断しますか？",
         confirm: "切断を確定",
         confirming: "切断中…",
         cancel: "キャンセル",
@@ -4712,5 +4720,41 @@ export const ja: Dictionary = {
     searchPlaceholder: "ブループリントを検索…",
     ingestOnly: "ブレインに取り込むのみ（ページなし）",
     saveFailed: "既定値を保存できませんでした。もう一度お試しください。",
+  },
+  computer: {
+    liveViewTitle: "ライブブラウザ",
+    liveViewSubtitle:
+      "このタスクでアシスタントが使っているクラウドブラウザです。ページをクリックしてサインインや操作ができます。入力内容はページにのみ送信され、当社には送信されません。",
+    connecting: "ブラウザに接続しています...",
+    noTask: "このチャットに実行中のブラウザタスクはありません。終了したかタイムアウトした可能性があります。アシスタントにもう一度依頼してください。",
+    frameStalled: "ライブ表示が一時停止しています。ブラウザが応答すると再開します。",
+    siteInputLabel: "サインインしたサイト",
+    signedInCta: "サインインしたのでセッションを保存",
+    signedInHint:
+      "サインイン済みセッション（Cookie のみ。パスワードは保存しません）を保存し、次回からこのサイトでのログインを省略します。",
+    captureSuccess: "セッションを保存しました。この画面を閉じても、アシスタントが続きを進めます。",
+    captureFailed: "セッションを保存できませんでした。ページ上でサインインを完了してから、もう一度お試しください。",
+    stopTask: "このタスクを停止",
+    stopConfirmTitle: "このブラウザタスクを停止しますか？",
+    stopConfirmBody:
+      "クラウドブラウザを今すぐ閉じます。ダウンロード済みのファイルはワークスペースのファイルに保存済みです。",
+    stopConfirmAction: "タスクを停止",
+    sessions: {
+      title: "ブラウザセッション",
+      description:
+        "アシスタントが保存済みセッションでサインインできるサイトの一覧です。取り消すと保存済みセッションのみ削除されます。サイト上のアカウントには影響せず、次回のタスクでは再度サインインを求められます。",
+      empty: "保存されたブラウザセッションはまだありません。ブラウザタスク中にサインインすると、ここに保存されます。",
+      notConfigured: "このデプロイではセッション保存が設定されていません。",
+      loadFailed: "セッションを読み込めませんでした。もう一度お試しください。",
+      statusActive: "有効",
+      statusDead: "サインアウト済み",
+      lastUsed: "最終使用",
+      never: "未使用",
+      revoke: "取り消す",
+      revokeConfirmTitle: "このセッションを取り消しますか？",
+      revokeConfirmBody:
+        "{site} の保存済みサインインを削除します。サイト上のアカウントには影響しません。",
+      revokeConfirmAction: "取り消す",
+    },
   },
 };

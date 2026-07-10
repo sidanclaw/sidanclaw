@@ -1750,6 +1750,7 @@ export const en = {
         llmKey: "Gemini API key",
         plan: "Plan",
         usage: "Usage",
+        browserSessions: "Browser sessions",
       },
       body: {
         notificationsComingSoon: "Granular notification preferences aren't configurable yet. You'll be able to pick channels and quiet hours from here soon.",
@@ -4274,10 +4275,16 @@ export const en = {
       loadError: "Couldn't load channels. Refresh to try again.",
       emptyTitle: "No channels yet",
       emptyBody: "Click + Add channel above to connect a Slack or Telegram bot.",
+      railAriaLabel: "Your channels",
+      selectPrompt: "Select a channel to manage it.",
+      sectionAttention: "Needs attention",
+      sectionActive: "Active",
+      sectionOfficial: "Official bot",
       platforms: {
         telegram: "Telegram",
         slack: "Slack",
         discord: "Discord",
+        whatsapp: "WhatsApp",
       },
       status: {
         active: "Active",
@@ -4315,6 +4322,7 @@ export const en = {
       routingModelLocked: "Plan required",
       disconnect: {
         cta: "Disconnect",
+        confirmTitle: "Disconnect this channel?",
         confirm: "Confirm disconnect",
         confirming: "Disconnecting…",
         cancel: "Cancel",
@@ -4921,6 +4929,44 @@ export const en = {
     searchPlaceholder: "Search blueprints…",
     ingestOnly: "Ingest to brain only (no page)",
     saveFailed: "Could not save the default. Please try again.",
+  },
+  // Computer use: the Take-Over live view + Session Management
+  // (docs/architecture/engine/computer-use.md).
+  computer: {
+    liveViewTitle: "Live browser",
+    liveViewSubtitle:
+      "Your assistant's cloud browser for this task. Click into the page to sign in or take over; what you type goes to the page, never to us.",
+    connecting: "Connecting to the browser...",
+    noTask: "No active browser task for this chat. It may have finished or timed out; ask the assistant to try again.",
+    frameStalled: "The live view stalled. It resumes as soon as the browser responds.",
+    siteInputLabel: "Site you signed in to",
+    signedInCta: "I signed in: save this session",
+    signedInHint:
+      "Saves the signed-in session (cookies only, never your password) so future tasks on this site skip the login.",
+    captureSuccess: "Session saved. You can close this view; the assistant will pick up from here.",
+    captureFailed: "Could not save the session. Finish signing in on the page, then try again.",
+    stopTask: "Stop this task",
+    stopConfirmTitle: "Stop this browser task?",
+    stopConfirmBody:
+      "The cloud browser closes now. Anything it downloaded is already saved to your workspace files.",
+    stopConfirmAction: "Stop task",
+    sessions: {
+      title: "Browser sessions",
+      description:
+        "Sites your assistant can sign in to with a saved session. Revoking deletes the saved session only; your account on the site is untouched, and the next task there will ask you to sign in again.",
+      empty: "No saved browser sessions yet. When you sign in during a browser task, the session is saved here.",
+      notConfigured: "Session storage is not configured on this deployment.",
+      loadFailed: "Could not load sessions. Please try again.",
+      statusActive: "Active",
+      statusDead: "Signed out",
+      lastUsed: "Last used",
+      never: "Never",
+      revoke: "Revoke",
+      revokeConfirmTitle: "Revoke this session?",
+      revokeConfirmBody:
+        "The saved sign-in for {site} is deleted. Your account on the site is untouched.",
+      revokeConfirmAction: "Revoke",
+    },
   },
 };
 

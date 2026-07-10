@@ -1556,6 +1556,7 @@ export const zh: Dictionary = {
         llmKey: "Gemini API 金鑰",
         plan: "方案",
         usage: "用量",
+        browserSessions: "瀏覽器登入",
       },
       body: {
         notificationsComingSoon: "詳細的通知偏好設定尚未開放。你很快就能在這裡選擇管道與勿擾時段。",
@@ -4030,10 +4031,16 @@ export const zh: Dictionary = {
       loadError: "無法載入管道，請重新整理後再試。",
       emptyTitle: "尚無管道",
       emptyBody: "點選上方的「+ 新增管道」連接 Slack 或 Telegram bot。",
+      railAriaLabel: "你的管道",
+      selectPrompt: "選擇要管理的管道。",
+      sectionAttention: "需要注意",
+      sectionActive: "啟用中",
+      sectionOfficial: "官方機器人",
       platforms: {
         telegram: "Telegram",
         slack: "Slack",
         discord: "Discord",
+        whatsapp: "WhatsApp",
       },
       status: {
         active: "啟用中",
@@ -4071,6 +4078,7 @@ export const zh: Dictionary = {
       routingModelLocked: "需升級方案",
       disconnect: {
         cta: "中斷連線",
+        confirmTitle: "要中斷此管道的連線嗎？",
         confirm: "確認中斷",
         confirming: "中斷中…",
         cancel: "取消",
@@ -4668,5 +4676,39 @@ export const zh: Dictionary = {
     searchPlaceholder: "搜尋藍圖…",
     ingestOnly: "僅匯入大腦（不建立頁面）",
     saveFailed: "無法儲存預設值。請重試。",
+  },
+  computer: {
+    liveViewTitle: "即時瀏覽器",
+    liveViewSubtitle:
+      "這是助理在此任務使用的雲端瀏覽器。點進頁面即可登入或接手操作；你輸入的內容只會送到該頁面，不會送到我們這裡。",
+    connecting: "正在連線瀏覽器...",
+    noTask: "此對話沒有進行中的瀏覽器任務。可能已完成或逾時，請再請助理試一次。",
+    frameStalled: "即時畫面暫停了。瀏覽器回應後會自動恢復。",
+    siteInputLabel: "你登入的網站",
+    signedInCta: "我已登入：儲存這個工作階段",
+    signedInHint:
+      "儲存已登入的工作階段（只存 Cookie，絕不儲存密碼），之後在這個網站的任務就不必再登入。",
+    captureSuccess: "已儲存工作階段。你可以關閉此畫面，助理會接著繼續。",
+    captureFailed: "無法儲存工作階段。請先在頁面上完成登入，再試一次。",
+    stopTask: "停止此任務",
+    stopConfirmTitle: "要停止這個瀏覽器任務嗎？",
+    stopConfirmBody: "雲端瀏覽器將立即關閉。已下載的檔案都已存入你的工作空間檔案。",
+    stopConfirmAction: "停止任務",
+    sessions: {
+      title: "瀏覽器登入",
+      description:
+        "助理可以用已儲存的工作階段登入的網站清單。撤銷只會刪除已儲存的工作階段；網站上的帳號不受影響，下次任務會再請你登入。",
+      empty: "目前沒有已儲存的瀏覽器登入。當你在瀏覽器任務中登入後，就會儲存在這裡。",
+      notConfigured: "此部署尚未設定工作階段儲存。",
+      loadFailed: "無法載入清單。請重試。",
+      statusActive: "有效",
+      statusDead: "已登出",
+      lastUsed: "上次使用",
+      never: "從未",
+      revoke: "撤銷",
+      revokeConfirmTitle: "要撤銷這個登入嗎？",
+      revokeConfirmBody: "將刪除 {site} 的已儲存登入。網站上的帳號不受影響。",
+      revokeConfirmAction: "撤銷",
+    },
   },
 };

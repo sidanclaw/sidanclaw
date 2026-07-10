@@ -163,6 +163,22 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   // counts as an official (non-custom-MCP) connector via OFFICIAL_CONNECTOR_IDS;
   // the empty tool list means it surfaces no governable tools of its own.
   gcs: [],
+  // Computer use — governance display for the browser/sandbox tool surface
+  // (docs/architecture/engine/computer-use.md §3). Boot-injected like `files`
+  // (see BOOT_INJECTED_BUILTIN_TOOLS below), NOT through mcp/inject.ts.
+  // browserClick is 'allow' by default because the dynamic send gate inside
+  // the tool (resolveConfirmation) asks on send-like clicks — a static 'ask'
+  // would gate every composing click too.
+  computer: [
+    { name: 'browserNavigate', description: 'Open a URL in the controlled browser (local extension or cloud sandbox)', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'browserSnapshot', description: 'List the interactive elements of the current page as refs', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'browserClick', description: 'Click an element by ref (send-like clicks require approval)', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'browserType', description: 'Type text into an element by ref', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'browserCurrentUrl', description: 'Get the current URL and title of the controlled tab', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'runPython', description: 'Run isolated Python in the task sandbox (no network, paid plans)', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'loadFromWorkspace', description: 'Copy a workspace file into the sandbox scratch', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'saveToWorkspace', description: 'Save a sandbox scratch file into workspace files', classification: 'write', defaultPolicy: 'ask' },
+  ],
 }
 
 /**
@@ -220,6 +236,19 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'saveFileToBrain',
     'sendFile',
     'fileDelete',
+  ],
+  // Computer use (docs/architecture/engine/computer-use.md): wired at boot
+  // from packages/core/src/sandbox/tools.ts, always present (a missing
+  // extension/sandbox backend returns a clear tool error, never a hang).
+  computer: [
+    'browserNavigate',
+    'browserSnapshot',
+    'browserClick',
+    'browserType',
+    'browserCurrentUrl',
+    'runPython',
+    'loadFromWorkspace',
+    'saveToWorkspace',
   ],
 }
 
