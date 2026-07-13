@@ -9,11 +9,15 @@
  * multi-hour audio and returns a `file_uri` referenced from `generateContent`.
  *
  * Why a continuation loop: even with `maxOutputTokens` raised, a full verbatim
- * transcript of a long call can exceed one response. When `finishReason` is
- * `MAX_TOKENS` we re-prompt "continue from <last timestamp>" and stitch the
- * windows, de-duplicating the seam. A coverage assertion flags a transcript
- * that never reached the audio's end so the caller never bills/ingests a
- * silently truncated result (the `transcribe.ts` silent-fail heritage).
+ * transcript of a long call can exceed one response. While the audio remains
+ * uncovered and the last window made forward progress we re-prompt "continue
+ * from <last timestamp>" and stitch the windows, de-duplicating the seam —
+ * REGARDLESS of finishReason: a MAX_TOKENS cut and a premature STOP (thinking
+ * models on hour-long audio emit a few minutes and stop cold — 2026-07-13)
+ * both continue; a no-progress window ends the run. A coverage assertion
+ * flags a transcript that never reached the audio's end so the caller never
+ * bills/ingests a silently truncated result (the `transcribe.ts` silent-fail
+ * heritage).
  *
  * The line format `[H:MM:SS] Speaker: text` is deliberately resilient to
  * truncation: a response cut mid-line drops only the trailing partial line, and
@@ -72,7 +76,11 @@ const DEFAULT_TIMEOUT_MS = 600_000
 // provider's `streamGeminiSSE` (gemini.ts): fail fast over accumulating an
 // unterminated MB-scale line.
 const MAX_SSE_BUFFER_BYTES = 8 * 1024 * 1024
-const MAX_CONTINUATION_WINDOWS = 12
+// A thinking-family model emits only ~3 audio-minutes of transcript per
+// window (2026-07-13: 12 windows covered 34 of 96 min before the old cap of
+// 12 ended the run), so the cap must accommodate hour-plus audio at that
+// rate. Each window is individually bounded by the AbortController deadline.
+const MAX_CONTINUATION_WINDOWS = 40
 const COVERAGE_TOLERANCE_MS = 30_000 // last line within 30s of the end = "covered"
 // Degeneration guard: a window whose text repeats a short unit (period ≤ 16
 // chars) for ≥ 64 consecutive matching chars is looping, not transcribing.
@@ -100,6 +108,15 @@ const DEGEN_RETRY_TEMPERATURE = 0.3
 // Total nudged retries per recording — bounds the extra COGS a pathological
 // file can burn.
 const MAX_DEGEN_RETRIES = 2
+// Stall recovery: a continuation window that adds NOTHING while audio remains
+// uncovered is a stall, not completion (2026-07-13: a 96-min recording ended
+// at 38.7 min mid-conversation — the model simply failed to advance past one
+// spot). Skip the resume point forward and retry, up to MAX_STALL_SKIPS
+// consecutive times per stall site (the budget resets on any progress; the
+// window cap still bounds total work). The cost is a potential gap of up to
+// SKIP * MAX_STALL_SKIPS in the transcript — better than losing the rest.
+const STALL_SKIP_MS = 90_000
+const MAX_STALL_SKIPS = 3
 const FILE_ACTIVE_POLL_MS = 2_000
 const FILE_ACTIVE_MAX_POLLS = 60 // up to 2 min for the file to become ACTIVE
 
@@ -316,6 +333,14 @@ export type TranscribeRecordingOptions = {
   timeoutMs?: number
   displayName?: string
   fetchFn?: typeof fetch
+  /** Per-window progress hook (observability — the worker logs it). */
+  onWindow?: (info: {
+    window: number
+    finishReason: string
+    added: number
+    degenerate: boolean
+    coveredMs: number
+  }) => void
 }
 
 /**
@@ -411,6 +436,13 @@ async function generateWindow(
       // repetition loop sticky — the retry samples its way out of the cycle.
       temperature: degenNudge ? DEGEN_RETRY_TEMPERATURE : 0,
       maxOutputTokens: opts.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      // Do NOT suppress thinking (`thinkingConfig: { thinkingBudget: 0 }`)
+      // even though thoughts consume most of each window's output tokens on
+      // thinking-family models: with thinking off, gemini-3-flash-preview
+      // REFUSES continuation windows outright ("I am prohibited from
+      // transcribing...") and cannot seek to the resume timestamp — measured
+      // 2026-07-13, side by side on the same file. Thinking is what makes
+      // seek-and-resume work; its token cost is the price of coverage.
     },
   }
 
@@ -515,6 +547,7 @@ export async function transcribeRecording(
   let degenerateWindows = 0
   let degenRetriesLeft = MAX_DEGEN_RETRIES
   let nudge = false
+  let stallSkipsLeft = MAX_STALL_SKIPS
 
   while (windows < MAX_CONTINUATION_WINDOWS) {
     const win = await generateWindow(opts, fileUri, continueFrom, nudge)
@@ -537,6 +570,13 @@ export async function transcribeRecording(
     const added = utterances.length - before
 
     const reachedEnd = lastTimestampMs(utterances) >= opts.durationMs - COVERAGE_TOLERANCE_MS
+    opts.onWindow?.({
+      window: windows,
+      finishReason: win.finishReason,
+      added,
+      degenerate,
+      coveredMs: lastTimestampMs(utterances),
+    })
 
     if (degenerate) {
       degenerateWindows++
@@ -555,11 +595,23 @@ export async function transcribeRecording(
     }
     nudge = false
 
-    const hitMaxTokens = win.finishReason === 'MAX_TOKENS'
-
-    // Stop when the model said it's done, when we've covered the audio, or when
-    // a continuation window made no forward progress (guards an infinite loop).
-    if (!hitMaxTokens || reachedEnd || added === 0) break
+    // Continue while audio remains uncovered and the window made forward
+    // progress — regardless of finishReason. A premature STOP is continued
+    // exactly like a MAX_TOKENS cut: thinking models on hour-long audio can
+    // emit a few minutes of transcript and stop cold (2026-07-13: window 1
+    // STOPped at 3.4 min of a 96-min recording; the old MAX_TOKENS-only rule
+    // ended the run there). MAX_CONTINUATION_WINDOWS bounds the loop.
+    if (reachedEnd) break
+    if (added === 0) {
+      // Stall: no forward progress with audio uncovered. Skip the resume
+      // point forward past the stuck spot and retry (bounded); only give up
+      // once the skip budget for this site is spent.
+      if (stallSkipsLeft <= 0) break
+      stallSkipsLeft--
+      continueFrom = (continueFrom ?? lastTimestampMs(utterances)) + STALL_SKIP_MS
+      continue
+    }
+    stallSkipsLeft = MAX_STALL_SKIPS // progress resets the stall budget
     continueFrom = lastTimestampMs(utterances)
   }
 

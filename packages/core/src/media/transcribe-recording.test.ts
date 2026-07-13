@@ -230,7 +230,7 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
     expect(res.utterances[res.utterances.length - 1].endMs).toBe(120_000)
   })
 
-  it('flags truncated when the transcript never reaches the audio end', async () => {
+  it('flags truncated when continuation makes no progress before the audio end', async () => {
     const onlyWindow = {
       text: '[0:00:02] Speaker 1: This is the very start and then it cuts off.',
       finishReason: 'STOP',
@@ -244,7 +244,77 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
       fetchFn,
     })
     expect(res.truncated).toBe(true)
-    expect(res.windows).toBe(1) // STOP -> no continuation attempted
+    // A premature STOP gets a continuation try, then the stall-skip budget
+    // (3 skips) — the mock re-emits the same line every time (no forward
+    // progress), so the loop exhausts 1 + 1 + 3 windows and stops.
+    expect(res.windows).toBe(5)
+  })
+
+  it('skips past a stall and recovers the rest of the audio', async () => {
+    // 2026-07-13 shape: mid-conversation the model stops advancing — window
+    // after window re-emits the seam. The loop must skip the resume point
+    // forward past the stuck spot instead of ending the run.
+    const w1 = {
+      text: ['[0:00:01] Speaker 1: opening.', '[0:03:20] Speaker 2: before the stall.'].join('\n'),
+      finishReason: 'STOP',
+    }
+    const stalled = { text: '[0:03:20] Speaker 2: before the stall.', finishReason: 'STOP' } // no progress
+    const recovered = {
+      text: ['[0:06:10] Speaker 1: after the gap.', '[0:09:50] Speaker 2: closing.'].join('\n'),
+      finishReason: 'STOP',
+    }
+    const { fetchFn, generateBodies } = makeMockFetch([w1, stalled, recovered])
+    const res = await transcribeRecording({
+      apiKey: 'k',
+      buffer: Buffer.from('x'),
+      mime: 'audio/mp4',
+      durationMs: 600_000,
+      fetchFn,
+    })
+    expect(res.windows).toBe(3)
+    expect(res.truncated).toBe(false)
+    expect(res.utterances.map((u) => u.text)).toEqual([
+      'opening.',
+      'before the stall.',
+      'after the gap.',
+      'closing.',
+    ])
+    // The skip pushed the resume point 90s past the stall site (0:03:20 -> 0:04:50).
+    expect(generateBodies()[2].prompt).toContain('AFTER 0:04:50')
+  })
+
+  it('continues past a premature STOP that leaves audio uncovered', async () => {
+    // 2026-07-13 shape: the model emits a few minutes of transcript and stops
+    // cold (finishReason STOP, nowhere near MAX_TOKENS) on a long recording.
+    // The loop must continue from the last line rather than end the run.
+    const prematureStop = {
+      text: ['[0:00:01] Speaker 1: opening remarks.', '[0:03:20] Speaker 2: early discussion.'].join('\n'),
+      finishReason: 'STOP',
+    }
+    const continuation = {
+      text: ['[0:03:20] Speaker 2: early discussion.', '[0:07:00] Speaker 1: middle part.', '[0:09:45] Speaker 2: closing.'].join('\n'),
+      finishReason: 'STOP',
+    }
+    const { fetchFn, generateBodies } = makeMockFetch([prematureStop, continuation])
+    const res = await transcribeRecording({
+      apiKey: 'k',
+      buffer: Buffer.from('x'),
+      mime: 'audio/mp4',
+      durationMs: 600_000,
+      fetchFn,
+    })
+    expect(res.windows).toBe(2)
+    expect(res.truncated).toBe(false)
+    expect(res.degenerateWindows).toBe(0)
+    expect(res.utterances.map((u) => u.text)).toEqual([
+      'opening remarks.',
+      'early discussion.',
+      'middle part.',
+      'closing.',
+    ])
+    // The continuation resumed from the last emitted line at normal temperature.
+    expect(generateBodies()[1].prompt).toContain('AFTER 0:03:20')
+    expect(generateBodies()[1].temperature).toBe(0)
   })
 
   it('retries a degenerate window with the temperature nudge and recovers coverage', async () => {
