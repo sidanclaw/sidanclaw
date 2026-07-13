@@ -690,25 +690,28 @@
   .doc-public-body ol ol ol { list-style-type: lower-roman; }
   .doc-public-body ol ol ol ol { list-style-type: decimal; }
   /* Toggle (details/summary) — clickable disclosure with a rotating triangle.
-     The summary content renders inline (the first paragraph), so the triangle +
-     label sit on one line; hover gives a clear "this is clickable" affordance. */
+     Geometry mirrors the editor's `.doc-toggle`: the triangle sits in the SAME
+     gutter as a bullet's disc (~7px from the margin) and the summary text + body
+     indent to 30px — the list's text indent — so a shared toggle lines up with a
+     `bulleted_list_item` exactly. The summary's first paragraph renders inline
+     beside the triangle; the triangle is absolutely positioned (out of flow) so
+     a wrapped summary line stays flush at the 30px indent. */
   .doc-public-body details > summary {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.375rem;
+    display: block;
+    position: relative;
     cursor: pointer;
     list-style: none;
     border-radius: 0.25rem;
-    padding: 1px 4px;
-    margin-left: -4px;
+    padding: 1px 4px 1px 30px;
   }
   .doc-public-body details > summary::-webkit-details-marker {
     display: none;
   }
   .doc-public-body details > summary::before {
     content: "";
-    flex-shrink: 0;
-    margin-top: 0.45em;
+    position: absolute;
+    left: 7px; /* == bullet disc left edge */
+    top: 0.72em; /* centre the triangle on the first text line */
     border-style: solid;
     border-width: 0.3em 0 0.3em 0.45em;
     border-color: transparent transparent transparent currentColor;
@@ -722,7 +725,7 @@
     background: var(--muted);
   }
   .doc-public-body .doc-toggle-body {
-    padding-left: 1.25rem;
+    padding-left: 30px;
   }
   /* Simple table (read-only / public) — mirrors the editor grid above. */
   .doc-public-body .doc-public-table {
@@ -1071,22 +1074,29 @@
   .doc-collab-editor .ProseMirror .doc-toggle {
     display: flex;
     align-items: flex-start;
-    gap: 0.25rem;
+    /* chevron gutter (21px) + this gap (9px) = 30px, the list's text indent
+       (`ul`/`ol` `padding-left: 30px`), so a toggle summary lines up with a
+       bulleted-list row's text exactly. */
+    gap: 9px;
   }
-  /* The triangle tracks the summary text: it's sized in `em`, and the node-view
-     stamps `data-summary` (`p`/`h1`..`h4`) so each heading level sets the
-     marker's `font-size` to that heading's size — bigger text → bigger triangle.
-     The marker is a filled (`fill`-only) triangle, so it reads solid at every
-     size with no per-level stroke tuning. `margin-top` centres it on that line:
-     marker centre = `marginTop + height/2`, set equal to `lineHeight/2` (all in
-     `em`), so `marginTop = (lineHeight − 1.2em)/2`. */
+  /* The chevron box is a FIXED 21px gutter — the same column a bullet's disc
+     occupies (disc centre ~10.5px from the margin) — so the triangle sits where
+     the disc sits and, with the 9px gap, the summary text lands at the list's
+     30px indent regardless of summary size. The triangle GLYPH still scales with
+     the summary: the node-view stamps `data-summary` (`p`/`h1`..`h4`) so each
+     heading level sets the marker's `font-size` (hence the `em`-sized SVG) to
+     that heading's size — bigger text → bigger triangle, same gutter. The marker
+     is a filled (`fill`-only) triangle, so it reads solid at every size with no
+     per-level stroke tuning. `margin-top` centres it on that line: marker centre
+     = `marginTop + height/2`, set equal to `lineHeight/2` (all in `em`), so
+     `marginTop = (lineHeight − 1.2em)/2`. */
   .doc-collab-editor .ProseMirror .doc-toggle-chevron {
     flex: 0 0 auto;
     font-size: 1rem;
     margin-top: 0.15em; /* body line-height 1.5 → (1.5 − 1.2)/2 */
     display: inline-flex;
     height: 1.2em;
-    width: 1.2em;
+    width: 21px;
     align-items: center;
     justify-content: center;
     border-radius: 0.25rem;
