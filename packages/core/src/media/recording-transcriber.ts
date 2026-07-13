@@ -20,6 +20,7 @@ import {
   transcribeRecordingChunks,
   type RecordingAudioChunk,
   type RecordingTranscriptionResult,
+  type TranscribeRecordingOptions,
 } from './transcribe-recording.js'
 
 export type RecordingTranscribeRequest = {
@@ -105,10 +106,14 @@ export function geminiTranscriber(opts: {
   apiKey: string
   model?: string
   fetchFn?: typeof fetch
+  /** Per-window progress hook, forwarded to the File-API path (observability —
+   *  the worker logs it). Set at construction from boot infra, not per request. */
+  onWindow?: TranscribeRecordingOptions['onWindow']
 }): RecordingTranscriber {
   const common = (req: RecordingTranscribeRequest) => ({
     apiKey: opts.apiKey,
     ...(opts.model ? { model: opts.model } : {}),
+    ...(opts.onWindow ? { onWindow: opts.onWindow } : {}),
     ...(req.displayName ? { displayName: req.displayName } : {}),
     ...(opts.fetchFn ? { fetchFn: opts.fetchFn } : {}),
   })
