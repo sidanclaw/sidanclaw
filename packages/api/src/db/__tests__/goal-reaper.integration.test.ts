@@ -269,3 +269,103 @@ describeIf('[COMP:goals/entity-count] entityCount done_when predicate (integrati
     expect(await evalCount({ entityCount: 'nonsense' })).toBe(false)
   })
 })
+
+describeIf('[COMP:goals/entity-count] discovery-until-N scenario (the fls flow, E2E over the real loop + DB)', () => {
+  let writeback: typeof import('../../goals/writeback.js')
+  let driverMod: typeof import('../../goals/driver.js')
+  let goalsDb: typeof import('../goals.js')
+  let client: pg.PoolClient
+  let userId: string
+  let workspaceId: string
+
+  beforeAll(async () => {
+    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
+    writeback = await import('../../goals/writeback.js')
+    driverMod = await import('../../goals/driver.js')
+    goalsDb = await import('../goals.js')
+    client = await pool!.connect()
+    userId = await makeUser(client)
+    workspaceId = await makeWorkspace(client, userId)
+  })
+  afterAll(() => client?.release())
+
+  it('runs discovery 5-at-a-time until 20 prospects exist, then self-terminates done and delivers', async () => {
+    // The goal: "run discovery until 20 prospects are identified", done_when
+    // engine-verified over saved prospect entities — nothing model-judged.
+    const created = await goalsDb.createGoal({
+      workspaceId,
+      outcome: 'Identify 20 prospects for outreach',
+      doneWhen: {
+        kind: 'query',
+        query: { description: '20 prospects saved', predicate: { entityCount: { kind: 'company', min: 20, attributeEquals: { key: 'prospect', value: 'true' } } } },
+      } as never,
+      means: { workflowId: '00000000-0000-0000-0000-00000000000f' },
+      createdByUserId: userId,
+      confirmed: true,
+    })
+
+    // Each "workflow run" saves 5 prospect companies — the 5-at-a-time search.
+    let runs = 0
+    const saveFiveProspects = async () => {
+      runs++
+      for (let i = 0; i < 5; i++) {
+        await client.query(
+          `INSERT INTO entities (kind, display_name, workspace_id, user_id, created_by_user_id, source, attributes)
+           VALUES ('company', 'prospect-' || gen_random_uuid(), $1, $2, $2, 'test', '{"prospect":"true"}'::jsonb)`,
+          [workspaceId, userId],
+        )
+      }
+      return { runId: `run-${runs}`, terminal: true, completed: true }
+    }
+
+    // The real driver over the real store/resolvers; the re-arm chain is driven
+    // inline (each scheduled tick fires immediately) so the test IS the loop.
+    const delivered: string[] = []
+    const chain: Array<{ goalId: string; state: import('../../goals/driver.js').GoalLoopState }> = []
+    const driver = driverMod.createGoalDriver({
+      goalStore: {
+        getByIdSystem: (id: string) => goalsDb.getGoalByIdSystem(id),
+        setStatusSystem: (id: string, s: never, r?: never) => goalsDb.setGoalStatusSystem(id, s, r),
+        countOpenSubGoalsSystem: (id: string) => goalsDb.countOpenSubGoalsSystem(id),
+      } as never,
+      tryClaim: (id) => goalsDb.tryClaimGoalForTick(id),
+      sessionCostUsd: async () => 0.05,
+      meteringAvailable: () => true,
+      dispatchRun: saveFiveProspects,
+      deliver: async (_g, terminal) => void delivered.push(terminal),
+      scheduleGoalTick: async (g, _fireAt, state) => void chain.push({ goalId: g.id, state }),
+      getAwaitingEvent: async () => null,
+      setAwaitingEvent: async () => {},
+      clearAwaitingEvent: async () => false,
+      now: () => new Date(),
+    })
+
+    await driver.kickoffGoal(created.id)
+    expect(chain).toHaveLength(1) // armed
+    let ticks = 0
+    while (chain.length > 0 && ticks < 10) {
+      const next = chain.shift()!
+      ticks++
+      await driver.tickGoal(next.goalId, next.state)
+    }
+
+    // 4 iterations × 5 prospects = 20 → the 4th tick's evaluation meets the
+    // predicate mid-loop... the run happens BEFORE the evaluation each tick, so
+    // the goal completes on the tick that saved the 20th prospect.
+    expect(runs).toBe(4)
+    expect(ticks).toBe(4)
+    const final = await goalsDb.getGoalByIdSystem(created.id)
+    expect(final?.status).toBe('done')
+    expect(delivered).toEqual(['done']) // no silent termination
+    const count = await client.query(
+      `SELECT count(*)::int AS n FROM entities WHERE workspace_id = $1 AND attributes->>'prospect' = 'true' AND valid_to IS NULL`,
+      [workspaceId],
+    )
+    expect(count.rows[0].n).toBe(20)
+
+    // The budget-defaulting invariant: the goal armed via kickoffGoal without
+    // applyDefaultBudget wired stays as-authored — assert the loop terminated
+    // on the PREDICATE, not a budget backstop.
+    expect(final?.blockerReason).toBeNull()
+  })
+})
