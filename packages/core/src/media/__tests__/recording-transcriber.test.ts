@@ -26,6 +26,7 @@ function result(overrides: Partial<RecordingTranscriptionResult> = {}): Recordin
     usages: [{ usage: null, model: 'test', costUsd: 0.01 }],
     windows: 1,
     truncated: false,
+    degenerateWindows: 0,
     ...overrides,
   }
 }

@@ -177,6 +177,8 @@ export function scribeTranscriber(opts: ScribeTranscriberOptions): RecordingTran
         usages: [{ usage: null, model: name, costUsd: hours * rate }],
         windows: 1,
         truncated: coverageTruncated(utterances, req.durationMs),
+        // Single-shot file provider: no windowed continuation, so no degeneration guard runs.
+        degenerateWindows: 0,
       }
     },
   }

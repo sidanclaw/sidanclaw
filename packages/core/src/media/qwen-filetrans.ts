@@ -160,6 +160,8 @@ export function qwenFiletransTranscriber(opts: QwenFiletransOptions): RecordingT
         ],
         windows: 1,
         truncated: coverageTruncated(utterances, req.durationMs),
+        // Single-shot file provider: no windowed continuation, so no degeneration guard runs.
+        degenerateWindows: 0,
       }
     },
   }

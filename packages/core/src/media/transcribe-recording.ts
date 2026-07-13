@@ -801,5 +801,8 @@ export async function transcribeRecordingChunks(
     usages,
     windows: chunks.length,
     truncated: failedChunks > 0 || utterances.length === 0,
+    // Chunk-parallel mode has no per-window degeneration guard (that runs on the
+    // continuation-window path only), so nothing degenerates to count here.
+    degenerateWindows: 0,
   }
 }
