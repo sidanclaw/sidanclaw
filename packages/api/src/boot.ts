@@ -2665,6 +2665,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('browserClick', computerTools.browserClick)
   allTools.set('browserType', computerTools.browserType)
   allTools.set('browserCurrentUrl', computerTools.browserCurrentUrl)
+  // Research read-browse (computer-use.md §12): browserReadPage is
+  // deliberately NOT in allTools — interactive turns have the full flat
+  // tools, and the standard preflight's cheap read-only pass must never be
+  // able to spin up a sandbox. It reaches exactly one surface: research
+  // workers, via the manager's post-sandbox-registration injection seam
+  // (the WorkerManager itself was built from a pre-sandbox tool snapshot).
+  workerManager.setResearchBrowseTools(
+    new Map([['browserReadPage', computerTools.browserReadPage]]),
+  )
 
   // Isolated Python + the workspace-scoped file-bridge (§4.7, §4.12). The
   // files port wraps FilesApi so every byte movement stays under workspace

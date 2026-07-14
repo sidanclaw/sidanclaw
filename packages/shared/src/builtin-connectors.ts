@@ -182,6 +182,11 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'browserClick', description: 'Click an element by ref (send-like clicks require approval)', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserType', description: 'Type text into an element by ref', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserCurrentUrl', description: 'Get the current URL and title of the controlled tab', classification: 'read', defaultPolicy: 'allow' },
+    // browserReadPage is the sends-forbidden reader research workers use
+    // (cloud-only, identity-less, no click/type surface at all). It is not
+    // injected into interactive turns — see computer-use.md → "Reaching the
+    // browser" — but it is model-callable, so it stays governable here.
+    { name: 'browserReadPage', description: 'Read a rendered page in the governed cloud browser (read-only; used by research workers)', classification: 'read', defaultPolicy: 'allow' },
     // runBrowserSkill is 'allow' by default for the same reason browserClick
     // is: the governed runner gates every terminal send in-flight
     // (grant / async approval / verb ceiling) — a static 'ask' would gate
@@ -264,6 +269,7 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'browserClick',
     'browserType',
     'browserCurrentUrl',
+    'browserReadPage',
     'runBrowserSkill',
     'listBrowserSkills',
     'listBrowserProfiles',

@@ -3,7 +3,7 @@ import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, up
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels } from '../db/sessions.js'
 import { getSelfEntityId } from '../db/memories.js'
-import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock } from '@sidanclaw/core'
+import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent } from '@sidanclaw/core'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@sidanclaw/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { gateSessionRead } from './sessions.js'
@@ -1527,6 +1527,20 @@ export function chatRoutes(options: WebChatOptions): Router {
       // The LLM call happens here; usage gets recorded later, once the
       // session + user message rows exist for attribution. We carry the
       // classifier result through `adaptiveResearchOverhead`.
+      // Operate-site override (docs/architecture/engine/coordinator-pattern.md
+      // → "Adaptive entry and the operate-site override"): a request to open /
+      // browse / log into / act on ONE named site or URL must keep the normal
+      // query loop — the coordinator allowlist and the research workers'
+      // read-only boot snapshot structurally exclude every computer-use tool,
+      // so entering delegation makes the browse impossible (incident
+      // 2026-07-13: "browse luma" → 69-webSearch coordinator fan-out, zero
+      // browser calls). Computed deterministically here so `mode:'default'`
+      // and classifier-ineligible turns are covered too; the adaptive
+      // classifier below ORs in its language-agnostic verdict. It only gates
+      // the AUTOMATIC delegation triggers (adaptive entry, the Pro/Max
+      // splitter, the Flash standard preflight) — the explicit research
+      // toggle wins, which the `!researchMode` guard encodes.
+      let operateSiteIntent = !researchMode && !!message && detectOperateSiteIntent(message)
       let adaptiveResearchOverhead: {
         model: string | null
         usage: TokenUsage | null
@@ -1546,12 +1560,13 @@ export function chatRoutes(options: WebChatOptions): Router {
         const adaptive = await classifyResearchIntent({
           provider: options.provider,
           message,
-        }).catch(() => ({ research: false, reason: null, usage: null, model: null }))
+        }).catch(() => ({ research: false, operateSite: false, reason: null, usage: null, model: null }))
         adaptiveResearchOverhead = {
           model: adaptive.model,
           usage: adaptive.usage,
           reason: adaptive.reason,
         }
+        operateSiteIntent = operateSiteIntent || adaptive.operateSite
         if (adaptive.research) {
           researchMode = true
           // `phase` is a stable, client-localizable code; `message` stays for
@@ -3503,7 +3518,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           // asked for deep mode; running Gemini just to confirm is waste)
           // and seeds the coordinator path unconditionally.
           let splitterDecidedCoordinator = false
-          if (!researchMode) {
+          // Operate-site turns never consult the splitter — a browse of one
+          // named site must not be decomposed into search workers that cannot
+          // browse (see the operateSiteIntent block above). researchMode
+          // being true here means the explicit toggle: splitter is moot.
+          if (!researchMode && !operateSiteIntent) {
             const { classifySplit } = await import('@sidanclaw/core')
             const splitResult = await classifySplit({ provider: options.provider, message })
               .catch(() => ({ tasks: null, usage: null, model: null }))
@@ -3619,7 +3638,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               }
             })
           }
-        } else if (!isDocResearchTurn) {
+        } else if (!isDocResearchTurn && !operateSiteIntent) {
           // Standard: application-layer pre-flight.
           //
           // Skipped for a doc research turn: the preflight can return
@@ -3629,6 +3648,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           // turn's soul (RESEARCH_MODE_BLOCK) tells the model to search the web
           // and author findings itself — so it must keep those tools. Letting
           // it run its own search→author loop is the whole point of the mode.
+          //
+          // Also skipped for an operate-site turn (see operateSiteIntent
+          // above): pre-searching a site the model is about to open directly
+          // wastes worker calls and biases the turn toward synthesis-from-
+          // snippets instead of the browse the user asked for.
           try {
             const preflight = await runPreflight({
               provider: options.provider,
