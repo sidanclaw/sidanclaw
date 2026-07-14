@@ -43,7 +43,16 @@ const HIDDEN_BODY_KEYS = new Set([
  * them so a field never shows up twice.
  */
 export const PRIMITIVE_DEDICATED_KEYS: Record<string, ReadonlySet<string>> = {
-  task: new Set(["title", "status", "due_at", "tags", "sensitivity", "attributes"]),
+  task: new Set([
+    "title",
+    "status",
+    "assignee_id",
+    "assignee_name",
+    "due_at",
+    "tags",
+    "sensitivity",
+    "attributes",
+  ]),
   memory: new Set(["summary", "detail", "scope", "sensitivity", "tags"]),
   workspace_file: new Set(["name", "sensitivity", "tags"]),
   contact: new Set(["name", "display_name", "sensitivity", "kind"]),

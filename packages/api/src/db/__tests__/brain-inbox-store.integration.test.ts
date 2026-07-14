@@ -17,6 +17,7 @@
  * auto-prune — soft-delete parity (2026-07-09)".
  */
 
+import { randomUUID } from 'node:crypto'
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
 
@@ -122,6 +123,185 @@ async function makeEdge(
   )
   return r.rows[0].id
 }
+
+/**
+ * A user with an explicit name + email (for assignee-name resolution).
+ * `emailLocal` is uniquified per row — `users.email` is UNIQUE
+ * (`idx_users_email`) and the test DB is not truncated between runs, so a
+ * fixed literal collides on the second run. Returns the generated email so
+ * the email-fallback assertion can compare against the real value.
+ */
+async function makeNamedUser(
+  client: pg.PoolClient,
+  name: string | null,
+  emailLocal: string | null,
+): Promise<{ id: string; email: string | null }> {
+  const email = emailLocal === null ? null : `${emailLocal}+${randomUUID()}@example.com`
+  const r = await client.query(
+    `INSERT INTO users (id, auth_provider, auth_provider_id, name, email)
+     VALUES (gen_random_uuid(), 'test', 'inbox-' || gen_random_uuid(), $1, $2)
+     RETURNING id`,
+    [name, email],
+  )
+  return { id: r.rows[0].id, email }
+}
+
+/** Add a workspace_members row and return its id (what tasks.assignee_id
+ *  stores — NOT the user id). */
+async function addMemberReturning(
+  client: pg.PoolClient,
+  workspaceId: string,
+  userId: string,
+): Promise<string> {
+  const r = await client.query(
+    `INSERT INTO workspace_members (id, workspace_id, user_id, role)
+     VALUES (gen_random_uuid(), $1, $2, 'member')
+     RETURNING id`,
+    [workspaceId, userId],
+  )
+  return r.rows[0].id
+}
+
+/** Model-authored, unverified task — one review item. `assigneeMemberId` is a
+ *  workspace_members row id (or null for unassigned). */
+async function makeTask(
+  client: pg.PoolClient,
+  workspaceId: string,
+  userId: string,
+  assigneeMemberId: string | null,
+): Promise<string> {
+  const r = await client.query(
+    `INSERT INTO tasks (title, status, workspace_id, user_id, assignee_id, source)
+     VALUES ('inbox-test-task', 'todo', $1, $2, $3, 'model')
+     RETURNING id`,
+    [workspaceId, userId, assigneeMemberId],
+  )
+  return r.rows[0].id
+}
+
+describeIf('[COMP:brain/inbox-store] task assignee_name resolution (integration)', () => {
+  let store: typeof import('../brain-inbox-store.js')
+  let userId: string
+  let workspaceId: string
+
+  beforeAll(async () => {
+    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
+    store = await import('../brain-inbox-store.js')
+  })
+
+  beforeEach(async () => {
+    const client = await pool!.connect()
+    try {
+      userId = await makeUser(client)
+      workspaceId = await makeWorkspace(client, userId)
+      await addMember(client, workspaceId, userId)
+    } finally {
+      client.release()
+    }
+  })
+
+  it('resolves assignee_id (a member id) to the member name in the single-row fetch', async () => {
+    const client = await pool!.connect()
+    let taskId: string
+    try {
+      const member = await makeNamedUser(client, 'Alice Assignee', 'alice')
+      const memberId = await addMemberReturning(client, workspaceId, member.id)
+      taskId = await makeTask(client, workspaceId, userId, memberId)
+    } finally {
+      client.release()
+    }
+
+    const row = await store.getBrainInboxRow(workspaceId, 'task', taskId)
+    expect(row?.body.assignee_name).toBe('Alice Assignee')
+  })
+
+  it('falls back to email when the member user has no name', async () => {
+    const client = await pool!.connect()
+    let taskId: string
+    let email: string | null
+    try {
+      const member = await makeNamedUser(client, null, 'noname')
+      email = member.email
+      const memberId = await addMemberReturning(client, workspaceId, member.id)
+      taskId = await makeTask(client, workspaceId, userId, memberId)
+    } finally {
+      client.release()
+    }
+
+    const row = await store.getBrainInboxRow(workspaceId, 'task', taskId)
+    expect(row?.body.assignee_name).toBe(email)
+  })
+
+  it('leaves assignee_name null when the member user has neither name nor email', async () => {
+    // The only shape where `assignee_id` is set but no name resolves — the
+    // drawer's raw-id fallback path. Not reachable via a dangling member id:
+    // `tasks_assignee_id_fkey` is ON DELETE SET NULL (see the member-removal
+    // test below), so `assignee_id` can never point at a missing member.
+    const client = await pool!.connect()
+    let taskId: string
+    try {
+      const member = await makeNamedUser(client, null, null)
+      const memberId = await addMemberReturning(client, workspaceId, member.id)
+      taskId = await makeTask(client, workspaceId, userId, memberId)
+    } finally {
+      client.release()
+    }
+
+    const row = await store.getBrainInboxRow(workspaceId, 'task', taskId)
+    expect(row?.body.assignee_id).not.toBeNull()
+    expect(row?.body.assignee_name).toBeNull()
+  })
+
+  it('leaves assignee_name null for an unassigned task', async () => {
+    const client = await pool!.connect()
+    let taskId: string
+    try {
+      taskId = await makeTask(client, workspaceId, userId, null)
+    } finally {
+      client.release()
+    }
+
+    const row = await store.getBrainInboxRow(workspaceId, 'task', taskId)
+    expect(row?.body.assignee_id).toBeNull()
+    expect(row?.body.assignee_name).toBeNull()
+  })
+
+  it('nulls the assignment when the member is removed (FK ON DELETE SET NULL)', async () => {
+    // `tasks_assignee_id_fkey` is ON DELETE SET NULL, so removing a member
+    // clears the assignment rather than leaving a dangling id — there is no
+    // "assignee_id points at a missing member" state to resolve a name for.
+    const client = await pool!.connect()
+    let taskId: string
+    try {
+      const member = await makeNamedUser(client, 'Carol Departed', 'carol')
+      const memberId = await addMemberReturning(client, workspaceId, member.id)
+      taskId = await makeTask(client, workspaceId, userId, memberId)
+      await client.query('DELETE FROM workspace_members WHERE id = $1', [memberId])
+    } finally {
+      client.release()
+    }
+
+    const row = await store.getBrainInboxRow(workspaceId, 'task', taskId)
+    expect(row?.body.assignee_id).toBeNull()
+    expect(row?.body.assignee_name).toBeNull()
+  })
+
+  it('resolves assignee_name in the list branch too', async () => {
+    const client = await pool!.connect()
+    let taskId: string
+    try {
+      const member = await makeNamedUser(client, 'Bob Lister', 'bob')
+      const memberId = await addMemberReturning(client, workspaceId, member.id)
+      taskId = await makeTask(client, workspaceId, userId, memberId)
+    } finally {
+      client.release()
+    }
+
+    const { rows } = await store.listBrainInbox({ workspaceId, primitive: 'task' })
+    const task = rows.find((r) => r.id === taskId)
+    expect(task?.body.assignee_name).toBe('Bob Lister')
+  })
+})
 
 describeIf('[COMP:brain/inbox-store] entity_link dangling detection (integration)', () => {
   let store: typeof import('../brain-inbox-store.js')

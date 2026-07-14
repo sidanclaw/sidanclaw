@@ -273,6 +273,9 @@ function propertyIcon(key: string): React.ReactNode {
       return <Shield />;
     case "scope":
       return <Users />;
+    case "assignee_id":
+    case "assignee_name":
+      return <UserRound />;
     case "saved":
     case "created_at":
     case "updated_at":
@@ -1941,6 +1944,19 @@ function PrimitiveSection({
   const taskTitle = isTask ? String(detail.body.title ?? "") : "";
   const taskStatus = isTask ? String(detail.body.status ?? "todo") : "todo";
   const taskDueDate = isTask ? isoToDateInput(detail.body.due_at) : "";
+  // Assignee: the API resolves `assignee_id` (a workspace_members id) to the
+  // member's display name (`assignee_name` = name, else email). Unassigned →
+  // "" so the row renders Empty. A member whose user carries neither name nor
+  // email is the only shape with an id but no name — label it rather than
+  // leaking the raw uuid (a removed member can't dangle here: the FK is
+  // ON DELETE SET NULL).
+  const taskAssignee = isTask
+    ? detail.body.assignee_name
+      ? String(detail.body.assignee_name)
+      : detail.body.assignee_id
+        ? labels.unknownMember
+        : ""
+    : "";
 
   const [whyDetailsOpen, setWhyDetailsOpen] = useState(false);
   const [whyLoading, setWhyLoading] = useState(true);
@@ -2086,6 +2102,13 @@ function PrimitiveSection({
               label={propLabels.due_at}
               value={taskDueDate}
               onCommit={(v) => commitChanges({ due_at: dateInputToIso(v) })}
+            />
+            {/* Assignee is resolved + read-only here — reassigning goes through
+                the task tools, not the review drawer. */}
+            <StaticProperty
+              icon={propertyIcon("assignee_id")}
+              label={propLabels.assignee}
+              value={taskAssignee}
             />
             <TagsProperty
               icon={propertyIcon("tags")}

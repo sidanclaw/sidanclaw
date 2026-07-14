@@ -116,6 +116,18 @@ describe("[COMP:app-web/brain-property-fields] property-edit logic", () => {
     expect(rows).toEqual([["priority", "high"]]);
   });
 
+  it("excludes the resolved assignee fields from a task's generic list", () => {
+    // assignee_id + assignee_name render as one dedicated "Assignee" row, so
+    // neither should fall through to the raw MoreProperties list.
+    const rows = extraBodyFields("task", {
+      title: "T",
+      assignee_id: "3f2b1a00-0000-0000-0000-000000000000",
+      assignee_name: "Alice Assignee",
+      priority: "high",
+    });
+    expect(rows).toEqual([["priority", "high"]]);
+  });
+
   it("keeps generic fields for primitives without a dedicated set", () => {
     const rows = extraBodyFields("unknown_primitive", {
       alpha: "a",

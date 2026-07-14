@@ -2887,6 +2887,7 @@ export const ja: Dictionary = {
       confirmedChip: "確認済み",
       moreProperties: "他{count}件のプロパティ",
       fewerProperties: "折りたたむ",
+      unknownMember: "不明なメンバー",
       threadHeading: "このエントリについて質問",
       threadEphemeral: "保存されません",
       threadDisclosure:
@@ -2900,6 +2901,7 @@ export const ja: Dictionary = {
         title: "タイトル",
         status: "ステータス",
         due_at: "期限",
+        assignee: "担当者",
         tags: "タグ",
         sensitivity: "機密度",
         scope: "共有範囲",

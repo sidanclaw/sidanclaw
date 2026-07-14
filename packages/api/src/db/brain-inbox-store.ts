@@ -110,6 +110,21 @@ function edgeEndpointLabelSql(kindCol: string, idCol: string): string {
              ELSE NULL END)`
 }
 
+/** SQL scalar: resolve a task's `assignee_id` — which stores a
+ *  `workspace_members` row id, NOT a user id (see `updateTask` in
+ *  `packages/core/src/tasks/tools.ts`) — to the member's display name,
+ *  `COALESCE(users.name, users.email)`. Correlated on the outer `tasks`
+ *  row via `${idCol}`. Resolves to NULL when the task is unassigned
+ *  (`assignee_id` NULL) or the member id is dangling (member removed), so
+ *  the drawer falls back to the raw id / "Empty". Joins by the unique
+ *  `workspace_members.id` PK, so no extra workspace scoping is needed. */
+function assigneeNameSql(idCol: string): string {
+  return `(SELECT COALESCE(u.name, u.email)
+             FROM workspace_members wm
+             JOIN users u ON u.id = wm.user_id
+            WHERE wm.id = ${idCol})`
+}
+
 /** SQL boolean: is `entity_link` row `${alias}` DANGLING — i.e. does either
  *  endpoint point at a row that is no longer LIVE? An endpoint counts as
  *  present only when its row exists AND is active (`valid_to IS NULL AND
@@ -350,6 +365,7 @@ export async function listBrainInbox(params: {
                'title', title,
                'status', status,
                'assignee_id', assignee_id,
+               'assignee_name', ${assigneeNameSql('tasks.assignee_id')},
                'due_at', due,
                'tags', tags,
                'attributes', attributes,
@@ -635,7 +651,9 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
            verified_at AS "verifiedAt",
            jsonb_build_object(
              'title', title, 'status', status,
-             'assignee_id', assignee_id, 'due_at', due,
+             'assignee_id', assignee_id,
+             'assignee_name', ${assigneeNameSql('tasks.assignee_id')},
+             'due_at', due,
              'tags', tags, 'attributes', attributes,
              'sensitivity', sensitivity,
              'source_episode_id', source_episode_id

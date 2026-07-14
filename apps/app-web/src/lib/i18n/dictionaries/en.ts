@@ -3088,6 +3088,7 @@ export const en = {
       confirmedChip: "Confirmed",
       moreProperties: "{count} more properties",
       fewerProperties: "Show less",
+      unknownMember: "Unknown member",
       threadHeading: "Ask about this entry",
       threadEphemeral: "Not saved",
       threadDisclosure:
@@ -3101,6 +3102,7 @@ export const en = {
         title: "Title",
         status: "Status",
         due_at: "Due date",
+        assignee: "Assignee",
         tags: "Tags",
         sensitivity: "Sensitivity",
         scope: "Scope",
