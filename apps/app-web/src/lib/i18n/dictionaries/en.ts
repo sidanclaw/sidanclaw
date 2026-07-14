@@ -5059,6 +5059,11 @@ export const en = {
     stopConfirmBody:
       "The cloud browser closes now. Anything it downloaded is already saved to your workspace files.",
     stopConfirmAction: "Stop task",
+    loginDoneCta: "Done: close this browser",
+    liveChip: {
+      active: "The assistant's browser is running",
+      watch: "Watch live",
+    },
     profiles: {
       title: "Browser profiles",
       description:
@@ -5102,6 +5107,14 @@ export const en = {
       grantRevokeConfirmBody:
         "\"{skill}\" will ask you again before every send on this profile.",
       grantRevokeConfirmAction: "Revoke",
+      loginLabel: "Sign in to a site",
+      loginPlaceholder: "instagram.com or a full URL",
+      loginAction: "Open sign-in browser",
+      loginOpening: "Opening...",
+      loginFailed:
+        "Could not open the sign-in browser. Only the profile's owner can sign in, and cloud browsing must be configured on this deployment.",
+      loginHint:
+        "Opens the site in a cloud browser you control. Sign in there and save the session into this profile; your password goes to the site only, never to us.",
     },
   },
 };

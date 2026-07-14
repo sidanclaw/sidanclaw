@@ -4846,6 +4846,11 @@ export const ja: Dictionary = {
     stopConfirmBody:
       "クラウドブラウザを今すぐ閉じます。ダウンロード済みのファイルはワークスペースのファイルに保存済みです。",
     stopConfirmAction: "タスクを停止",
+    loginDoneCta: "完了: このブラウザを閉じる",
+    liveChip: {
+      active: "アシスタントのブラウザが動作中です",
+      watch: "ライブで見る",
+    },
     profiles: {
       title: "ブラウザプロフィール",
       description:
@@ -4888,6 +4893,14 @@ export const ja: Dictionary = {
       grantRevokeConfirmTitle: "この常時許可を取り消しますか？",
       grantRevokeConfirmBody: "「{skill}」は、このプロフィールでの送信のたびに再度確認するようになります。",
       grantRevokeConfirmAction: "取り消す",
+      loginLabel: "サイトにサインイン",
+      loginPlaceholder: "instagram.com または完全な URL",
+      loginAction: "サインイン用ブラウザを開く",
+      loginOpening: "開いています...",
+      loginFailed:
+        "サインイン用ブラウザを開けませんでした。サインインできるのはプロフィールの所有者のみで、このデプロイでクラウドブラウジングが設定されている必要があります。",
+      loginHint:
+        "あなたが操作するクラウドブラウザでサイトを開きます。そこでサインインして、セッションをこのプロフィールに保存してください。パスワードはサイトにのみ送られ、私たちには届きません。",
     },
   },
 };

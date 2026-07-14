@@ -4801,6 +4801,11 @@ export const zh: Dictionary = {
     stopConfirmTitle: "要停止這個瀏覽器任務嗎？",
     stopConfirmBody: "雲端瀏覽器將立即關閉。已下載的檔案都已存入你的工作空間檔案。",
     stopConfirmAction: "停止任務",
+    loginDoneCta: "完成: 關閉這個瀏覽器",
+    liveChip: {
+      active: "助理的瀏覽器正在執行",
+      watch: "即時觀看",
+    },
     profiles: {
       title: "瀏覽器身分",
       description:
@@ -4841,6 +4846,12 @@ export const zh: Dictionary = {
       grantRevokeConfirmTitle: "要撤銷這個永遠允許嗎？",
       grantRevokeConfirmBody: "「{skill}」之後在這個身分上的每次送出都會再次詢問你。",
       grantRevokeConfirmAction: "撤銷",
+      loginLabel: "登入網站",
+      loginPlaceholder: "instagram.com 或完整網址",
+      loginAction: "開啟登入瀏覽器",
+      loginOpening: "開啟中...",
+      loginFailed: "無法開啟登入瀏覽器。只有身分的擁有者可以登入，且此部署必須已設定雲端瀏覽。",
+      loginHint: "在一個由你操作的雲端瀏覽器開啟該網站。在裡面登入並把工作階段存進這個身分；密碼只會送到該網站，不會經過我們。",
     },
   },
 };

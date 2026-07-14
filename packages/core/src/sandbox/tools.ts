@@ -427,9 +427,18 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
             meta: { backend, loginWall: true },
           }
         }
+        // The live view is not only for login walls: sites like Instagram
+        // embed their login form at a plain URL the wall regex can never
+        // match, and "let me watch / take over" is a user ask the model must
+        // be able to answer. Every cloud navigate carries the link.
+        const liveLink = backend === 'cloud' ? opts.takeoverLinkFor?.(context) : null
         return {
-          data: `Opened ${res.url} (${backend} browser). Take browserSnapshot to see the page.`,
-          meta: { backend },
+          data:
+            `Opened ${res.url} (${backend} browser). Take browserSnapshot to see the page.` +
+            (liveLink
+              ? ` The user can watch this browser live and take over (e.g. to sign in) at: ${liveLink} — share that link whenever they ask to watch, sign in, or take over.`
+              : ''),
+          meta: { backend, ...(liveLink ? { takeoverUrl: liveLink } : {}) },
         }
       } catch (err) {
         emit(

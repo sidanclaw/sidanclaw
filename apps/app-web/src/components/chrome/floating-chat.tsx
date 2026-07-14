@@ -133,6 +133,10 @@ import {
   ChatActivitySummary,
   type ResearchPhase,
 } from "@/components/chrome/chat-activity";
+import {
+  ComputerLiveChip,
+  isBrowserToolName,
+} from "@/components/chrome/computer-live-chip";
 import { authFetch } from "@/lib/auth-fetch";
 import { publishBuildActivity } from "@/lib/build-activity";
 import {
@@ -2236,6 +2240,14 @@ export function FloatingChat({
 
   const messages = session.state.messages as MessageWithViews[];
   const showEmpty = messages.length === 0 && !isStreaming;
+  // A browser tool anywhere in this session's activity (live timeline or a
+  // restored receipt) arms the live-browser chip's task probe.
+  const browserToolSeen = useMemo(
+    () =>
+      toolTimeline.some((tool) => isBrowserToolName(tool.name)) ||
+      messages.some((msg) => msg.toolsUsed?.some((tool) => isBrowserToolName(tool.name))),
+    [toolTimeline, messages],
+  );
   // The page this chat will act on, derived from the path (the same id
   // sent as `docViewId` on send) and reconciled against the shell's
   // resolved metadata so the composer chip never names a stale page. See
@@ -2618,6 +2630,14 @@ export function FloatingChat({
 
         {/* Composer */}
         <div className="shrink-0 border-t border-border bg-card/40 px-3 py-2.5">
+          {/* Live-browser chip — a persistent window into the assistant's
+              cloud browser (watch / take over), probed off the task API so it
+              never depends on the model relaying a link. */}
+          <ComputerLiveChip
+            workspaceId={workspaceId}
+            sessionId={session.state.sessionId}
+            browserToolSeen={browserToolSeen}
+          />
           {/* Soft double-text guard — warns when another member already has the
               assistant working on this page (presence over Yjs awareness). */}
           {othersRun ? (
