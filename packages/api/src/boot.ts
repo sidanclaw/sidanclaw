@@ -287,6 +287,8 @@ import { createTeamspaceStore } from './db/teamspace-store.js'
 import { decksRoutes } from './routes/decks.js'
 import { createDeckStore } from './db/deck-store.js'
 import { publicShareRoutes } from './routes/public-share.js'
+import { publicSiteRoutes } from './routes/public-sites.js'
+import { createDomainProvisioner } from './domains/provisioner.js'
 import { docThemesRoutes } from './routes/doc-themes.js'
 import { runIngestPage } from './doc/ingest-page-runner.js'
 import { internalIngestRoutes } from './doc/internal-ingest-route.js'
@@ -303,6 +305,7 @@ import {
   createBlueprintRecordTools,
 } from './synthesis/blueprint-record-tools.js'
 import { createDbPageGrantStore } from './db/page-grant-store.js'
+import { createDbPageDomainStore } from './db/page-domain-store.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbBlueprintRecordStore } from './db/blueprint-records-store.js'
 import { createDbPageActionsStore } from './db/page-actions-store.js'
@@ -442,6 +445,14 @@ export interface OpenApiEnv {
   // flag is necessary but NOT sufficient — boot also requires live metering
   // (resolveUnattendedComputerUse). Ships dark.
   COMPUTER_USE_UNATTENDED_ENABLED?: boolean
+  // Custom domains for published pages (migration 324;
+  // docs/architecture/features/custom-domains.md). Vercel pair set → hosted
+  // provisioner; else manual-DNS verification against the CNAME target.
+  PAGE_DOMAIN_VERCEL_TOKEN?: string
+  PAGE_DOMAIN_VERCEL_PROJECT_ID?: string
+  PAGE_DOMAIN_VERCEL_TEAM_ID?: string
+  PAGE_DOMAIN_CNAME_TARGET?: string
+  PAGE_DOMAINS_MAX_PER_WORKSPACE?: string
 }
 
 /**
@@ -897,6 +908,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const homeDockStore = createDbHomeDockStore()
   const docEntityStore = createDbDocEntityStore()
   const pageGrantStore = createDbPageGrantStore()
+  const pageDomainStore = createDbPageDomainStore()
+  const domainProvisioner = createDomainProvisioner(env)
   const workspaceGroupStore = createDbWorkspaceGroupStore()
   const docThemesStore = createDbDocThemesStore()
   const episodicStore = createDbEpisodicStore()
@@ -3288,6 +3301,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     gcs: filesBlobClient,
   }))
 
+  // Custom-domain site render — PUBLIC, same containment as publicShareRoutes
+  // (docs/architecture/features/custom-domains.md). MUST stay before the bare
+  // `/api` requireAuth guards below.
+  app.use('/api', publicSiteRoutes({
+    pageDomainStore,
+    taskStore,
+    crmStore,
+    workflowRunStore,
+    workspaceDirectory: workspaceDirectoryStore,
+    gcs: filesBlobClient,
+  }))
+
   // PUBLIC closed routes mount HERE — before the bare `/api` requireAuth guards
   // below. Mounting them via `mountExtraRoutes` (which runs last) lets the first
   // bare guard 401 them first. See OpenApiPorts.mountPublicExtraRoutes.
@@ -3404,6 +3429,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     pageTemplateStore,
     blueprintRecordStore,
     pageGrantStore,
+    pageDomainStore,
+    domainProvisioner,
+    pageDomainsMaxPerWorkspace: env.PAGE_DOMAINS_MAX_PER_WORKSPACE
+      ? Number(env.PAGE_DOMAINS_MAX_PER_WORKSPACE)
+      : undefined,
     workspaceGroupStore,
     analytics,
     taskStore,
