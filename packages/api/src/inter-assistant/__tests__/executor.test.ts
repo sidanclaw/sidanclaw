@@ -616,6 +616,32 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(mockQueryLoop).not.toHaveBeenCalled()
   })
 
+  // ── The pinned built-in must survive injection ──
+  // `injectMcpTools` folds every built-in connector tool behind
+  // `mcp_search`/`mcp_call` unless `keepBuiltinsDirect` is set — it DELETES
+  // `githubListPullRequests` from the map. A step pinning that name then
+  // filtered to nothing (`tools_unavailable`), and a step that also pinned a
+  // first-party tool was worse: it ran with silently zero GitHub access.
+  it('keeps built-ins direct when the caller pins an allow-list', async () => {
+    yieldsText()
+    await executorWithTools(new Map())({
+      ...baseParams,
+      callerChannelType: 'workflow',
+      allowedTools: ['githubListPullRequests', 'listTasks'],
+    })
+    expect(mockInjectMcp).toHaveBeenCalledWith(
+      expect.objectContaining({ keepBuiltinsDirect: true }),
+    )
+  })
+
+  it('leaves built-ins behind mcp_search on an unpinned consult (token win preserved)', async () => {
+    yieldsText()
+    await executorWithTools(new Map())(baseParams)
+    expect(mockInjectMcp).toHaveBeenCalledWith(
+      expect.objectContaining({ keepBuiltinsDirect: false }),
+    )
+  })
+
   it('persists the assistant turn on turn_complete', async () => {
     yields([
       { type: 'text_delta', text: 'done' },
