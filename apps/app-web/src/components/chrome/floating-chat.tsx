@@ -98,6 +98,7 @@ import {
   type ChatTargetPage,
 } from "@/lib/chat-target";
 import { skillRowIdFromPathname } from "@/lib/skills-view";
+import { deckIdFromPathname } from "@/lib/decks-view";
 import {
   ArrowRight,
   Check,
@@ -845,6 +846,15 @@ export function FloatingChat({
     viewingSkillRowIdRef.current = skillRowIdFromPathname(pathname);
   }, [pathname]);
 
+  // Tracks the deck open in the live preview route, the same path-derived
+  // way. Sent as `viewingDeckId` so "this deck" / "slide 3" resolve to the
+  // preview the user is watching (server injects the deck outline as turn
+  // context; the preview refreshes live after each edit).
+  const viewingDeckIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    viewingDeckIdRef.current = deckIdFromPathname(pathname);
+  }, [pathname]);
+
   // Per-turn buffers — keyed by toolUseId / URL so re-emits replace prior entry.
   const turnViewsRef = useRef<ViewAttachment[]>([]);
   const turnTextRef = useRef("");
@@ -1302,6 +1312,11 @@ export function FloatingChat({
           // user is viewing so its saved contents ride the turn context.
           ...(viewingSkillRowIdRef.current
             ? { viewingSkillRowId: viewingSkillRowIdRef.current }
+            : {}),
+          // The deck live-preview route: tell the server which deck the
+          // user is watching so its slide outline rides the turn context.
+          ...(viewingDeckIdRef.current
+            ? { viewingDeckId: viewingDeckIdRef.current }
             : {}),
           // The custom theme the user currently has applied (a per-user
           // localStorage value). Lets the server inject `refineActiveTheme` so

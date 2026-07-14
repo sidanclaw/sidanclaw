@@ -75,6 +75,7 @@ import {
   createRetrievalTools,
   createViewTools,
   createFileTools,
+  createDeckTools,
   type FileToolPolicy,
   createFindPageTool,
   createIngestRuleTools,
@@ -283,6 +284,8 @@ import { createDeliveryTargetResolver } from './scheduling/delivery-target.js'
 import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
+import { decksRoutes } from './routes/decks.js'
+import { createDeckStore } from './db/deck-store.js'
 import { publicShareRoutes } from './routes/public-share.js'
 import { docThemesRoutes } from './routes/doc-themes.js'
 import { runIngestPage } from './doc/ingest-page-runner.js'
@@ -1385,6 +1388,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // lazy references in the callee executor + workflow tool registry are
   // TDZ-safe: pre-assignment access reads `null` and degrades honestly.
   let filesApi: ReturnType<typeof createFilesApi> | null = null
+  let deckStore: ReturnType<typeof createDeckStore> | null = null
 
   const calleeExecutor = createCalleeExecutor({
     provider,
@@ -2453,6 +2457,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       saveFileBytes: fileTools.saveFileBytes,
     }
 
+    // ── Decks (first-party PPTX) ──
+    // Persistent deck artifacts: workspace_decks row (spec) + stable
+    // workspace file decks/<id>.pptx. Rides the files capability (output is
+    // a workspace file), so tools live inside the filesBlobClient guard.
+    // The read/export ROUTER mounts with the other authed routers at the
+    // END of boot — an early bare `/api` requireAuth guard here would 401
+    // every public mount registered after it (the Mini App outage class;
+    // graded by invariants/route-mount-order). See
+    // docs/architecture/features/deck-generation.md.
+    // previewUrl targets the AUTHENTICATED app origin (app.sidan.ai) — the
+    // /w/… deck route lives in app-web, and the marketing site does NOT
+    // redirect /w/* (MOVED_TO_APP_PREFIXES covers only pre-consolidation
+    // paths). Same fallback chain as the computer-use take-over link below.
+    deckStore = createDeckStore()
+    for (const tool of createDeckTools({ filesApi, deckStore, appOrigin: env.AUTHED_APP_URL ?? env.APP_URL })) {
+      allTools.set(tool.name, tool)
+    }
     // Direct ingest seam — closed (FileIngestor builds Pipeline B). Injected as a
     // port; open default leaves it null (no /api/files/ingest ingest).
     if (ports.buildFileIngestor && brainEpisodeIngestor) {
@@ -3420,6 +3441,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const docNotificationsStore = createDbDocNotificationsStore()
   app.use('/api', requireAuth(env.JWT_SECRET), commentRoutes({ commentThreadStore }))
   app.use('/api', requireAuth(env.JWT_SECRET), inboxRoutes({ commentThreadStore, docNotificationsStore }))
+  // Deck live-preview read + export surface (tools registered in the files
+  // block above; absent files backend = no decks, so the mount is guarded).
+  if (deckStore && filesApi) {
+    app.use('/api', requireAuth(env.JWT_SECRET), decksRoutes({ deckStore, filesApi }))
+  }
 
   // (The public /api/brain/stream SSE mount lives ABOVE the bare `/api`
   // requireAuth guards — see the block next to workflowWebhookRoutes.)

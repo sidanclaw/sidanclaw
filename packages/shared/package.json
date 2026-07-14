@@ -21,6 +21,10 @@
     "./mini-apps": {
       "types": "./dist/mini-apps.d.ts",
       "default": "./dist/mini-apps.js"
+    },
+    "./decks": {
+      "types": "./dist/decks/index.d.ts",
+      "default": "./dist/decks/index.js"
     }
   },
   "scripts": {

@@ -4854,4 +4854,14 @@ export const zh: Dictionary = {
       loginHint: "在一個由你操作的雲端瀏覽器開啟該網站。在裡面登入並把工作階段存進這個身分；密碼只會送到該網站，不會經過我們。",
     },
   },
+  deckPage: {
+    back: "首頁",
+    loading: "正在載入簡報...",
+    notFound: "在此工作區找不到這份簡報。它可能在其他地方建立，或已被刪除。",
+    slides: "投影片",
+    slideCount: "{count} 張投影片",
+    liveHint: "會隨助理的編輯即時更新",
+    download: "下載 .pptx",
+    downloadFailed: "下載失敗。檔案可能仍在產生中，請再試一次。",
+  },
 };
