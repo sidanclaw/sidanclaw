@@ -3255,14 +3255,14 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
 
       // Inject user's connected MCP tools (custom connectors + built-in Google).
-      // For a *personal* workspace, `getConnectorUserId` resolves the owner
-      // (== sole member) so their personal connectors are available. For a
-      // *shared* workspace the owner's personal connectors are NOT exposed to
-      // members — `injectMcpTools` suppresses the owner-personal base load and
-      // draws tools only from team-native instances + `connector_grant`
-      // overlays (incident 2026-06-01). Shared with the public API channel via
-      // `applyMcpInjection` — both routes must surface the same tool set or
-      // assistants degrade silently when consumers switch transports.
+      // `getConnectorUserId` resolves the workspace owner, but for ANY
+      // workspace assistant `injectMcpTools` suppresses the owner-personal
+      // base load and draws tools only from team-native instances +
+      // `connector_grant` overlays — exposure is the injection boundary, solo
+      // included (incidents 2026-06-01 / 2026-07-14). Shared with the public
+      // API channel via `applyMcpInjection` — both routes must surface the
+      // same tool set or assistants degrade silently when consumers switch
+      // transports.
       const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId)
       const { enrichConfirmation, unavailable: unavailableCapabilities } = await applyMcpInjection({
         scope: 'chat',
