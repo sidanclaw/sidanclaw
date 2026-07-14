@@ -49,7 +49,11 @@ export const webSearchTool = buildTool({
 
   async execute(input, context) {
     const maxResults = Math.max(1, Math.min(10, input.maxResults ?? 5))
-    const { provider, results } = await searchStack(input.query, maxResults, context.abortSignal)
+    const { provider, results, failures, trustedEmpty } = await searchStack(
+      input.query,
+      maxResults,
+      context.abortSignal,
+    )
 
     // `meta.searchProvider` carries the winning provider name (brave / serper
     // / tavily / duckduckgo) back to the analytics log site via ToolResult.meta.
@@ -69,6 +73,25 @@ export const webSearchTool = buildTool({
         : undefined
 
     if (results.length === 0) {
+      // Outage vs no results. When every provider that ran errored and none
+      // returned a trustworthy empty, "No results found" would be a lie the
+      // model repeats to the user as "X does not exist" / confabulated
+      // access limitations (incident 2026-07-13: all three keyed providers
+      // quota-exhausted for two days, 100% of webSearch calls affected).
+      // Surface the outage as a tool error instead — `isError` flows to the
+      // `tool_executed` analytics event as success=false + error_message,
+      // and `searchProviderErrors` meta records which providers failed.
+      if (failures.length > 0 && !trustedEmpty) {
+        const summary = failures.map((f) => `${f.provider}: ${f.error}`).join('; ')
+        return {
+          data:
+            `Web search is temporarily unavailable — every search provider failed (${summary}). ` +
+            'This is a system-side outage, NOT evidence that what you searched for does not exist. ' +
+            'Do not conclude anything from the empty results; tell the user plainly that web search is currently down.',
+          isError: true,
+          meta: { searchProviderErrors: summary.slice(0, 500) },
+        }
+      }
       return { data: 'No results found. Try a different query.', meta }
     }
 
