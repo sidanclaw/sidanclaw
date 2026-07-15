@@ -465,9 +465,6 @@ export interface OpenApiEnv {
   // (open default) → the email surface is dark: inbox provisioning routes 503,
   // the /webhook/agentmail route is not mounted, the UI hides the section.
   AGENTMAIL_API_KEY?: string
-  // Fallback Svix signing secret for a manually-registered org-level webhook;
-  // per-inbox webhook secrets live on channel_integrations credentials.
-  AGENTMAIL_WEBHOOK_SECRET?: string
 }
 
 /**
