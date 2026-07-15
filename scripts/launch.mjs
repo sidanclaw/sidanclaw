@@ -155,8 +155,18 @@ const env = {
 
 // ── helpers ────────────────────────────────────────────────────────
 const children = []
+// Per-child V8 heap caps (MB). Without a cap, a leak in any one child grows
+// until the OS swaps the whole machine to death; with one, the leaking child
+// OOMs alone, run()'s exit handler names it, and the launcher shuts down
+// cleanly. The platform repo already caps its API dev process the same way.
+// Sized generously above observed steady-state; override with SIDANCLAW_HEAP_MB.
+const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'discord-connector': 512 }
 function run(label, cmd, args, extraEnv = {}) {
-  const child = spawn(cmd, args, { cwd: ROOT, env: { ...env, ...extraEnv }, stdio: ['ignore', 'inherit', 'inherit'] })
+  const heapMb = Number(process.env.SIDANCLAW_HEAP_MB) || HEAP_MB[label]
+  const nodeOptions = heapMb
+    ? { NODE_OPTIONS: `${env.NODE_OPTIONS ?? ''} --max-old-space-size=${heapMb}`.trim() }
+    : {}
+  const child = spawn(cmd, args, { cwd: ROOT, env: { ...env, ...nodeOptions, ...extraEnv }, stdio: ['ignore', 'inherit', 'inherit'] })
   child.on('exit', (code) => {
     if (!shuttingDown && code) { console.error(`[launch] ${label} exited with code ${code}; shutting down.`); shutdown(1) }
   })
