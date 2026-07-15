@@ -1,4 +1,6 @@
--- 307_oss_channels.sql
+-- 330_oss_channels.sql (renumbered from 315 — that prefix was already taken
+-- by the closed overlay's 315_computer_use.sql; the numeric sequence is
+-- shared across both migration dirs)
 --
 -- Open the BYO channel storage layer for the OSS edition.
 --
@@ -50,7 +52,7 @@ BEGIN
       whatsapp_bot_send_scope text,
       CONSTRAINT channels_pkey PRIMARY KEY (id),
       CONSTRAINT channels_channel_type_check
-        CHECK (channel_type = ANY (ARRAY['telegram'::text, 'slack'::text, 'whatsapp'::text, 'discord'::text])),
+        CHECK (channel_type = ANY (ARRAY['telegram'::text, 'slack'::text, 'whatsapp'::text, 'discord'::text, 'email'::text])),
       CONSTRAINT channels_clearance_check
         CHECK (clearance = ANY (ARRAY['public'::text, 'internal'::text, 'confidential'::text])),
       CONSTRAINT channels_enabled_capabilities_check
@@ -191,6 +193,42 @@ BEGIN
 
     CREATE INDEX idx_cuc_assistant ON public.channel_user_cache USING btree (assistant_id);
     CREATE INDEX idx_cuc_user ON public.channel_user_cache USING btree (user_id);
+
+  END IF;
+END
+$$;
+
+-- ── Shape convergence for pre-existing OSS channel tables ─────────────
+-- Two parallel authors bootstrapped this substrate against different overlay
+-- vintages: 326_agentmail_email_channel.sql's create lacks
+-- `whatsapp_bot_send_scope` (closed 283), and this file's create originally
+-- lacked 'email' in the type CHECK (closed 327). On any OSS database where
+-- `channels` already exists (created by 326, or by this file under its old
+-- 315 number), converge to the full shape. Hosted is untouched: the edition
+-- GUC differs, and the overlay already carries both via 283 + 327.
+DO $$
+BEGIN
+  IF current_setting('app.migration_edition', true) = 'oss'
+     AND to_regclass('public.channels') IS NOT NULL THEN
+
+    ALTER TABLE public.channels
+      ADD COLUMN IF NOT EXISTS whatsapp_bot_send_scope text;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'channels_whatsapp_bot_send_scope_check'
+        AND conrelid = 'public.channels'::regclass
+    ) THEN
+      ALTER TABLE public.channels
+        ADD CONSTRAINT channels_whatsapp_bot_send_scope_check
+        CHECK (whatsapp_bot_send_scope IS NULL OR whatsapp_bot_send_scope = ANY (ARRAY['dm'::text, 'dm_and_groups'::text]));
+    END IF;
+
+    ALTER TABLE public.channels
+      DROP CONSTRAINT IF EXISTS channels_channel_type_check;
+    ALTER TABLE public.channels
+      ADD CONSTRAINT channels_channel_type_check
+      CHECK (channel_type = ANY (ARRAY['telegram'::text, 'slack'::text, 'whatsapp'::text, 'discord'::text, 'email'::text]));
 
   END IF;
 END
