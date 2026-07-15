@@ -355,6 +355,16 @@ async function reapStaleSet() {
   }
   const bootSnap = psSnapshot()
   const staleGroups = ledger.pgids.filter((pgid) => bootSnap.some((p) => p.pgid === pgid && isOurs(p.command)))
+  // A recorded group that is still alive but where NO member's argv points
+  // into this repo is skipped (pgid-reuse guard) — say so, because if such a
+  // process still holds one of our ports the pre-flight below will refuse and
+  // the user needs to know which pid to look at.
+  for (const pgid of ledger.pgids) {
+    const members = bootSnap.filter((p) => p.pgid === pgid)
+    if (members.length && !staleGroups.includes(pgid)) {
+      console.log(`[launch] leftover group ${pgid} is still alive but doesn't look like a sidanclaw process — leaving it alone (pids: ${members.map((p) => p.pid).join(', ')}).`)
+    }
+  }
   if (staleGroups.length) {
     console.log(`[launch] previous launcher died without cleanup — reaping ${staleGroups.length} leftover process group(s)...`)
     for (const pgid of staleGroups) { try { process.kill(-pgid, 'SIGTERM') } catch { /* already gone */ } }
