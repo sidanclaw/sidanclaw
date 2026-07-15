@@ -37,7 +37,16 @@ import {
   TAKEOVER_INPUT_HELPER_PATH,
   takeoverInputCommand,
 } from './takeover-input.js'
+import {
+  TAKEOVER_BRIDGE_PORT,
+  TAKEOVER_STREAM_BRIDGE_MJS,
+  TAKEOVER_STREAM_BRIDGE_PATH,
+  bridgeLaunchCommand,
+  bridgeProbeCommand,
+  streamEnableCommand,
+} from './takeover-stream.js'
 import type { E2bRuntime, E2bSandboxHandle } from './runtime.js'
+import { randomBytes } from 'node:crypto'
 
 export const SCRATCH_DIR = '/home/user/scratch'
 export const DOWNLOADS_DIR = '/home/user/downloads'
@@ -71,6 +80,8 @@ type PerSandbox = {
   /** Take-Over trusted input (§4.8): helper written + CDP endpoint cached. */
   takeoverHelperWritten?: boolean
   cdpUrl?: string
+  /** Live stream bridge (§5): per-sandbox capability token, stable across re-mints. */
+  streamToken?: string
   pythonRunCounter: number
 }
 
@@ -255,6 +266,55 @@ export function createE2bCloudProvider(
           close: async () => {
             closed = true
           },
+        }
+      },
+      openTakeoverStream: async () => {
+        const handle = await handleFor(sandboxId)
+        const m = meta(sandboxId)
+        if (!m.streamToken) {
+          const token = randomBytes(32).toString('hex')
+          // Order matters: pin the screencast port, resolve CDP while the
+          // daemon is warm, write + launch the bridge, then probe it up.
+          await runBrowserCommand(sandboxId, streamEnableCommand())
+          if (!m.cdpUrl) {
+            m.cdpUrl = (await runBrowserCommand(sandboxId, cli.getCdpUrl())).trim()
+            if (!m.cdpUrl) {
+              throw new BrowserBackendError(
+                'The sandbox browser reported no CDP endpoint (is a page open yet?)',
+                'backend_error',
+              )
+            }
+          }
+          await handle.writeFile(
+            TAKEOVER_STREAM_BRIDGE_PATH,
+            new TextEncoder().encode(TAKEOVER_STREAM_BRIDGE_MJS),
+          )
+          // envd holds the exec open on the detached child's fds even though
+          // setsid detaches the bridge itself (observed 2026-07-15), so this
+          // command "times out" as a matter of course — the probe below is
+          // the real success signal, and the setsid'd bridge survives the
+          // exec-session kill.
+          await handle
+            .runCommand(bridgeLaunchCommand(token, m.cdpUrl), { timeoutMs: 1_500 })
+            .catch(() => undefined)
+          let up = false
+          for (let attempt = 0; attempt < 5 && !up; attempt++) {
+            const probe = await handle.runCommand(bridgeProbeCommand(), { timeoutMs: 10_000 })
+            up = probe.stdout.trim() !== '0' && probe.stdout.trim() !== ''
+            if (!up) await new Promise((r) => setTimeout(r, 400))
+          }
+          if (!up) {
+            throw new BrowserBackendError(
+              'The take-over stream bridge did not come up — falling back to polled frames.',
+              'backend_error',
+            )
+          }
+          m.streamToken = token
+        }
+        const host = handle.getHost(TAKEOVER_BRIDGE_PORT)
+        return {
+          framesUrl: `https://${host}/frames?token=${m.streamToken}`,
+          inputUrl: `https://${host}/input?token=${m.streamToken}`,
         }
       },
     }

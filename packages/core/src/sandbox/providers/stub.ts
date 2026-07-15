@@ -20,6 +20,7 @@ import type {
   SessionBundle,
   TakeoverFrame,
   TakeoverInputEvent,
+  TakeoverStreamInfo,
 } from '../types.js'
 
 /**
@@ -59,6 +60,8 @@ export type StubSandboxProviderOptions = {
   loginWall?: boolean
   /** When true, navigation login-walls even with an injected bundle (silent-death probe tests). */
   loginWallAlways?: boolean
+  /** Scripted take-over stream endpoints (null/omitted = backend without streaming). */
+  takeoverStream?: TakeoverStreamInfo
 }
 
 const EMPTY_SNAPSHOT: BrowserSnapshot = { url: 'about:blank', title: '', nodes: [] }
@@ -182,6 +185,10 @@ export class StubSandboxProvider implements SandboxProvider {
             closed = true
           },
         }
+      },
+      openTakeoverStream: async () => {
+        state().actions.push({ op: 'openTakeoverStream', args: {} })
+        return this.opts.takeoverStream ?? null
       },
     }
   }

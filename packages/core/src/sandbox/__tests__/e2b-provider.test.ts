@@ -38,6 +38,9 @@ function fakeRuntime(respond?: (cmd: string) => E2bCommandResult | undefined) {
           .filter((p) => p.startsWith(`${path}/`))
           .map((p) => ({ name: p.slice(path.length + 1), path: p, isDir: false }))
       },
+      getHost(port) {
+        return `${port}-${id}.e2b.test`
+      },
       async pause() {},
       async kill() {},
     }
