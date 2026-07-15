@@ -32,8 +32,9 @@ import {
 /**
  * The group enable/disable list. A personal number can be in hundreds of
  * groups; the API returns enabled-and-recently-active first, so the initial
- * render is capped and a search finds any other by name. Routing is digest-only
- * (realtime is soft-disabled to cap token cost).
+ * render is capped and a search finds any other by name. Hosted deployments
+ * schedule digests; OSS ingests enabled groups in realtime because it has no
+ * generic batch-drain worker.
  */
 export function WhatsappGroupManager({ workspaceId }: { workspaceId: string }) {
   const t = useT();
@@ -168,11 +169,9 @@ function WhatsappGroupRow({
       >
         {group.title ?? wa.untitledGroup}
       </span>
-      {/* Routing is digest-only: realtime (per-message extraction) is disabled
-          to cap token cost, so there's no picker - enabled groups always run on
-          the weekday digest. See docs/architecture/channels/whatsapp.md ->
-          "Routing (digest-only)". */}
-      {group.enabled && (
+      {/* Hosted uses the digest worker; OSS falls back to realtime because it
+          has no batch drain. Only label the mode that is actually scheduled. */}
+      {group.enabled && group.routing === "scheduled" && (
         <span className="shrink-0 text-[10px] text-muted-foreground">
           {wa.routingScheduled}
         </span>

@@ -7,8 +7,11 @@
  * from `process.env` (with local defaults), then calls `bootOpenApi()` with no
  * ports — every closed seam falls back to its safe default (allow-all credit
  * gate, no-op usage recorder, inert feed hooks, no-op episode ingest). The brain
- * still dreams (consolidation runs on the local timer); billing, connectors,
- * feed-distribution, and the messaging channels are simply absent.
+ * still dreams (consolidation runs on the local timer); billing and
+ * feed-distribution are simply absent. Connectors and the BYO messaging
+ * channels (Telegram / Slack / Discord-with-bridge) ARE part of the open
+ * composition — bootOpenApi mounts them when CHANNEL_CREDENTIAL_KEY is set
+ * (migrations 280 + 307 create their storage in the OSS schema).
  *
  * See the open-core split (repo CLAUDE.md; plan in git history) §12.7 (one-command parity boot).
  */
@@ -50,8 +53,19 @@ const env: OpenApiEnv = {
   COMPUTER_USE_UNATTENDED_ENABLED: process.env.COMPUTER_USE_UNATTENDED_ENABLED === 'true',
   // AES-GCM key for connector credentials at rest. The launcher generates +
   // persists it; absent (bare `node index.js` boot) → connectors can't store
-  // credentials, every other surface is unaffected.
+  // credentials, every other surface is unaffected. Also encrypts BYO channel
+  // bot credentials (channel_integrations) — with it set, Studio → Channels
+  // connect + the Telegram/Slack webhooks work locally.
   CHANNEL_CREDENTIAL_KEY: process.env.CHANNEL_CREDENTIAL_KEY,
+  // Optional self-hosted Discord Gateway bridge (see .env.example). Both set →
+  // the Discord connect endpoint + /internal/discord inbound are live; unset →
+  // Discord connect returns 503, Telegram/Slack unaffected.
+  DISCORD_CONNECTOR_URL: process.env.DISCORD_CONNECTOR_URL,
+  DISCORD_CONNECTOR_SECRET: process.env.DISCORD_CONNECTOR_SECRET,
+  // Optional self-hosted WhatsApp bridge. The launcher starts one locally and
+  // supplies both values; bare API boots leave WhatsApp unavailable when unset.
+  WA_CONNECTOR_URL: process.env.WA_CONNECTOR_URL,
+  WA_CONNECTOR_SECRET: process.env.WA_CONNECTOR_SECRET,
 }
 
 // Wire the OPEN Pipeline B episode ingestors so brain distillation (doc-page

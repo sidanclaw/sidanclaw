@@ -795,6 +795,27 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     finalTools.delete('askAssistant')
     finalTools.delete('listConnectedAssistants')
 
+    // 4c-bis. Leaf invariant, worker half — strip the background-worker rail
+    // (`spawnWorker` / `sendWorkerMessage` / `stopWorker`) for the same reason:
+    // a callee is a terminal node and must complete its work IN this one-shot
+    // consult, never by deferring to background work it cannot await. These
+    // tools are meant for the interactive chat loop, where the query loop's
+    // Phase 4b drain (`engine/query-loop.ts`) waits for the worker and runs a
+    // synthesis turn. That drain keys off `ToolContext.workerManager`, which the
+    // callee loop below never sets — so an in-loop `spawnWorker` here CANNOT be
+    // drained: the model spawns a worker, emits a "waiting for the worker …
+    // please hold" turn, and the query loop returns THAT placeholder as the
+    // step's final output while the real worker result is discarded. That is
+    // exactly the failure the workflow-wait-worker incident surfaced. The
+    // sanctioned parallel-research path for a workflow step is the
+    // executor-managed research fan-out below (`runPreflight`, gated on
+    // `depth.tier === 'deep'`), which uses its OWN fresh WorkerManager and waits
+    // synchronously — it does not go through these tools, so stripping them
+    // loses no sanctioned capability.
+    finalTools.delete('spawnWorker')
+    finalTools.delete('sendWorkerMessage')
+    finalTools.delete('stopWorker')
+
     // 4d. Brain-skill surface. A workflow `assistant_call` step can carry two
     // skill lists: `skills` (DISCOVERY — offered via `useSkill`, the model
     // chooses) and `enforcedSkills` (ENFORCEMENT — their instructions injected
