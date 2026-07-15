@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createFetchStack, type FetchProvider, type FetchResult } from '../base/fetch-stack.js'
 import { isSensitiveUrl, jinaProvider } from '../base/fetch-jina.js'
-import { __resetFetchCache } from '../base/fetch-cache.js'
+import { __resetFetchCache, readFetchCache, writeFetchCache } from '../base/fetch-cache.js'
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -135,6 +135,38 @@ describe('[COMP:tools/fetch] Fetch stack composer', () => {
     const second = await stack('https://example.com/article')
     expect(calls).toBe(1)
     expect(second.source).toBe('cache')
+  })
+
+  it('cache skips single results over the per-entry byte cap', () => {
+    const big = 'a'.repeat(600_000) // 1.2 MB as UTF-16 — over the 1 MB entry cap
+    writeFetchCache('https://example.com/huge', { url: 'u', content: big, length: big.length, source: 'raw' })
+    expect(readFetchCache('https://example.com/huge')).toBeNull()
+  })
+
+  it('cache evicts oldest entries when the total byte budget is exceeded', () => {
+    // 40 × 0.9 MB ≈ 36 MB > the 32 MB budget: the earliest entries must go,
+    // the newest must survive, and the survivors must fit the budget.
+    const body = 'a'.repeat(450_000) // ~0.9 MB as UTF-16, under the entry cap
+    for (let i = 0; i < 40; i++) {
+      writeFetchCache(`https://example.com/page-${i}`, { url: 'u', content: body, length: body.length, source: 'raw' })
+    }
+    expect(readFetchCache('https://example.com/page-0')).toBeNull()
+    expect(readFetchCache('https://example.com/page-39')).not.toBeNull()
+    const survivors = Array.from({ length: 40 }, (_, i) => readFetchCache(`https://example.com/page-${i}`)).filter(Boolean)
+    expect(survivors.length * body.length * 2).toBeLessThanOrEqual(32 * 1024 * 1024)
+  })
+
+  it('cache does not double-count bytes when overwriting the same URL', () => {
+    const body = 'a'.repeat(450_000)
+    // 60 writes to ONE key stay a single entry; if replaced bytes leaked into
+    // the running total, the budget would be "full" and later writes would
+    // evict this very entry.
+    for (let i = 0; i < 60; i++) {
+      writeFetchCache('https://example.com/rewrite', { url: 'u', content: body, length: body.length, source: 'raw' })
+    }
+    writeFetchCache('https://example.com/other', { url: 'u', content: 'small', length: 5, source: 'raw' })
+    expect(readFetchCache('https://example.com/rewrite')).not.toBeNull()
+    expect(readFetchCache('https://example.com/other')).not.toBeNull()
   })
 })
 

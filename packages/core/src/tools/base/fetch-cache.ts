@@ -19,13 +19,29 @@ import type { FetchResult } from './fetch-stack.js'
 
 const TTL_MS = 15 * 60 * 1000 // 15 minutes
 const MAX_ENTRIES = 256 // LRU soft cap to prevent unbounded growth
+// Byte budget for cached content. The entry cap alone doesn't bound memory —
+// 256 full article/PDF bodies can be hundreds of MB in a process that lives
+// for weeks. Oversized single results skip the cache entirely (the DB-backed
+// CacheStore layer still covers retrieveCachedResults for those).
+const MAX_TOTAL_CONTENT_BYTES = 32 * 1024 * 1024 // 32 MB across all entries
+const MAX_ENTRY_CONTENT_BYTES = 1024 * 1024 // 1 MB per entry
 
 type CacheEntry = {
   result: Omit<FetchResult, 'source'>
   expiresAt: number
+  /** UTF-16 code units × 2 — cheap upper-bound proxy for heap bytes. */
+  contentBytes: number
 }
 
 const cache = new Map<string, CacheEntry>()
+let totalContentBytes = 0
+
+function evict(key: string): void {
+  const entry = cache.get(key)
+  if (!entry) return
+  totalContentBytes -= entry.contentBytes
+  cache.delete(key)
+}
 
 /**
  * Common tracking parameters stripped during cache key normalization.
@@ -66,27 +82,37 @@ export function readFetchCache(url: string): Omit<FetchResult, 'source'> | null 
   const entry = cache.get(key)
   if (!entry) return null
   if (Date.now() > entry.expiresAt) {
-    cache.delete(key)
+    evict(key)
     return null
   }
   return entry.result
 }
 
 export function writeFetchCache(url: string, result: FetchResult): void {
+  const contentBytes = result.content.length * 2
+  // A single oversized body would evict most of the cache for one entry
+  // that is unlikely to be re-read within the TTL — don't cache it at all.
+  if (contentBytes > MAX_ENTRY_CONTENT_BYTES) return
+
   const key = normalizeUrl(url)
+  // Replacing an existing entry: retire its bytes before adding the new ones.
+  evict(key)
   // Drop the `source` field when caching — a cache hit always sets source='cache'.
   const { source: _source, ...rest } = result
-  cache.set(key, { result: rest, expiresAt: Date.now() + TTL_MS })
+  cache.set(key, { result: rest, expiresAt: Date.now() + TTL_MS, contentBytes })
+  totalContentBytes += contentBytes
 
-  // LRU soft cap: when we exceed MAX_ENTRIES, drop the oldest insertion.
-  // Map preserves insertion order so the first key is the oldest.
-  if (cache.size > MAX_ENTRIES) {
+  // Soft caps: evict oldest insertions (Map preserves insertion order) until
+  // both the entry count and the content byte budget hold.
+  while (cache.size > MAX_ENTRIES || totalContentBytes > MAX_TOTAL_CONTENT_BYTES) {
     const firstKey = cache.keys().next().value
-    if (firstKey !== undefined) cache.delete(firstKey)
+    if (firstKey === undefined) break
+    evict(firstKey)
   }
 }
 
 /** Test helper — resets the cache between tests. Not exported from public index. */
 export function __resetFetchCache(): void {
   cache.clear()
+  totalContentBytes = 0
 }
