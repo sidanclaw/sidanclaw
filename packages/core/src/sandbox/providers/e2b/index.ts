@@ -31,7 +31,7 @@ import {
   type SessionBundle,
   type TakeoverInputEvent,
 } from '../../types.js'
-import { chainCommands, cli, parseSnapshotOutput, sessionEnv, splitCommandParts } from './agent-browser-cli.js'
+import { SANDBOX_SESSION_NAME, chainCommands, cli, parseSnapshotOutput, sessionEnv, splitCommandParts } from './agent-browser-cli.js'
 import {
   TAKEOVER_INPUT_HELPER_MJS,
   TAKEOVER_INPUT_HELPER_PATH,
@@ -103,7 +103,10 @@ export function createE2bCloudProvider(
     const res = await handle.runCommand(command, {
       timeoutMs: COMMAND_TIMEOUT_MS,
       envs: {
-        ...sessionEnv(`sbx-${sandboxId}`),
+        // Fixed name (NOT per-sandbox): matches the daemon the template
+        // snapshot pre-warmed at build time, so the first command reuses
+        // the already-running Chromium instead of paying its cold launch.
+        ...sessionEnv(SANDBOX_SESSION_NAME),
         // The daemon launches on the first command and loads auth state
         // from this file; pointing at a missing file fails the launch, so
         // only set it once injectStorageState has written one.
@@ -405,7 +408,7 @@ export function createE2bCloudProvider(
       await handle.runCommand(`mkdir -p ${SCRATCH_DIR}/.runner`, { timeoutMs: 10_000 })
       const running = handle.runCommand(`cd ${SCRATCH_DIR} && python3 ${req.entryPath}`, {
         timeoutMs: req.timeoutMs ?? SKILL_DEFAULT_TIMEOUT_MS,
-        envs: { SKILL_SESSION_NAME: `sbx-${sandboxId}` },
+        envs: { SKILL_SESSION_NAME: SANDBOX_SESSION_NAME },
       })
       return {
         wait: async () => {

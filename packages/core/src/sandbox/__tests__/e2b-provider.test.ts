@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { createE2bCloudProvider, SCRATCH_DIR } from '../providers/e2b/index.js'
-import { parseSnapshotOutput, cli, PART_SEPARATOR } from '../providers/e2b/agent-browser-cli.js'
+import { parseSnapshotOutput, cli, PART_SEPARATOR, SANDBOX_SESSION_NAME } from '../providers/e2b/agent-browser-cli.js'
 import {
   TAKEOVER_INPUT_HELPER_MJS,
   TAKEOVER_INPUT_HELPER_PATH,
@@ -118,8 +118,10 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
       { ref: '@e1', role: 'link', name: 'Front page' },
       { ref: '@e2', role: 'button', name: 'More' },
     ])
-    // Every browser command runs under the per-sandbox session identity.
-    expect(commands.every((c) => c.envs?.AGENT_BROWSER_SESSION_NAME === `sbx-${sandboxId}`)).toBe(true)
+    // Every browser command runs under the FIXED session name — the one the
+    // template snapshot pre-warmed a daemon for (a per-sandbox name would
+    // orphan the warm Chromium and relaunch cold).
+    expect(commands.every((c) => c.envs?.AGENT_BROWSER_SESSION_NAME === SANDBOX_SESSION_NAME)).toBe(true)
   })
 
   it('appends the dormant BYOP proxy flag to open only when a proxy is configured (§4.6)', async () => {

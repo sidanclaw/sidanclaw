@@ -21,6 +21,17 @@ function shellQuote(value: string): string {
 
 const AGENT_BROWSER_BIN = 'agent-browser'
 
+/**
+ * The ONE agent-browser session name every sandbox uses. A sandbox is
+ * task-scoped and single-tenant, so a per-sandbox name bought nothing — and
+ * it cost the warm boot: the template snapshot pre-launches the daemon +
+ * Chromium under this exact name at build time (`e2b template create -c`,
+ * see docs/plans/e2b-template-setup.md), which a name derived from the
+ * sandbox id could never match. Changing this string requires a template
+ * rebuild with the matching start command.
+ */
+export const SANDBOX_SESSION_NAME = 'main'
+
 /** One agent-browser session per sandbox — the task's browsing identity. */
 export function sessionEnv(sessionName: string): Record<string, string> {
   return { AGENT_BROWSER_SESSION_NAME: sessionName }
