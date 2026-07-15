@@ -9,9 +9,9 @@
  *      tsx / next dev).
  *   3. start the embedded PGLite brain server (pg-wire socket on :54329) and wait
  *      until it accepts connections - it migrates open-schema-v1 on first boot.
- *   4. start the api (:4000), doc-sync sidecar (:8080), app-web (:3003), and
- *      local Discord Gateway connector (:8090), all pointed at the local API;
- *      single-process event buses.
+ *   4. start the api (:4000), doc-sync sidecar (:8080), app-web (:3003), local
+ *      Discord Gateway connector (:8090), and local WhatsApp connector (:8091),
+ *      all pointed at the local API; single-process event buses.
  *   5. open the browser straight into an authenticated session as the local
  *      owner (/auth/local-session auto-provisions one Personal workspace — no
  *      /login, no /teams, no "dev" identity).
@@ -66,7 +66,7 @@ loadDotEnv(join(ROOT, '.env'))
 
 // The embedded brain uses a distinctive high port so it never collides with a
 // developer's local Postgres on the default 5432 (verified failure mode).
-const PORTS = { pglite: 54329, api: 4000, docSync: 8080, appWeb: 3003, discordConnector: 8090 }
+const PORTS = { pglite: 54329, api: 4000, docSync: 8080, appWeb: 3003, discordConnector: 8090, waConnector: 8091 }
 
 // ── config (the only required input is GEMINI_API_KEY) ─────────────
 mkdirSync(CONFIG_DIR, { recursive: true })
@@ -99,6 +99,10 @@ const docSyncSecret = config.docSyncSecret || randomBytes(32).toString('hex')
 // value. An explicit DISCORD_CONNECTOR_SECRET overrides this for an external
 // bridge deployment.
 const discordConnectorSecret = process.env.DISCORD_CONNECTOR_SECRET || config.discordConnectorSecret || randomBytes(32).toString('hex')
+// Shared API <-> WhatsApp bridge secret. Like Discord, local boot owns both
+// processes and persists the generated value; explicit env values support an
+// externally deployed connector.
+const waConnectorSecret = process.env.WA_CONNECTOR_SECRET || config.waConnectorSecret || randomBytes(32).toString('hex')
 // AES-GCM key that encrypts connector OAuth refresh-tokens / PATs at rest in
 // `connector_instance.credentials`. Without it the api boots with a null
 // credential key and `/api/connectors/:provider/store-credentials` returns 503,
@@ -108,13 +112,14 @@ const discordConnectorSecret = process.env.DISCORD_CONNECTOR_SECRET || config.di
 const channelCredentialKey = config.channelCredentialKey || randomBytes(32).toString('base64')
 writeFileSync(
   CONFIG_FILE,
-  JSON.stringify({ ...config, geminiApiKey: geminiKey, jwtSecret, docSyncSecret, discordConnectorSecret, channelCredentialKey, ownerName }, null, 2),
+  JSON.stringify({ ...config, geminiApiKey: geminiKey, jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, channelCredentialKey, ownerName }, null, 2),
 )
 
 // External-store escape hatch: a real Postgres URL skips the embedded brain.
 const useEmbedded = !process.env.DATABASE_URL
 const databaseUrl = process.env.DATABASE_URL || `postgres://localhost:${PORTS.pglite}/postgres`
 const useLocalDiscordConnector = !process.env.DISCORD_CONNECTOR_URL
+const useLocalWaConnector = !process.env.WA_CONNECTOR_URL
 
 const env = {
   ...process.env,
@@ -131,6 +136,8 @@ const env = {
   CHANNEL_CREDENTIAL_KEY: channelCredentialKey,
   DISCORD_CONNECTOR_URL: process.env.DISCORD_CONNECTOR_URL || `http://127.0.0.1:${PORTS.discordConnector}`,
   DISCORD_CONNECTOR_SECRET: discordConnectorSecret,
+  WA_CONNECTOR_URL: process.env.WA_CONNECTOR_URL || `http://127.0.0.1:${PORTS.waConnector}`,
+  WA_CONNECTOR_SECRET: waConnectorSecret,
   API_INTERNAL_URL: `http://127.0.0.1:${PORTS.api}`,
   // The embedded brain is one PGLite instance with a single shared session;
   // concurrent pool connections clobber its unnamed prepared statement. Force
@@ -160,7 +167,7 @@ const children = []
 // OOMs alone, run()'s exit handler names it, and the launcher shuts down
 // cleanly. The platform repo already caps its API dev process the same way.
 // Sized generously above observed steady-state; override with SIDANCLAW_HEAP_MB.
-const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'discord-connector': 512 }
+const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'discord-connector': 512, 'wa-connector': 512 }
 function run(label, cmd, args, extraEnv = {}) {
   const heapMb = Number(process.env.SIDANCLAW_HEAP_MB) || HEAP_MB[label]
   const nodeOptions = heapMb
@@ -277,7 +284,17 @@ if (useLocalDiscordConnector) {
   })
   await waitForPort(PORTS.discordConnector, 'Discord Gateway connector')
 }
+if (useLocalWaConnector) {
+  console.log(`[launch] starting WhatsApp connector (:${PORTS.waConnector}) ...`)
+  run('wa-connector', 'pnpm', ['--filter', '@sidanclaw/wa-connector', 'exec', 'tsx', 'src/index.ts'], {
+    PORT: String(PORTS.waConnector),
+    SIDANCLAW_API_URL: `http://127.0.0.1:${PORTS.api}`,
+    WA_LOCAL_CREDS_DIR: join(CONFIG_DIR, 'wa-creds'),
+  })
+  await waitForPort(PORTS.waConnector, 'WhatsApp connector')
+}
 const entryUrl = `http://localhost:${PORTS.appWeb}/api/auth/local-session`
 const discordStatus = useLocalDiscordConnector ? ` · discord :${PORTS.discordConnector}` : ' · discord external'
-console.log(`\n[launch] sidanclaw is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus})\n  Ctrl-C to stop everything.\n`)
+const waStatus = useLocalWaConnector ? ` · whatsapp :${PORTS.waConnector}` : ' · whatsapp external'
+console.log(`\n[launch] sidanclaw is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus}${waStatus})\n  Ctrl-C to stop everything.\n`)
 openBrowser(entryUrl)

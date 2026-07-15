@@ -49,7 +49,7 @@ git clone https://github.com/sidanclaw/sidanclaw.git
 cd sidanclaw
 export GEMINI_API_KEY=...   # or let the launcher prompt you; persisted under ~/.sidanclaw/
 pnpm install
-pnpm dev                    # api + canvas + web + Discord bridge; opens your browser
+pnpm dev                    # api + canvas + web + Discord/WhatsApp bridges; opens your browser
 ```
 
 That is it. There is no step three. The store defaults to an embedded PGLite
@@ -84,6 +84,10 @@ The brain is the point: the more you drop in, the sharper the rest gets.
 Telegram and Slack bots are configured under **Studio → Channels** and need a
 public HTTPS tunnel to the local API webhook port (`4000`). Discord needs no
 inbound tunnel: the local launcher starts its open Gateway bridge on port `8090`.
+WhatsApp BYON also needs no tunnel: choose WhatsApp under **Studio → Channels**,
+scan the QR code, and the local bridge on port `8091` persists the pairing across
+restarts. Set `WA_CONNECTOR_URL` and `WA_CONNECTOR_SECRET` only when using an
+external bridge instead.
 
 ### What it asks before doing
 

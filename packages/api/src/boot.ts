@@ -211,6 +211,8 @@ import { discoverRoutes } from './routes/discover.js'
 import { createModesRouter } from './routes/modes.js'
 import { pendingMessageRoutes } from './routes/pending-messages.js'
 import { channelsRoutes } from './routes/channels.js'
+import { whatsappByonRoutes } from './routes/whatsapp-byon.js'
+import { whatsappIngestAdminRoutes } from './routes/whatsapp-byon-admin.js'
 import { telegramByoRoutes } from './routes/telegram-byo.js'
 import { slackRoutes } from './routes/slack.js'
 import { discordRoutes } from './routes/discord.js'
@@ -218,6 +220,11 @@ import { telegramLinkingRoutes } from './routes/telegram-linking.js'
 import { slackLinkingRoutes } from './routes/slack-linking.js'
 import { createDbChannelUserStore } from './db/channel-user-store.js'
 import { createDiscordConnectorClient } from './discord/connector-client.js'
+import { createWhatsappConnectorClient } from './whatsapp/connector-client.js'
+import { createWhatsappByonRuntime } from './whatsapp/byon-runtime.js'
+import { createIngestRulesStore } from './db/ingest-rules-store.js'
+import { createIngestRuleEditorStore } from './db/ingest-rules-editor-store.js'
+import { processChannelMessage } from './routes/channel-pipeline.js'
 import { snapshotRoutes } from './routes/snapshots.js'
 import { loadConnectorRegistry } from './registry/load-registry.js'
 import { createDbLinkedAccountStore } from './db/linked-accounts.js'
@@ -659,6 +666,11 @@ export interface OpenApiPorts {
    */
   buildChannelHosts?: (ctx: BootContext) => ChannelHostHooks | Promise<ChannelHostHooks>
 
+  /** Hosted has a pending-ingest batch worker; OSS executes WhatsApp realtime. */
+  whatsappScheduledBatching?: boolean
+  /** A later closed router owns the hosted shared-number fallback. */
+  whatsappOfficialFallback?: boolean
+
   // ── Extension hook: the platform mounts its closed routes/workers ──
   mountExtraRoutes?: (app: Express, ctx: BootContext) => void | Promise<void>
 
@@ -784,7 +796,7 @@ export interface BootContext {
   integrationStore: ReturnType<typeof createDbChannelIntegrationStore> | null
   /** Channel shadow-identity store — shared with the closed official-bot / WhatsApp routes. */
   channelUserStore: ReturnType<typeof createDbChannelUserStore>
-  ingestRulesStore: unknown
+  ingestRulesStore: ReturnType<typeof createIngestRulesStore>
   gdriveFilesStore: GDriveFilesStore | undefined
   filesApi: ReturnType<typeof createFilesApi> | null
   entityKindClassifier: ReturnType<typeof createEntityKindClassifier>
@@ -1059,9 +1071,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Shared workspace tool policy (migration 312) — governs allow/ask/block for
   // team-owned connector tools. See workspace-owned-connector-transfer.md §2C.
   const workspaceToolPolicyStore = createWorkspaceToolPolicyStore()
-  // Ingest-rules store is closed (Studio ▸ Ingestion control plane lives in the
-  // platform). Carried on ctx as `unknown` for closed routes; open never reads.
-  const ingestRulesStore: unknown = undefined
+  const ingestRulesStore = createIngestRulesStore()
+  const ingestRuleEditorStore = createIngestRuleEditorStore()
   const connectorStore = createDbConnectorStore(credKey)
   const assistantConnectorStore = createDbAssistantConnectorStore()
   const assistantConnectorGrantsStore = createDbAssistantConnectorGrantsStore()
@@ -4565,6 +4576,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             connectorSecret: env.DISCORD_CONNECTOR_SECRET,
           })
         : undefined
+    const whatsappConnector =
+      env.WA_CONNECTOR_URL && env.WA_CONNECTOR_SECRET
+        ? createWhatsappConnectorClient({
+            connectorUrl: env.WA_CONNECTOR_URL,
+            connectorSecret: env.WA_CONNECTOR_SECRET,
+          })
+        : undefined
 
     // Workspace channels operator surface (Studio → Channels).
     app.use('/api', requireAuth(env.JWT_SECRET), channelsRoutes({
@@ -4572,9 +4590,97 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       integrationStore: integrationStore ?? undefined,
       apiUrl: env.API_URL,
       discordConnector,
+      whatsappConnector,
       // Fallback bot for naming sessions-derived telegram delivery destinations.
       telegramBotToken: env.TELEGRAM_BOT_TOKEN,
     }))
+
+    if (integrationStore && env.WA_CONNECTOR_URL && env.WA_CONNECTOR_SECRET) {
+      const whatsapp = createWhatsappByonRuntime({
+        connectorUrl: env.WA_CONNECTOR_URL,
+        connectorSecret: env.WA_CONNECTOR_SECRET,
+        integrationStore,
+        provider,
+        crm: crmStore,
+        entities: entitiesStore,
+        entityLinks: entityLinksStore,
+        memories: memoryStore,
+        tasks: taskStore,
+        episodes: episodesStore,
+        ingestRulesStore,
+        analytics,
+        usageStore,
+        ingestCharge: ports.ingestCharge,
+        scheduledBatching: ports.whatsappScheduledBatching,
+        runPipeline: async ({ ctx: channel, input, hooks, abortController }) => {
+          if (!channel.assistantId) return
+          await processChannelMessage({
+            userId: channel.ownerUserId,
+            ownerId: channel.ownerUserId,
+            assistant: {
+              id: channel.assistantId,
+              name: channel.assistantName,
+              ownerUserId: channel.ownerUserId,
+              workspaceId: channel.workspaceId,
+              systemPrompt: channel.persona,
+              clearance: channel.assistantClearance,
+              kind: channel.assistantKind,
+            },
+            isIdentified: true,
+            channelType: 'whatsapp',
+            channelId: input.chatJid,
+            actorChannelId: (input.senderPnJid ?? input.senderJid).split('@')[0] ?? null,
+            mediaEpisodeId: input.mediaEpisodeId,
+            messageText: input.text,
+            rawUserText: input.text,
+            artifactPromoter,
+            userContentBlocks: [{ type: 'text', text: input.text }],
+            isGroupChat: input.isGroup,
+            incomingChannelMessageId: input.messageId,
+            modelAlias: undefined,
+            adaptiveResearchEnabled: true,
+            abortController,
+            provider,
+            systemPrompt: LAYER_1_SYSTEM_PROMPT,
+            tools: allTools,
+            memoryStore,
+            usageStore,
+            analytics,
+            connectorStore,
+            mcpSettingsStore,
+            checkCreditBudget: ports.checkCreditBudget,
+            assistantConnectorStore,
+            connectorGrantStore,
+            connectorInstanceStore,
+            knowledgeStore,
+            gdriveFilesStore,
+            workspaceFilesStore,
+            filesApi: filesApi ?? undefined,
+            skillStore,
+            workerManager,
+            episodicStore,
+            sessionStateStore,
+            capabilityStore,
+            hooks,
+          })
+        },
+      })
+      app.use('/api', requireAuth(env.JWT_SECRET), whatsappIngestAdminRoutes({
+        workspaceStore,
+        integrationStore,
+        ruleEditor: ingestRuleEditorStore,
+        waConnectorUrl: env.WA_CONNECTOR_URL,
+        waConnectorSecret: env.WA_CONNECTOR_SECRET,
+        scheduledBatching: ports.whatsappScheduledBatching,
+      }))
+      app.use('/internal/whatsapp', whatsappByonRoutes({
+        connectorSecret: env.WA_CONNECTOR_SECRET,
+        integrationStore,
+        ingestor: whatsapp.ingestor,
+        bot: whatsapp.bot,
+        passUnknownToFallback: ports.whatsappOfficialFallback,
+      }))
+    }
 
     // Telegram / Slack account linking — web-side of the link-code handshake.
     app.use('/api/assistants/:assistantId/telegram', requireAuth(env.JWT_SECRET),

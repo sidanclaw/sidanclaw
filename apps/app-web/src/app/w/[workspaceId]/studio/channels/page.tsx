@@ -1715,15 +1715,13 @@ function AddChannelForm({
         </button>
       </div>
 
-      {/* WhatsApp pairing runs through the closed wa-connector service, so its
-          tab is hosted-only; Slack/Telegram/Discord connect is open-core. */}
       <div className="flex gap-1 border-b border-border">
         {(
           [
             "slack",
             "telegram",
             "discord",
-            ...(isHostedEdition() ? ["whatsapp"] : []),
+            "whatsapp",
             ...(emailConfigured ? ["email"] : []),
           ] as Array<"slack" | "telegram" | "discord" | "whatsapp" | "email">
         ).map((p) => (

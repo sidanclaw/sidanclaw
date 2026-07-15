@@ -29,6 +29,7 @@ import {
 } from '@sidanclaw/channels'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { DiscordConnectorClient } from '../discord/connector-client.js'
+import type { WhatsappConnectorClient } from '../whatsapp/connector-client.js'
 import type { ChannelIntegration, ChannelIntegrationStore } from '../db/channel-integrations.js'
 import {
   listChannelsForWorkspace,
@@ -44,7 +45,7 @@ import {
   type ChannelAssistant,
 } from '../db/channels-store.js'
 import { ensureSlackConnectorInstance } from '../ingest/slack-connector-instance.js'
-import { queryWithRLS } from '../db/client.js'
+import { query, queryWithRLS } from '../db/client.js'
 
 // Per-integration behavior config accepted by `PATCH .../channels/:id/config`.
 // Mirrors the `ChannelIntegrationConfig` type (db/channel-integrations.ts).
@@ -95,6 +96,8 @@ export type ChannelsRouteOptions = {
    * if missing.
    */
   discordConnector?: DiscordConnectorClient
+  /** WhatsApp BYON connector bridge, used to tear down sockets on delete. */
+  whatsappConnector?: WhatsappConnectorClient
   /**
    * Hosted default Telegram bot token (`env.TELEGRAM_BOT_TOKEN`). Fallback bot
    * for resolving display names of sessions-derived telegram delivery
@@ -841,6 +844,16 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
 
     const channel = await loadChannel(userId, workspaceId, channelId, res)
     if (!channel) return
+
+    if (channel.channelType === 'whatsapp' && opts.whatsappConnector) {
+      await opts.whatsappConnector.disconnect(channelId).catch((err) => {
+        console.error('[channels] whatsapp connector disconnect failed:', err)
+      })
+    }
+
+    if (channel.channelType === 'whatsapp') {
+      await query('DELETE FROM wa_auth_state WHERE channel_id = $1', [channelId])
+    }
 
     await deleteChannel(userId, channelId)
 

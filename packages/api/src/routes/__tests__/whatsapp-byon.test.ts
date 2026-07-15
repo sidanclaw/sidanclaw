@@ -1,0 +1,58 @@
+import express from 'express'
+import request from 'supertest'
+import { describe, expect, it, vi } from 'vitest'
+import { whatsappByonRoutes } from '../whatsapp-byon.js'
+
+const payload = {
+  channelId: 'byon-channel',
+  chatJid: '15551234567@s.whatsapp.net',
+  senderJid: '15551234567@s.whatsapp.net',
+  messageId: 'm1',
+  text: 'hello',
+  timestamp: 1,
+  isGroup: false,
+}
+
+function appFor(listenerActive: boolean, botHandler: { handle(): Promise<void> } | null, fallback = false) {
+  const app = express()
+  app.use(express.json())
+  app.use('/internal/whatsapp', whatsappByonRoutes({
+    connectorSecret: 'secret',
+    integrationStore: { getByChannelForWebhook: vi.fn(), setStatusByChannelSystem: vi.fn() } as never,
+    ingestor: { isIngestChannel: vi.fn(async () => listenerActive), ingest: vi.fn() } as never,
+    bot: { resolveHandler: vi.fn(async () => botHandler && ({ kind: 'bot' as const, ...botHandler })) },
+    passUnknownToFallback: fallback,
+  }))
+  app.post('/internal/whatsapp/inbound', (_req, res) => res.status(418).json({ official: true }))
+  return app
+}
+
+describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
+  it('handles a BYON inbound instead of returning 404', async () => {
+    const handle = vi.fn(async () => {})
+    const response = await request(appFor(false, { handle }))
+      .post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret')
+      .send(payload)
+    expect(response.status).toBe(200)
+    expect(handle).toHaveBeenCalledOnce()
+  })
+
+  it('passes an unknown channel to the closed official fallback', async () => {
+    const response = await request(appFor(false, null, true))
+      .post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret')
+      .send({ ...payload, channelId: 'system' })
+    expect(response.status).toBe(418)
+    expect(response.body).toEqual({ official: true })
+  })
+
+  it('acks and drops an unknown channel in OSS', async () => {
+    const response = await request(appFor(false, null))
+      .post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret')
+      .send({ ...payload, channelId: 'unknown' })
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ ok: true })
+  })
+})
