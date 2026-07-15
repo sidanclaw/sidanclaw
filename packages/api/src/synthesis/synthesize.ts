@@ -61,6 +61,17 @@ export type SynthesisSource = {
   assistantKind: AssistantKind
   /** Sensitivity inherited from the source Episode; stamped on the page + every write. */
   sensitivity: string
+  /**
+   * The complete source text, injected into the prompt so the model drafts from
+   * ALL of it rather than paging a search tool. For a `recording` this is the
+   * whole `[H:MM:SS] Speaker: text` transcript. Set only when it fits the inject
+   * budget (`recording-synthesizer` caps it); absent → fall back to the
+   * search-tool sweep. A model told to "read end to end with a tool" SATISFICES —
+   * it reads a few windows and drafts (2026-07-15: a 96-min meeting's brief
+   * covered only the first ~23 min despite the sweep instruction). Handing it
+   * the full text removes the discretion.
+   */
+  fullText?: string
 }
 
 export type SynthesisBlueprint = {
@@ -180,12 +191,24 @@ function buildSystemPrompt(
   // brain draft (or a "brain row" demand on web findings) is nonsense.
   let gatherLine: string
   let citeLine: string
-  if (source.kind === 'recording') {
-    // READ THE WHOLE RECORDING FIRST. Top-K search alone returns a handful of
-    // segments, so on an hour-plus transcript the model drafted a thin brief
-    // from a fraction of the conversation (2026-07-13: a 96-min meeting, 411
-    // segments, produced 5 shallow bullets). Sweeping sequential windows is
-    // what makes a long recording's brief actually cover the meeting.
+  if (source.kind === 'recording' && source.fullText) {
+    // The COMPLETE transcript is in the prompt (see below) — no sweep needed,
+    // and no satisficing possible. A model told to "read end to end with a
+    // tool" reads a few windows and drafts (2026-07-15: a 96-min brief covered
+    // only the first ~23 min despite the sweep instruction). Handing it the
+    // whole text is what makes the brief cover the whole meeting.
+    gatherLine = [
+      `- The COMPLETE transcript of the recording is included above under "FULL TRANSCRIPT". Draft from ALL of it, start to finish.`,
+      `- Cover the WHOLE recording proportionally: the final third as thoroughly as the opening. Before you finish, confirm your brief reflects content from near the LAST timestamp in the transcript — a brief that stops partway through the recording is a failed brief. Never paste the whole transcript into the page.`,
+      `- Use \`${sourceToolName}\` only to re-check an exact quote or timestamp; you do not need it to discover content.`,
+    ].join('\n')
+    citeLine = [
+      `- Cite the moment for every claim as the transcript's \`[H:MM:SS]\` timestamp (copy it from the line you drew the claim from). Minutes and seconds are always 00-59 — a citation like \`[00:85]\` is impossible and means you invented it.`,
+      `- Never cite a moment not in the transcript; if a claim is not grounded in a line, leave it out.`,
+    ].join('\n')
+  } else if (source.kind === 'recording') {
+    // No injected transcript (too large, or read failed) — fall back to the
+    // search-tool sweep. Weaker: the model tends to stop paging early.
     gatherLine = [
       `- FIRST read the recording END TO END with \`${sourceToolName}\`, before drafting anything: page sequential windows (\`fromIndex\`/\`toIndex\`, e.g. 0-39, then 40-79, and so on) until a window comes back empty — that is how you learn the transcript's true length. Do NOT rely on \`query\` top-K search for coverage; use it only to re-find a specific moment afterwards.`,
       `- Draft from the WHOLE conversation, in the order it happened. Cover the later parts of the recording as thoroughly as the opening — a brief that only reflects the first few minutes is a failed brief. Never paste the whole transcript into the page.`,
@@ -202,11 +225,19 @@ function buildSystemPrompt(
     gatherLine = `- Read the gathered research with \`${sourceToolName}\` — draft ONLY from those findings; do not add facts they do not contain.`
     citeLine = `- Cite the source each claim came from (the URL / source named in the findings); if the findings do not cover a section, say so rather than guessing.`
   }
+  // When the full source text is injected, it leads the prompt so the model
+  // sees the whole thing before the instructions (and blueprint) that act on it.
+  const transcriptBlock =
+    source.kind === 'recording' && source.fullText
+      ? ['## FULL TRANSCRIPT', '', source.fullText, '', '---', '']
+      : []
+
   if (mode.recordPath) {
     // Record-first: the typed record is the deliverable; the page (when this
     // surface renders one) is projected FROM the record after the loop, so the
     // model never authors a page here.
     return [
+      ...transcriptBlock,
       blueprint.body,
       '',
       '---',
@@ -222,6 +253,7 @@ function buildSystemPrompt(
     ].join('\n')
   }
   return [
+    ...transcriptBlock,
     blueprint.body,
     '',
     '---',
