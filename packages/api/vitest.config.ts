@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import { configDefaults, defineConfig } from 'vitest/config'
 
 // Default `pnpm test` runs UNIT tests only — see the test table in the
@@ -8,6 +9,16 @@ import { configDefaults, defineConfig } from 'vitest/config'
 // them here keeps a bare `pnpm test` green on a machine with no
 // DATABASE_URL set.
 export default defineConfig({
+  server: {
+    fs: {
+      // Same superproject-store allowance as packages/core/vitest.config.ts:
+      // in absorbed (submodule-of-platform) mode, inlined ESM deps reached
+      // through @sidanclaw/core (pptxgenjs) resolve into the superproject's
+      // .pnpm store one level above this repo's workspace root, which
+      // vite's default fs.allow boundary rejects. Harmless standalone.
+      allow: [fileURLToPath(new URL('../../..', import.meta.url))],
+    },
+  },
   test: {
     exclude: [...configDefaults.exclude, '**/*.integration.test.ts'],
   },

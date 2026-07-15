@@ -908,6 +908,37 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(passedTools.has('search')).toBe(true)
   })
 
+  it('strips the background-worker rail from a callee — no drain on this path', async () => {
+    // A callee cannot defer to background work it can't await: the callee query
+    // loop never sets ToolContext.workerManager, so Phase 4b never drains an
+    // in-loop spawnWorker and the model's "please hold" turn would leak out as
+    // the step output (the workflow-wait-worker incident). The sanctioned
+    // parallel-research path is the executor-managed runPreflight fan-out, which
+    // does not use these tools. See executor.ts step 4c-bis.
+    yieldsText()
+    const stub = (name: string) => [name, { name }] as const
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map([
+        stub('spawnWorker'),
+        stub('sendWorkerMessage'),
+        stub('stopWorker'),
+        stub('search'),
+      ]) as never,
+      memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+    })
+
+    await callee(baseParams)
+
+    const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect(passedTools.has('spawnWorker')).toBe(false)
+    expect(passedTools.has('sendWorkerMessage')).toBe(false)
+    expect(passedTools.has('stopWorker')).toBe(false)
+    // The strip is selective — a callee's own in-loop tools survive.
+    expect(passedTools.has('search')).toBe(true)
+  })
+
   describe('app callees execute end-to-end', () => {
     function asDistributionCallee() {
       mockFindAssistant.mockImplementation(async (id: string) =>

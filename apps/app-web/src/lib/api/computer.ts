@@ -130,6 +130,34 @@ export async function sendComputerInput(sessionId: string, event: TakeoverInput)
   return res.ok;
 }
 
+export type TakeoverStreamSession = { framesUrl: string; inputUrl: string };
+
+/**
+ * Mint the live-stream session: the API (the auth gate) starts the in-sandbox
+ * bridge and returns capability URLs on the sandbox host. Null = backend
+ * without streaming (or a mint failure) - the caller stays on polled frames.
+ */
+export async function mintComputerStreamSession(
+  sessionId: string,
+): Promise<TakeoverStreamSession | null> {
+  const res = await authFetch(
+    `${API_URL}/api/computer/tasks/${encodeURIComponent(sessionId)}/stream-session`,
+    { method: "POST" },
+  );
+  if (!res.ok) return null;
+  return (await res.json()) as TakeoverStreamSession;
+}
+
+/** Direct-to-sandbox input over the stream session (no API hop). */
+export async function sendStreamInput(inputUrl: string, event: TakeoverInput): Promise<boolean> {
+  const res = await fetch(inputUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(event),
+  }).catch(() => null);
+  return res !== null && res.ok;
+}
+
 /**
  * Vault the signed-in session into the task's browser profile. A task that
  * started identity-less answers 409 `profile_required` unless `profileId`

@@ -4,11 +4,13 @@
  * Take-Over live view — `/w/[workspaceId]/computer/[sessionId]`.
  *
  * The web half of §4.8: a live look at the cloud sandbox browser for one
- * chat session's computer task. Frames poll ~1 fps; clicks and keys forward
- * into the page (scaled to the real viewport), the password never leaves the
- * sandbox page. "I signed in" captures the session to the vault so future
- * tasks skip the login; closing/stopping ends the task (close-to-stop).
- * Channel tasks (Telegram/Slack) deep-link here when they hit a login wall.
+ * chat session's computer task. Frames arrive over the live stream (SSE
+ * straight from the sandbox bridge - sub-second, damage-driven) with the old
+ * ~1 fps poll as automatic fallback; clicks and keys forward into the page
+ * (scaled to the real viewport), the password never leaves the sandbox page.
+ * "I signed in" captures the session to the vault so future tasks skip the
+ * login; closing/stopping ends the task (close-to-stop). Channel tasks
+ * (Telegram/Slack) deep-link here when they hit a login wall.
  *
  * `?flow=login&site=<site>` marks a Profile-Management "Sign in to a site"
  * task (§7): the site prefills from the query, and a successful capture
@@ -34,9 +36,13 @@ import {
   getComputerTask,
   listBrowserProfiles,
   markComputerSessionCaptured,
+  mintComputerStreamSession,
   resumeComputerTask,
   sendComputerInput,
+  sendStreamInput,
   type ComputerTask,
+  type TakeoverInput,
+  type TakeoverStreamSession,
 } from "@/lib/api/computer";
 
 const FRAME_INTERVAL_MS = 1_200;
@@ -60,6 +66,9 @@ export default function ComputerTakeoverPage(props: {
   const [task, setTask] = useState<ComputerTask | null | "loading">("loading");
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
   const [stalled, setStalled] = useState(false);
+  // Live stream session: "minting" until the mint answers; null = polled
+  // fallback (backend without streaming, or the stream died twice).
+  const [stream, setStream] = useState<TakeoverStreamSession | null | "minting">("minting");
   const [site, setSite] = useState("");
   const [capturing, setCapturing] = useState(false);
   const [captureStatus, setCaptureStatus] = useState<
@@ -89,9 +98,60 @@ export default function ComputerTakeoverPage(props: {
     };
   }, [sessionId, loginFlow.site]);
 
-  // Frame poll loop.
+  // Mint the live stream once the task is resolved. Any failure lands on
+  // null - the polled fallback below takes over, nothing breaks.
   useEffect(() => {
     if (!task || task === "loading") return;
+    let cancelled = false;
+    void mintComputerStreamSession(sessionId)
+      .then((info) => {
+        if (!cancelled) setStream(info);
+      })
+      .catch(() => {
+        if (!cancelled) setStream(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [task, sessionId]);
+
+  // Live stream: SSE straight from the sandbox bridge. Frames are JSON with
+  // a base64 JPEG in `data`; the stream is damage-driven, so a static page
+  // sending nothing is normal, and only transport errors count as stalls.
+  useEffect(() => {
+    if (!task || task === "loading" || !stream || stream === "minting") return;
+    let errors = 0;
+    const es = new EventSource(stream.framesUrl);
+    const onFrame = (ev: MessageEvent) => {
+      errors = 0;
+      setStalled(false);
+      try {
+        const parsed = JSON.parse(String(ev.data)) as { data?: string };
+        if (parsed.data) setFrameSrc(`data:image/jpeg;base64,${parsed.data}`);
+      } catch {
+        /* malformed frame - keep the last good one */
+      }
+    };
+    es.addEventListener("frame", onFrame);
+    es.onerror = () => {
+      errors += 1;
+      setStalled(true);
+      // EventSource retries by itself; two straight failures means the
+      // bridge is gone - drop to the polled fallback for this visit.
+      if (errors >= 2) {
+        es.close();
+        setStream(null);
+      }
+    };
+    return () => {
+      es.removeEventListener("frame", onFrame);
+      es.close();
+    };
+  }, [task, sessionId, stream]);
+
+  // Frame poll loop - the fallback path (stream === null only).
+  useEffect(() => {
+    if (!task || task === "loading" || stream !== null) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = async () => {
@@ -110,7 +170,25 @@ export default function ComputerTakeoverPage(props: {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [task, sessionId]);
+  }, [task, sessionId, stream]);
+
+  // One input door: direct to the sandbox bridge when streaming, else the
+  // API's per-event route.
+  const streamRef = useRef<TakeoverStreamSession | null>(null);
+  streamRef.current = stream === "minting" ? null : stream;
+  const forwardInput = useCallback(
+    (event: TakeoverInput) => {
+      const live = streamRef.current;
+      if (live) {
+        void sendStreamInput(live.inputUrl, event).then((ok) => {
+          if (!ok) void sendComputerInput(sessionId, event);
+        });
+      } else {
+        void sendComputerInput(sessionId, event);
+      }
+    },
+    [sessionId],
+  );
 
   const forwardClick = useCallback(
     (e: React.MouseEvent<HTMLImageElement>) => {
@@ -119,9 +197,9 @@ export default function ComputerTakeoverPage(props: {
       if (!img || !natural) return;
       const point = mapClickToFrame(img.getBoundingClientRect(), natural, e.clientX, e.clientY);
       if (!point) return; // letterbox bar — nothing under it in the frame
-      void sendComputerInput(sessionId, { kind: "click", x: point.x, y: point.y });
+      forwardInput({ kind: "click", x: point.x, y: point.y });
     },
-    [sessionId],
+    [forwardInput],
   );
 
   const forwardKey = useCallback(
@@ -130,9 +208,9 @@ export default function ComputerTakeoverPage(props: {
       e.preventDefault();
       const text = e.key;
       if (!text || LOCAL_ONLY_KEYS.has(text)) return;
-      void sendComputerInput(sessionId, { kind: "key", text });
+      forwardInput({ kind: "key", text });
     },
-    [sessionId],
+    [forwardInput],
   );
 
   // Wheel forwarding, accumulated: one relayed scroll per flush window keeps
@@ -147,10 +225,10 @@ export default function ComputerTakeoverPage(props: {
         const deltaY = Math.round(wheelDelta.current);
         wheelDelta.current = 0;
         wheelTimer.current = null;
-        if (deltaY !== 0) void sendComputerInput(sessionId, { kind: "scroll", deltaY });
+        if (deltaY !== 0) forwardInput({ kind: "scroll", deltaY });
       }, WHEEL_FLUSH_MS);
     },
-    [sessionId],
+    [forwardInput],
   );
   useEffect(
     () => () => {

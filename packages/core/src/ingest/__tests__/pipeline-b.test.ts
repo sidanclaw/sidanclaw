@@ -37,7 +37,16 @@ import type { MemoryRecord, MemoryStore, MemoryWithMetrics, SoulSynthesisInput }
 import type { LLMProvider, ProviderRequest, StreamChunk } from '../../providers/types.js'
 import type { Sensitivity } from '../../security/sensitivity.js'
 
-import { processEpisode, type PipelineBDeps, type PipelineBEpisode, type EpisodeUpdaterPort } from '../pipeline-b.js'
+import {
+  processEpisode,
+  splitContentByTokenLimit,
+  mergeExtractionOutputs,
+  type ExtractionOutput,
+  type PipelineBDeps,
+  type PipelineBEpisode,
+  type EpisodeUpdaterPort,
+} from '../pipeline-b.js'
+import { estimateStringTokens } from '../../compaction/index.js'
 import type { PlatformEngagementMetrics } from '../types.js'
 
 // ── Mock provider (sequenced responses across multiple stream() calls) ──
@@ -2050,5 +2059,191 @@ describe('[COMP:brain/pipeline-b] extraction prompt spotlighting', () => {
     const { provider, requests } = capturingProvider(goodOutputs)
     await processEpisode(baseEpisode(), 'plain content', makeDeps({ provider }))
     expect(requests[0]!.systemPrompt).toContain('UNTRUSTED_CONTENT')
+  })
+})
+
+// ── Windowed extraction + truncation handling (2026-07-15 incident) ─────────
+//
+// A 95-min Cantonese transcript reached extraction at 62k tokens (the char cap
+// assumed ~4 chars/token; CJK runs ~1), and the output hit the 4000-token cap
+// twice — misread as a JSON parse failure and archived EMPTY. These pin the
+// fix: token-denominated windowing, max_tokens detected as truncation, and
+// knowledge loss surfaced via analytics.
+
+describe('[COMP:brain/pipeline-b] windowed extraction', () => {
+  it('splitContentByTokenLimit: content under the bound returns a single window, unchanged', () => {
+    const content = 'line one\nline two\n第三行'
+    expect(splitContentByTokenLimit(content, 1000)).toEqual([content])
+  })
+
+  it('splitContentByTokenLimit: CJK content splits on line boundaries at ~1 token/char', () => {
+    // 40 lines × 50 CJK chars ≈ 51 tokens/line (char + newline). Limit 200 →
+    // 3 lines per window.
+    const lines = Array.from({ length: 40 }, (_, i) => `第${i}行`.padEnd(50, '好'))
+    const windows = splitContentByTokenLimit(lines.join('\n'), 200)
+    expect(windows.length).toBeGreaterThan(10)
+    // No content lost, no line split mid-way.
+    expect(windows.join('\n').split('\n')).toEqual(lines)
+    // Every window respects the bound.
+    for (const w of windows) {
+      expect(estimateStringTokens(w)).toBeLessThanOrEqual(200)
+    }
+  })
+
+  it('splitContentByTokenLimit: a single over-long line is hard-split without loss', () => {
+    const giant = '好'.repeat(500) // one line, ~500 tokens
+    const windows = splitContentByTokenLimit(giant, 100)
+    expect(windows.length).toBe(5)
+    expect(windows.join('')).toBe(giant)
+    for (const w of windows) {
+      expect(estimateStringTokens(w)).toBeLessThanOrEqual(100)
+    }
+  })
+
+  it('mergeExtractionOutputs: dedupes entities/edges, concats the rest, unions tags, joins summaries', () => {
+    const a: ExtractionOutput = {
+      summary: 'first half',
+      entities: [
+        { kind: 'person', display_name: 'Ashley', canonical_id: null } as ExtractionOutput['entities'][number],
+      ],
+      edges: [
+        { source_ref: 'Ashley', target_ref: 'Blendit', edge_type: 'works_at' } as ExtractionOutput['edges'][number],
+      ],
+      tasks: [],
+      memories: [
+        { scope: 'user', summary: 'm1', detail: null, tags: [], why_not_entity: 'x', why_not_task: 'y' } as unknown as ExtractionOutput['memories'][number],
+      ],
+      ephemeral: [],
+      tags: ['domain:sales'],
+    }
+    const b: ExtractionOutput = {
+      ...a,
+      summary: 'second half',
+      memories: [
+        { scope: 'user', summary: 'm2', detail: null, tags: [], why_not_entity: 'x', why_not_task: 'y' } as unknown as ExtractionOutput['memories'][number],
+      ],
+      tags: ['domain:sales', 'domain:product'],
+    }
+    const merged = mergeExtractionOutputs([a, b])
+    expect(merged.summary).toBe('first half\n\nsecond half')
+    expect(merged.entities).toHaveLength(1) // deduped on (kind, display_name)
+    expect(merged.edges).toHaveLength(1) // deduped on the full triple
+    expect(merged.memories.map((m) => m.summary)).toEqual(['m1', 'm2'])
+    expect(merged.tags).toEqual(['domain:sales', 'domain:product'])
+  })
+
+  it('mergeExtractionOutputs: single payload passes through by reference (fast path)', () => {
+    const only: ExtractionOutput = {
+      summary: 's', entities: [], edges: [], tasks: [], memories: [], ephemeral: [], tags: [],
+    }
+    expect(mergeExtractionOutputs([only])).toBe(only)
+  })
+
+  it('extracts a >32k-token CJK transcript in multiple windows and merges the writes', async () => {
+    // ~70k CJK chars ≈ 70k tokens → 3 windows at the 32k bound. Each window's
+    // extraction returns a distinct memory; all must land.
+    const transcript = Array.from({ length: 700 }, (_, i) => `第${i}句 ` + '講'.repeat(96)).join('\n')
+    const perWindow = (n: number) =>
+      JSON.stringify({
+        summary: `window ${n}`,
+        memories: [
+          { scope: 'user', summary: `memory ${n}`, detail: null, tags: [], why_not_entity: 'fact', why_not_task: 'not actionable' },
+        ],
+      })
+    const { provider, requests } = capturingProvider([perWindow(1), perWindow(2), perWindow(3)])
+    const memories = spyMemories()
+    const episodes = spyEpisodes()
+
+    const result = await processEpisode(
+      baseEpisode(),
+      transcript,
+      // classifierModel null: keep `requests` to extraction calls only.
+      makeDeps({ provider, memories: memories.store, episodes: episodes.port, classifierModel: null }),
+    )
+
+    expect(requests.length).toBeGreaterThanOrEqual(2) // one call per window, no retries
+    expect(result.extracted).toBe(true)
+    expect(result.memoriesWritten.length).toBe(requests.length) // one memory per window
+    // Merged summary carries every window's summary.
+    expect(episodes.checkpointCalls[0]!.summaryText).toContain('window 1')
+    expect(episodes.checkpointCalls[0]!.summaryText).toContain(`window ${requests.length}`)
+  })
+
+  it('passes thinkingLevel low and the raised output cap on the extraction call', async () => {
+    const { provider, requests } = capturingProvider([
+      JSON.stringify({ summary: 'ok' }),
+    ])
+    await processEpisode(baseEpisode(), 'plain content', makeDeps({ provider }))
+    expect(requests[0]!.maxTokens).toBe(8192)
+    expect((requests[0] as { thinkingLevel?: string }).thinkingLevel).toBe('low')
+  })
+
+  it('a max_tokens finish is retried as TRUNCATION (concision instruction), not a parse failure', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const requests: ProviderRequest[] = []
+    let call = 0
+    const provider = {
+      name: 'mock',
+      models: ['mock'],
+      createSession() {
+        return {} as never
+      },
+      async *stream(req: ProviderRequest): AsyncGenerator<StreamChunk> {
+        requests.push(req)
+        call++
+        if (call === 1) {
+          // Output cut at the cap — the text even looks like cut JSON.
+          yield { type: 'text_delta', text: '{"summary": "cut mid-' } as StreamChunk
+          yield {
+            type: 'message_end',
+            stopReason: 'max_tokens',
+            usage: { inputTokens: 10, outputTokens: 8192 },
+          } as StreamChunk
+        } else {
+          yield { type: 'text_delta', text: JSON.stringify({ summary: 'recovered' }) } as StreamChunk
+          yield {
+            type: 'message_end',
+            stopReason: 'end_turn',
+            usage: { inputTokens: 10, outputTokens: 20 },
+          } as StreamChunk
+        }
+      },
+    } as unknown as LLMProvider
+
+    const result = await processEpisode(
+      baseEpisode(),
+      'plain content',
+      // classifierModel null: keep `requests` to extraction calls only.
+      makeDeps({ provider, classifierModel: null }),
+    )
+
+    expect(result.extracted).toBe(true)
+    expect(result.summaryText).toBe('recovered')
+    expect(requests).toHaveLength(2)
+    const retryMessages = requests[1]!.messages
+    const retryText = JSON.stringify(retryMessages)
+    expect(retryText).toContain('cut off at the output token limit')
+    expect(retryText).not.toContain('failed validation')
+    warn.mockRestore()
+  })
+
+  it('emits ingest_extraction_error when a window fails both attempts (and on the empty archive)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const logEvent = vi.fn()
+    const analytics = { logEvent } as unknown as AnalyticsLogger
+    const provider = sequencedProvider(['not json', 'still not json'])
+
+    const result = await processEpisode(
+      baseEpisode(),
+      'plain content',
+      makeDeps({ provider, analytics }),
+    )
+
+    expect(result.extracted).toBe(false)
+    const names = logEvent.mock.calls.map((c) => (c[0] as AnalyticsEvent).eventName)
+    expect(names).toEqual(['ingest_extraction_error', 'ingest_extraction_error'])
+    const phases = logEvent.mock.calls.map((c) => (c[0] as AnalyticsEvent).metadata.phase)
+    expect(phases).toEqual(['window_failed', 'all_windows_failed'])
+    warn.mockRestore()
   })
 })

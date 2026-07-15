@@ -162,6 +162,33 @@ export function computerRoutes(deps: {
     }
   })
 
+  // Live-stream mint (§5): have the provider start (or reuse) the in-sandbox
+  // bridge and hand back its capability URLs. The browser then streams frames
+  // and posts input DIRECTLY to the sandbox host — this route is the auth
+  // gate, not the data path. 501 → the page stays on the polled fallback.
+  router.post('/tasks/:sessionId/stream-session', async (req, res) => {
+    const task = await ownedTask(req.params.sessionId, req.userId as string)
+    if (!task || !deps.provider) {
+      res.status(404).json({ error: 'No active computer task for this session' })
+      return
+    }
+    const browser = deps.provider.browser(task.sandboxId)
+    if (!browser.openTakeoverStream) {
+      res.status(501).json({ error: 'Live streaming is not supported by this sandbox backend' })
+      return
+    }
+    try {
+      const info = await browser.openTakeoverStream()
+      if (!info) {
+        res.status(501).json({ error: 'Live streaming is not available for this task' })
+        return
+      }
+      res.json(info)
+    } catch (err) {
+      res.status(502).json({ error: err instanceof Error ? err.message : 'stream session failed' })
+    }
+  })
+
   router.post('/tasks/:sessionId/input', async (req, res) => {
     const task = await ownedTask(req.params.sessionId, req.userId as string)
     if (!task || !deps.provider) {

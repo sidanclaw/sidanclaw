@@ -6,7 +6,7 @@
  * owner-enabled team groups into the brain and never sends - see
  * docs/architecture/channels/whatsapp.md.
  *
- * Backend: packages/api-platform/src/routes/whatsapp-ingest-admin.ts
+ * Backend: packages/api/src/routes/whatsapp-byon-admin.ts
  *   - GET  /api/workspaces/:workspaceId/whatsapp            status + group inventory
  *   - POST /api/workspaces/:workspaceId/whatsapp/connect    SSE QR pairing
  *   - POST /api/workspaces/:workspaceId/whatsapp/groups/enable
@@ -95,7 +95,7 @@ export async function disableWhatsappGroup(
 
 // ── Bot ('chat' capability) config ──────────────────────────────
 // The bot replies when triggered; distinct from the read-only listener above.
-// Backend: packages/api-platform/src/routes/whatsapp-ingest-admin.ts (Phase 6).
+// Backend: packages/api/src/routes/whatsapp-byon-admin.ts.
 
 export type WhatsappBotSendScope = "dm" | "dm_and_groups";
 

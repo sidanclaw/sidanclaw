@@ -134,6 +134,41 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     expect(ops).toContain('takeoverInput')
   })
 
+  it('mints the live-stream session for the owner; 501 when the backend cannot stream (§5 fallback)', async () => {
+    // Stub without takeoverStream scripted = a backend without streaming.
+    const unsupported = await request(app).post('/api/computer/tasks/sess-1/stream-session')
+    expect(unsupported.status).toBe(501)
+
+    // Script the stream endpoints and re-mint: capability URLs pass through.
+    provider = new StubSandboxProvider({
+      takeoverStream: {
+        framesUrl: 'https://49223-sbx.e2b.test/frames?token=tok',
+        inputUrl: 'https://49223-sbx.e2b.test/input?token=tok',
+      },
+    })
+    orchestrator = createSandboxOrchestrator({
+      provider,
+      taskStore: createInMemorySandboxTaskStore(),
+      vault,
+      profileStore,
+    })
+    const browser = createCloudBrowserProvider({ provider, binding: orchestrator.binding })
+    await browser.navigate(
+      { userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-stream', profileId },
+      'https://github.com/notifications',
+    )
+    app = makeApp('user-1')
+    const res = await request(app).post('/api/computer/tasks/sess-stream/stream-session')
+    expect(res.status).toBe(200)
+    expect(res.body.framesUrl).toContain('/frames?token=')
+    expect(res.body.inputUrl).toContain('/input?token=')
+
+    // Ownership-gated like every other takeover route.
+    const stranger = makeApp('user-2')
+    const denied = await request(stranger).post('/api/computer/tasks/sess-stream/stream-session')
+    expect(denied.status).toBe(404)
+  })
+
   it('captures the signed-in session into the PROFILE\'s vault ("I signed in", §4.4/R2-4)', async () => {
     const res = await request(app)
       .post('/api/computer/tasks/sess-1/captured')

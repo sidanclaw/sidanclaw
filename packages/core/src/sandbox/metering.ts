@@ -25,13 +25,15 @@ export const SANDBOX_SECONDS_MODEL = 'sandbox-seconds'
 export const PROXY_GB_MODEL = 'proxy-gb'
 
 /**
- * v1 unit rates. Sandbox-seconds tracks E2B's on-demand per-second price for
- * the default 1-vCPU class (~$0.10/hour); proxy-GB is the ballpark
- * residential-proxy rate, priced now so the recorder is real even while the
- * BYOP hook stays dormant (§4.6). Both are COGS knobs, not user prices —
- * revisit against the invoice once real traffic exists.
+ * v1 unit rates. Sandbox-seconds tracks E2B's published on-demand price for
+ * the template's resource class — 4 vCPU ($0.000056/s) + 4 GiB RAM
+ * ($0.0000045/GiB/s), the spec in docs/plans/e2b-template-setup.md; a
+ * template resize must move this constant in the same change. Proxy-GB is
+ * the ballpark residential-proxy rate, priced now so the recorder is real
+ * even while the BYOP hook stays dormant (§4.6). Both are COGS knobs, not
+ * user prices — revisit against the invoice once real traffic exists.
  */
-export const SANDBOX_SECONDS_RATE_USD = 0.10 / 3600
+export const SANDBOX_SECONDS_RATE_USD = 0.000056 + 4 * 0.0000045
 export const PROXY_GB_RATE_USD = 10
 
 export type SandboxMeterDeps = {

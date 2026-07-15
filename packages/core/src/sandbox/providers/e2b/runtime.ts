@@ -14,6 +14,8 @@ export type E2bSandboxHandle = {
   writeFile(path: string, bytes: Uint8Array): Promise<void>
   readFile(path: string): Promise<Uint8Array>
   listDir(path: string): Promise<Array<{ name: string; path: string; isDir: boolean }>>
+  /** Public ingress hostname for a port bound inside the sandbox (no scheme). */
+  getHost(port: number): string
   pause(): Promise<void>
   kill(): Promise<void>
 }
@@ -60,6 +62,9 @@ function wrap(sbx: Sandbox): E2bSandboxHandle {
         path: e.path,
         isDir: String(e.type) === 'dir',
       }))
+    },
+    getHost(port) {
+      return sbx.getHost(port)
     },
     async pause() {
       // Pause is beta-gated across SDK minors (betaPause → pause). Feature-

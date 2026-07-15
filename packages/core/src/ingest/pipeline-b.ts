@@ -36,8 +36,9 @@
 
 import { z } from 'zod'
 
-import type { AnalyticsLogger } from '../analytics/logger.js'
+import { sanitize, type AnalyticsLogger } from '../analytics/logger.js'
 import { calculateCost, type UsageStore } from '../billing/cost-tracker.js'
+import { estimateStringTokens } from '../compaction/index.js'
 import { createClassificationAnalytics, type ClassificationAnalytics } from '../classification/analytics.js'
 import type { CircuitBreaker } from '../classification/circuit-breaker.js'
 import { validateEdgeKindTriple } from '../classification/rules/edge-type/index.js'
@@ -378,17 +379,113 @@ type ExtractedEdge = z.infer<typeof extractedEdgeSchema>
 type ExtractedMemory = z.infer<typeof extractedMemorySchema>
 type ExtractedTask = z.infer<typeof extractedTaskSchema>
 
-// Extraction content cap. Raised from 16 KB to ~128 KB (~32k tokens at
-// ~4 chars/token) so a fully-accumulated WhatsApp listener window — bounded by
-// the 32k-token early flush in `appendBatchEvent` — is extracted WITHOUT
-// truncation. The two are coupled: this cap must stay ≥ the early-flush bound
-// in tokens or a bounded window is silently truncated again at extraction.
-// Shared across every source; other sources rarely exceed the old 16 KB, so
-// the only material effect is that long single-source content (e.g. a Fathom
-// transcript) is now extracted whole instead of clipped. See
-// docs/architecture/brain/ingest-pipeline.md → "Batch flush — cron backstop
-// + size trigger".
+// Extraction content bound per CALL, in TOKENS — coupled to the 32k-token
+// early flush in `appendBatchEvent` (the cap must stay ≥ the flush bound or a
+// bounded window is silently truncated again at extraction). Denominated in
+// tokens via the CJK-aware `estimateStringTokens`, NOT chars: the previous
+// 128 KB char cap assumed ~4 chars/token, which CJK content breaks at ~1
+// char/token — a 95-min Cantonese transcript sailed in at 62k tokens, double
+// the design point (2026-07-15). Content over the bound is not clipped but
+// WINDOWED (`splitContentByTokenLimit`): each window extracts independently
+// and the merged payload flows through the unchanged write path, so long
+// single-source content (a recording transcript) is still extracted whole.
+// See docs/architecture/brain/ingest-pipeline.md → "Batch flush — cron
+// backstop + size trigger" + "The batch processor".
+export const EXTRACTION_TOKEN_LIMIT = 32_000
+
+// Per-window char ceiling for the prompt builder — belt-and-braces only. A
+// window at the token bound can reach this only in the all-ASCII worst case
+// (4 chars/token), so the truncate inside `buildExtractionPrompt` no-ops on
+// windowed content.
 const CONTENT_CHAR_LIMIT = 128 * 1024
+
+// Output cap per extraction call. gemini-3 thinks on every turn and thought
+// tokens count against `maxOutputTokens` (providers/gemini.ts), so the old
+// 4000 left the JSON payload competing with reasoning on dense windows —
+// attempt outputs hit exactly the cap on 2026-07-15. 8192 covers a LOW-
+// thinking pass plus a full payload at the 32k-token input design point;
+// output tokens are billed as used, so the headroom costs nothing.
+const EXTRACTION_MAX_OUTPUT_TOKENS = 8192
+
+/**
+ * Split content into windows of ≤ `limitTokens` (CJK-aware estimator),
+ * breaking on line boundaries — ingest content (transcripts, chat windows,
+ * digests) is line-oriented. A single line exceeding the whole bound (no
+ * newlines) is hard-split by code points; a `limitTokens`-codepoint slice can
+ * never exceed `limitTokens` tokens (worst case 1 token/char). Content under
+ * the bound returns as a single window — the pre-windowing fast path.
+ */
+export function splitContentByTokenLimit(content: string, limitTokens: number): string[] {
+  if (estimateStringTokens(content) <= limitTokens) return [content]
+  const windows: string[] = []
+  let current: string[] = []
+  let currentTokens = 0
+  const flush = () => {
+    if (current.length > 0) {
+      windows.push(current.join('\n'))
+      current = []
+      currentTokens = 0
+    }
+  }
+  for (const rawLine of content.split('\n')) {
+    let line = rawLine
+    let lineTokens = estimateStringTokens(line)
+    while (lineTokens > limitTokens) {
+      flush()
+      const points = [...line]
+      windows.push(points.slice(0, limitTokens).join(''))
+      line = points.slice(limitTokens).join('')
+      lineTokens = estimateStringTokens(line)
+    }
+    if (currentTokens + lineTokens > limitTokens) flush()
+    current.push(line)
+    currentTokens += lineTokens + 1 // +1: the joining newline
+  }
+  flush()
+  return windows
+}
+
+/**
+ * Merge per-window extraction payloads into one payload for the write path.
+ * Entities dedupe on (kind, display_name) first-wins — `writeEntity` resolves
+ * against the store anyway, this only avoids double writes when the same
+ * person spans windows. Edges dedupe on the full (source, type, target)
+ * triple. Everything else concatenates (windows cover disjoint content);
+ * tags union. Single-window input returns unchanged — the fast path is
+ * byte-identical to the pre-windowing behavior.
+ */
+export function mergeExtractionOutputs(payloads: ExtractionOutput[]): ExtractionOutput {
+  if (payloads.length === 1) return payloads[0]
+  const entities: ExtractedEntity[] = []
+  const seenEntities = new Set<string>()
+  for (const p of payloads) {
+    for (const e of p.entities) {
+      const key = `${e.kind} ${e.display_name}`
+      if (seenEntities.has(key)) continue
+      seenEntities.add(key)
+      entities.push(e)
+    }
+  }
+  const edges: ExtractedEdge[] = []
+  const seenEdges = new Set<string>()
+  for (const p of payloads) {
+    for (const e of p.edges) {
+      const key = `${e.source_ref} ${e.edge_type} ${e.target_ref}`
+      if (seenEdges.has(key)) continue
+      seenEdges.add(key)
+      edges.push(e)
+    }
+  }
+  return {
+    summary: payloads.map((p) => p.summary).filter((s) => s.length > 0).join('\n\n'),
+    entities,
+    edges,
+    tasks: payloads.flatMap((p) => p.tasks),
+    memories: payloads.flatMap((p) => p.memories),
+    ephemeral: payloads.flatMap((p) => p.ephemeral),
+    tags: [...new Set(payloads.flatMap((p) => p.tags))],
+  }
+}
 
 const SYSTEM_PROMPT =
   'You are the extraction step of a knowledge-management pipeline. ' +
@@ -726,78 +823,125 @@ export async function processEpisode(
   const scrubbed = scrubCredentials(resolvedContent)
   const extractableContent = scrubbed.text
 
-  // 1+2. Call extraction LLM and parse — up to two attempts.
+  // 1+2. Call extraction LLM and parse — windowed input, up to two attempts
+  // per window.
+  //
+  // Input is bounded per CALL at EXTRACTION_TOKEN_LIMIT (CJK-aware);
+  // oversized single-source content (a long recording transcript) is split
+  // into windows, each extracted independently, and the merged payload flows
+  // through the unchanged write path below.
   //
   // The stream call carries the decoder-level JSON constraint (Gemini
   // responseMimeType via `responseFormat: 'json'`), but the live golden-set
   // run (2026-07-07) showed the preview-tier model still intermittently
   // emits malformed or schema-mismatching output even with the hint. A parse
   // failure archives the Episode EMPTY — silent knowledge loss — so one
-  // bounded retry with the validation error fed back recovers that tail.
-  // LLM *throws* (network/provider errors) keep single-shot semantics: they
-  // have their own retry layers upstream. Every attempt's spend is metered
-  // the moment usage is known; `extractionUsage` in the result is the final
-  // attempt's usage (per-attempt metering is authoritative for billing).
+  // bounded retry with the validation error fed back recovers that tail. A
+  // `max_tokens` finish is TRUNCATION, not malformed JSON: it gets its own
+  // reason + a concision retry instead of the misleading validation message
+  // (2026-07-15: a 62k-token transcript's output hit the cap twice and
+  // archived empty). LLM *throws* (network/provider errors) keep single-shot
+  // semantics: they have their own retry layers upstream. Every attempt's
+  // spend is metered the moment usage is known; `extractionUsage` in the
+  // result is the final attempt's usage (per-attempt metering is
+  // authoritative for billing).
   let extractionUsage: TokenUsage | null = null
-  let payload: ExtractionOutput | null = null
-  const extractionMessages: Message[] = [
-    { role: 'user', content: buildExtractionPrompt(episode, extractableContent) },
-  ]
-  for (let attempt = 1; attempt <= 2 && !payload; attempt++) {
-    let rawText = ''
-    try {
-      const response = await collectStream(
-        deps.provider.stream({
-          model: deps.model,
-          systemPrompt: SYSTEM_PROMPT,
-          messages: extractionMessages,
-          maxTokens: 4000,
-          temperature: 0.1,
-          responseFormat: 'json',
-        }),
-      )
-      extractionUsage = response.usage
-      // Attribute the spend the moment usage is known — failed-parse
-      // attempts still consumed these tokens.
-      await recordExtractionUsage(deps, episode, response.usage)
-      rawText = response.content
-        .filter((b) => b.type === 'text')
-        .map((b) => (b.type === 'text' ? b.text : ''))
-        .join('')
-    } catch (err) {
-      console.warn(
-        `[pipeline-b] extraction LLM failed for episode ${episode.id}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
-      await archiveWithEmptySummary(episode, deps, actorUserId)
-      return emptyResult(episode, extractionUsage, false)
-    }
+  const windows = splitContentByTokenLimit(extractableContent, EXTRACTION_TOKEN_LIMIT)
+  const windowPayloads: ExtractionOutput[] = []
+  for (let wi = 0; wi < windows.length; wi++) {
+    const extractionMessages: Message[] = [
+      { role: 'user', content: buildExtractionPrompt(episode, windows[wi]) },
+    ]
+    let windowPayload: ExtractionOutput | null = null
+    for (let attempt = 1; attempt <= 2 && !windowPayload; attempt++) {
+      let rawText = ''
+      let truncated = false
+      try {
+        const response = await collectStream(
+          deps.provider.stream({
+            model: deps.model,
+            systemPrompt: SYSTEM_PROMPT,
+            messages: extractionMessages,
+            maxTokens: EXTRACTION_MAX_OUTPUT_TOKENS,
+            temperature: 0.1,
+            responseFormat: 'json',
+            // Decoder-constrained JSON needs no reasoning summary; on
+            // gemini-3 (which thinks on every turn) LOW keeps thought tokens
+            // from eating the output cap. Models without an explicit
+            // thinking level ignore it (resolveGeminiThinkingLevel).
+            thinkingLevel: 'low',
+          }),
+        )
+        extractionUsage = response.usage
+        // Attribute the spend the moment usage is known — failed-parse
+        // attempts still consumed these tokens.
+        await recordExtractionUsage(deps, episode, response.usage)
+        truncated = response.stopReason === 'max_tokens'
+        rawText = response.content
+          .filter((b) => b.type === 'text')
+          .map((b) => (b.type === 'text' ? b.text : ''))
+          .join('')
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.warn(`[pipeline-b] extraction LLM failed for episode ${episode.id}: ${msg}`)
+        emitExtractionLoss(deps, episode, {
+          phase: 'llm_error',
+          reason: msg,
+          window: wi + 1,
+          windowCount: windows.length,
+        })
+        await archiveWithEmptySummary(episode, deps, actorUserId)
+        return emptyResult(episode, extractionUsage, false)
+      }
 
-    const parseRes = parseExtraction(rawText)
-    if (parseRes.ok) {
-      payload = parseRes.payload
-      break
+      let reason: string
+      if (truncated) {
+        reason = `output truncated at the ${EXTRACTION_MAX_OUTPUT_TOKENS}-token cap`
+      } else {
+        const parseRes = parseExtraction(rawText)
+        if (parseRes.ok) {
+          windowPayload = parseRes.payload
+          break
+        }
+        reason = parseRes.reason
+      }
+      console.warn(
+        `[pipeline-b] extraction ${truncated ? 'truncated' : 'parse failed'} for episode ${episode.id} (window ${wi + 1}/${windows.length}, attempt ${attempt}/2): ${reason}`,
+      )
+      if (attempt === 1) {
+        // No echo of the bad output — re-anchoring on garbage hurts more than
+        // the reason string helps. Fresh sampling + the failure-specific
+        // instruction is what recovers the intermittent failures.
+        extractionMessages.push({
+          role: 'user',
+          content: truncated
+            ? 'Your previous response was cut off at the output token limit. ' +
+              'Respond again with ONLY the JSON object — include only the highest-salience items and keep every summary brief.'
+            : `Your previous response failed validation: ${reason}. ` +
+              'Respond again with ONLY the JSON object, exactly matching the requested shape. No commentary.',
+        })
+      } else {
+        emitExtractionLoss(deps, episode, {
+          phase: 'window_failed',
+          reason,
+          window: wi + 1,
+          windowCount: windows.length,
+        })
+      }
     }
-    console.warn(
-      `[pipeline-b] extraction parse failed for episode ${episode.id} (attempt ${attempt}/2): ${parseRes.reason}`,
-    )
-    if (attempt === 1) {
-      // No echo of the bad output — re-anchoring on garbage hurts more than
-      // the reason string helps. Fresh sampling + the validation error is
-      // what recovers the intermittent failures.
-      extractionMessages.push({
-        role: 'user',
-        content:
-          `Your previous response failed validation: ${parseRes.reason}. ` +
-          'Respond again with ONLY the JSON object, exactly matching the requested shape. No commentary.',
-      })
-    }
+    if (windowPayload) windowPayloads.push(windowPayload)
   }
-  if (!payload) {
+  if (windowPayloads.length === 0) {
+    emitExtractionLoss(deps, episode, {
+      phase: 'all_windows_failed',
+      reason: `all ${windows.length} extraction window(s) failed`,
+      window: 0,
+      windowCount: windows.length,
+    })
     await archiveWithEmptySummary(episode, deps, actorUserId)
     return emptyResult(episode, extractionUsage, false)
   }
+  const payload = mergeExtractionOutputs(windowPayloads)
 
   // 3. Merge tags.
   const tags = dedupTags(episode.preStampedTags, payload.tags)
@@ -1589,6 +1733,41 @@ async function resolveCrmEntity(
 }
 
 // ── Failure-path helpers ─────────────────────────────────────────────
+
+/**
+ * Extraction ended in knowledge loss — surface it in `analytics_events`
+ * (`ingest_extraction_error`). A console.warn on a worker instance nobody
+ * tails is silent loss; analytics is the primary log (analytics.md). The
+ * reason string is machine-generated (parse/validation/stop reasons), never
+ * user content. Fire-and-forget: absent analytics dep → no-op.
+ */
+function emitExtractionLoss(
+  deps: PipelineBDeps,
+  episode: PipelineBEpisode,
+  args: {
+    phase: 'window_failed' | 'llm_error' | 'all_windows_failed'
+    reason: string
+    window: number
+    windowCount: number
+  },
+): void {
+  if (!deps.analytics) return
+  const userId = episode.createdByUserId || episode.userId
+  if (!userId) return
+  deps.analytics.logEvent({
+    userId,
+    ...(episode.assistantId ? { assistantId: episode.assistantId } : {}),
+    eventName: 'ingest_extraction_error',
+    metadata: {
+      episodeId: sanitize(episode.id),
+      sourceKind: sanitize(episode.sourceKind),
+      phase: sanitize(args.phase),
+      reason: sanitize(args.reason.slice(0, 300)),
+      window: args.window,
+      windowCount: args.windowCount,
+    },
+  })
+}
 
 async function archiveWithEmptySummary(
   episode: PipelineBEpisode,

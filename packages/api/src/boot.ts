@@ -210,6 +210,21 @@ import { connectorRoutes } from './routes/connectors.js'
 import { discoverRoutes } from './routes/discover.js'
 import { createModesRouter } from './routes/modes.js'
 import { pendingMessageRoutes } from './routes/pending-messages.js'
+import { channelsRoutes } from './routes/channels.js'
+import { whatsappByonRoutes } from './routes/whatsapp-byon.js'
+import { whatsappIngestAdminRoutes } from './routes/whatsapp-byon-admin.js'
+import { telegramByoRoutes } from './routes/telegram-byo.js'
+import { slackRoutes } from './routes/slack.js'
+import { discordRoutes } from './routes/discord.js'
+import { telegramLinkingRoutes } from './routes/telegram-linking.js'
+import { slackLinkingRoutes } from './routes/slack-linking.js'
+import { createDbChannelUserStore } from './db/channel-user-store.js'
+import { createDiscordConnectorClient } from './discord/connector-client.js'
+import { createWhatsappConnectorClient } from './whatsapp/connector-client.js'
+import { createWhatsappByonRuntime } from './whatsapp/byon-runtime.js'
+import { createIngestRulesStore } from './db/ingest-rules-store.js'
+import { createIngestRuleEditorStore } from './db/ingest-rules-editor-store.js'
+import { processChannelMessage } from './routes/channel-pipeline.js'
 import { snapshotRoutes } from './routes/snapshots.js'
 import { loadConnectorRegistry } from './registry/load-registry.js'
 import { createDbLinkedAccountStore } from './db/linked-accounts.js'
@@ -296,6 +311,7 @@ import { internalIngestRoutes } from './doc/internal-ingest-route.js'
 import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanout.js'
+import { setMediaTokenSecret } from './media-token.js'
 import { setTaskEventDispatcher } from './task-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
@@ -425,6 +441,14 @@ export interface OpenApiEnv {
   EMAIL_FROM_ADDRESS?: string
   WA_CONNECTOR_URL?: string
   WA_CONNECTOR_SECRET?: string
+  /**
+   * Discord Gateway connector bridge (`apps/discord-connector` or a
+   * compatible self-hosted bridge). Both set → the Discord connect endpoint
+   * works and `/internal/discord/inbound` is mounted; unset → Discord
+   * connect returns 503 and the inbound route is absent.
+   */
+  DISCORD_CONNECTOR_URL?: string
+  DISCORD_CONNECTOR_SECRET?: string
   LLM_PROVIDER_KEY_ENCRYPTION_KEY?: string
   // Blob storage (open uses local-disk fallback when unset).
   GCS_FILES_BUCKET?: string
@@ -465,9 +489,6 @@ export interface OpenApiEnv {
   // (open default) → the email surface is dark: inbox provisioning routes 503,
   // the /webhook/agentmail route is not mounted, the UI hides the section.
   AGENTMAIL_API_KEY?: string
-  // Fallback Svix signing secret for a manually-registered org-level webhook;
-  // per-inbox webhook secrets live on channel_integrations credentials.
-  AGENTMAIL_WEBHOOK_SECRET?: string
 }
 
 /**
@@ -630,6 +651,23 @@ export interface OpenApiPorts {
     severity?: string
   }) => Promise<{ id: string }>
 
+  /**
+   * Closed enrichments for the (open) BYO channel runtime. The channel routes
+   * — workspace channels management, Telegram/Slack webhooks, the Discord
+   * connector inbound — are mounted by `bootOpenApi` itself for BOTH editions;
+   * this factory lets the hosted platform bind the parts that stay closed:
+   * Pipeline-C Slack ingest, GCS channel-media intake, and the
+   * recording-to-brain surcharge pipeline. Called right after `BootContext`
+   * assembly (same effective mount position the closed app used). Open build
+   * leaves it unset → chat over channels works, those enrichments are inert.
+   */
+  buildChannelHosts?: (ctx: BootContext) => ChannelHostHooks | Promise<ChannelHostHooks>
+
+  /** Hosted has a pending-ingest batch worker; OSS executes WhatsApp realtime. */
+  whatsappScheduledBatching?: boolean
+  /** A later closed router owns the hosted shared-number fallback. */
+  whatsappOfficialFallback?: boolean
+
   // ── Extension hook: the platform mounts its closed routes/workers ──
   mountExtraRoutes?: (app: Express, ctx: BootContext) => void | Promise<void>
 
@@ -667,6 +705,25 @@ export interface BootOpenApiOptions {
   ports?: OpenApiPorts
   /** Default true; gates the background workers (consolidation, pollers, …). */
   runWorkers?: boolean
+}
+
+/**
+ * Hosted-only enrichments the platform injects into the open channel routes
+ * via `OpenApiPorts.buildChannelHosts`. Every field is optional — the OSS
+ * edition runs the channel routes without any of them.
+ */
+export interface ChannelHostHooks {
+  /** Pipeline-C rules-engine ingest for Slack channel traffic (closed). */
+  slackWebhookIngestor?: import('./routes/slack.js').SlackWebhookIngestor
+  /** GCS channel-media intake for Slack pulled attachments (closed). */
+  slackIngestChannelMediaRef?: Parameters<typeof slackRoutes>[0]['ingestChannelMediaRef']
+  /** GCS channel-media intake for Discord attachments (closed). */
+  discordIngestChannelMediaRef?: Parameters<typeof discordRoutes>[0]['ingestChannelMediaRef']
+  /** GCS channel-media intake for Telegram BYO files (closed; the official
+   *  shared-bot route stays closed and uses the same closed builder). */
+  telegramIngestChannelMediaRef?: Parameters<typeof telegramByoRoutes>[0]['ingestChannelMediaRef']
+  /** Recording-to-brain transcription + credit surcharge (closed). */
+  recordingIngest?: import('./routes/telegram-byo.js').ChannelRecordingIngest
 }
 
 /**
@@ -734,7 +791,9 @@ export interface BootContext {
   linkedAccountStore: ReturnType<typeof createDbLinkedAccountStore>
   linkCodeStore: ReturnType<typeof createDbLinkCodeStore>
   integrationStore: ReturnType<typeof createDbChannelIntegrationStore> | null
-  ingestRulesStore: unknown
+  /** Channel shadow-identity store — shared with the closed official-bot / WhatsApp routes. */
+  channelUserStore: ReturnType<typeof createDbChannelUserStore>
+  ingestRulesStore: ReturnType<typeof createIngestRulesStore>
   gdriveFilesStore: GDriveFilesStore | undefined
   filesApi: ReturnType<typeof createFilesApi> | null
   entityKindClassifier: ReturnType<typeof createEntityKindClassifier>
@@ -777,6 +836,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (!env.JWT_SECRET) {
     throw new Error('[boot] JWT_SECRET is required to run this service.')
   }
+  // Bind the media-token signing secret for the channel pipeline's actor
+  // media tokens (late-bound seam — see media-token.ts).
+  setMediaTokenSecret(env.JWT_SECRET)
 
   const app = express()
   const port = parseInt(env.PORT || new URL(env.API_URL).port || '4000')
@@ -1006,9 +1068,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Shared workspace tool policy (migration 312) — governs allow/ask/block for
   // team-owned connector tools. See workspace-owned-connector-transfer.md §2C.
   const workspaceToolPolicyStore = createWorkspaceToolPolicyStore()
-  // Ingest-rules store is closed (Studio ▸ Ingestion control plane lives in the
-  // platform). Carried on ctx as `unknown` for closed routes; open never reads.
-  const ingestRulesStore: unknown = undefined
+  const ingestRulesStore = createIngestRulesStore()
+  const ingestRuleEditorStore = createIngestRuleEditorStore()
   const connectorStore = createDbConnectorStore(credKey)
   const assistantConnectorStore = createDbAssistantConnectorStore()
   const assistantConnectorGrantsStore = createDbAssistantConnectorGrantsStore()
@@ -1048,6 +1109,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const oauthAuthorizationStore = createDbOAuthAuthorizationStore()
   const desktopAuthStore = createDbDesktopAuthStore()
   const shadowClaimStore = createShadowClaimStore()
+  // Channel shadow-identity resolution (channel_user_cache) — shared by the
+  // open BYO webhooks mounted below and the closed official-bot/WhatsApp
+  // routes (via BootContext).
+  const channelUserStore = createDbChannelUserStore()
 
   const channelRouteStore = createChannelRouteStore()
   const linkedAccountStore = createDbLinkedAccountStore()
@@ -4376,8 +4441,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const viewsPruneWorker = createViewsPruneWorker({ savedViewStore })
   if (runWorkers) viewsPruneWorker.start()
 
-  // (Anonymous shadow-user pruning rides the CLOSED channel-user store, so the
-  // platform starts it from mountExtraRoutes — not here.)
+  // The hosted composition starts anonymous shadow-user pruning from
+  // mountExtraRoutes; the open store itself is exposed on BootContext.
 
   // ── Hourly approval / question / worker-run sweeps ──
   if (runWorkers) {
@@ -4475,6 +4540,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     linkedAccountStore,
     linkCodeStore,
     integrationStore,
+    channelUserStore,
     ingestRulesStore,
     gdriveFilesStore,
     filesApi,
@@ -4485,6 +4551,182 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolveDataRequest,
     emailAuth,
     approvalBridgeDeps,
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  // BYO channel runtime (open for both editions since the channels
+  // open-core move; docs/architecture/channels/adapter-pattern.md).
+  // Mounted here — after BootContext assembly, before mountExtraRoutes —
+  // which is the same effective position the closed app mounted them from
+  // before the move, so the Express `/api` guard ordering is unchanged.
+  // Hosted-only enrichments (Pipeline-C Slack ingest, GCS media intake,
+  // recording surcharge) arrive via `ports.buildChannelHosts`.
+  // ════════════════════════════════════════════════════════════════
+  {
+    const channelHosts: ChannelHostHooks = ports.buildChannelHosts
+      ? await ports.buildChannelHosts(ctx)
+      : {}
+    const discordConnector =
+      env.DISCORD_CONNECTOR_URL && env.DISCORD_CONNECTOR_SECRET
+        ? createDiscordConnectorClient({
+            connectorUrl: env.DISCORD_CONNECTOR_URL,
+            connectorSecret: env.DISCORD_CONNECTOR_SECRET,
+          })
+        : undefined
+    const whatsappConnector =
+      env.WA_CONNECTOR_URL && env.WA_CONNECTOR_SECRET
+        ? createWhatsappConnectorClient({
+            connectorUrl: env.WA_CONNECTOR_URL,
+            connectorSecret: env.WA_CONNECTOR_SECRET,
+          })
+        : undefined
+
+    // Workspace channels operator surface (Studio → Channels).
+    app.use('/api', requireAuth(env.JWT_SECRET), channelsRoutes({
+      workspaceStore,
+      integrationStore: integrationStore ?? undefined,
+      apiUrl: env.API_URL,
+      discordConnector,
+      whatsappConnector,
+      // Fallback bot for naming sessions-derived telegram delivery destinations.
+      telegramBotToken: env.TELEGRAM_BOT_TOKEN,
+    }))
+
+    if (integrationStore && env.WA_CONNECTOR_URL && env.WA_CONNECTOR_SECRET) {
+      const whatsapp = createWhatsappByonRuntime({
+        connectorUrl: env.WA_CONNECTOR_URL,
+        connectorSecret: env.WA_CONNECTOR_SECRET,
+        integrationStore,
+        provider,
+        crm: crmStore,
+        entities: entitiesStore,
+        entityLinks: entityLinksStore,
+        memories: memoryStore,
+        tasks: taskStore,
+        episodes: episodesStore,
+        ingestRulesStore,
+        analytics,
+        usageStore,
+        ingestCharge: ports.ingestCharge,
+        scheduledBatching: ports.whatsappScheduledBatching,
+        runPipeline: async ({ ctx: channel, input, hooks, abortController }) => {
+          if (!channel.assistantId) return
+          await processChannelMessage({
+            userId: channel.ownerUserId,
+            ownerId: channel.ownerUserId,
+            assistant: {
+              id: channel.assistantId,
+              name: channel.assistantName,
+              ownerUserId: channel.ownerUserId,
+              workspaceId: channel.workspaceId,
+              systemPrompt: channel.persona,
+              clearance: channel.assistantClearance,
+              kind: channel.assistantKind,
+            },
+            isIdentified: true,
+            channelType: 'whatsapp',
+            channelId: input.chatJid,
+            actorChannelId: (input.senderPnJid ?? input.senderJid).split('@')[0] ?? null,
+            mediaEpisodeId: input.mediaEpisodeId,
+            messageText: input.text,
+            rawUserText: input.text,
+            artifactPromoter,
+            userContentBlocks: [{ type: 'text', text: input.text }],
+            isGroupChat: input.isGroup,
+            incomingChannelMessageId: input.messageId,
+            modelAlias: undefined,
+            adaptiveResearchEnabled: true,
+            abortController,
+            provider,
+            systemPrompt: LAYER_1_SYSTEM_PROMPT,
+            tools: allTools,
+            memoryStore,
+            usageStore,
+            analytics,
+            connectorStore,
+            mcpSettingsStore,
+            checkCreditBudget: ports.checkCreditBudget,
+            assistantConnectorStore,
+            connectorGrantStore,
+            connectorInstanceStore,
+            knowledgeStore,
+            gdriveFilesStore,
+            workspaceFilesStore,
+            filesApi: filesApi ?? undefined,
+            skillStore,
+            workerManager,
+            episodicStore,
+            sessionStateStore,
+            capabilityStore,
+            hooks,
+          })
+        },
+      })
+      app.use('/api', requireAuth(env.JWT_SECRET), whatsappIngestAdminRoutes({
+        workspaceStore,
+        integrationStore,
+        ruleEditor: ingestRuleEditorStore,
+        waConnectorUrl: env.WA_CONNECTOR_URL,
+        waConnectorSecret: env.WA_CONNECTOR_SECRET,
+        scheduledBatching: ports.whatsappScheduledBatching,
+      }))
+      app.use('/internal/whatsapp', whatsappByonRoutes({
+        connectorSecret: env.WA_CONNECTOR_SECRET,
+        integrationStore,
+        ingestor: whatsapp.ingestor,
+        bot: whatsapp.bot,
+        passUnknownToFallback: ports.whatsappOfficialFallback,
+      }))
+    }
+
+    // Telegram / Slack account linking — web-side of the link-code handshake.
+    app.use('/api/assistants/:assistantId/telegram', requireAuth(env.JWT_SECRET),
+      telegramLinkingRoutes({ linkedAccountStore, linkCodeStore }))
+    app.use('/api/assistants/:assistantId/slack', requireAuth(env.JWT_SECRET),
+      slackLinkingRoutes({ linkedAccountStore, linkCodeStore }))
+
+    // Inbound webhooks — self-authenticating (per-integration secrets), so no
+    // JWT guard. All gated on the integration store (CHANNEL_CREDENTIAL_KEY).
+    if (integrationStore) {
+      app.use('/webhook/telegram', telegramByoRoutes({
+        provider, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
+        appUrl: env.APP_URL, apiUrl: env.API_URL, integrationStore,
+        linkedAccountStore, channelUserStore, workerManager, connectorStore, mcpSettingsStore,
+        assistantConnectorStore, connectorGrantStore, connectorInstanceStore, knowledgeStore,
+        gdriveFilesStore, workspaceFilesStore, filesApi: filesApi ?? undefined, analytics,
+        skillStore, pendingMessageStore, deferredConfirmationStore, episodicStore,
+        sessionStateStore, voiceTranscription, workspaceToolPolicyStore,
+        recordingIngest: channelHosts.recordingIngest,
+        ingestChannelMediaRef: channelHosts.telegramIngestChannelMediaRef,
+        artifactPromoter, fileStore,
+      }))
+      app.use('/webhook/slack', slackRoutes({
+        ingestChannelMediaRef: channelHosts.slackIngestChannelMediaRef,
+        artifactPromoter,
+        provider, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
+        integrationStore, channelUserStore, linkedAccountStore, linkCodeStore,
+        workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
+        connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
+        filesApi: filesApi ?? undefined, analytics, skillStore, pendingMessageStore,
+        deferredConfirmationStore, episodicStore, sessionStateStore, workflowEventDispatcher,
+        slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
+        buildConnectorActionAudit: ports.buildConnectorActionAudit,
+      }))
+      if (env.DISCORD_CONNECTOR_SECRET) {
+        app.use('/internal/discord', discordRoutes({
+          ingestChannelMediaRef: channelHosts.discordIngestChannelMediaRef,
+          artifactPromoter,
+          connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+          tools: allTools, capabilityStore, memoryStore, usageStore,
+          checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
+          workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
+          connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
+          skillStore, pendingMessageStore, episodicStore, sessionStateStore,
+        }))
+      }
+    }
   }
 
   // ── Let the platform mount its closed routes + workers onto the same app ──

@@ -256,6 +256,17 @@ export type SandboxBridge = {
   pullDownloads(sandboxId: string): Promise<Array<{ path: string; bytes: Uint8Array }>>
 }
 
+/**
+ * Live take-over stream endpoints (capability URLs — the token IS the auth;
+ * minted per sandbox, dies with it). Frames = SSE of screencast JPEG events;
+ * input = per-event POST. Both point straight at the sandbox's public host,
+ * never through the API.
+ */
+export type TakeoverStreamInfo = {
+  framesUrl: string
+  inputUrl: string
+}
+
 /** The per-sandbox discrete browser surface (agent-browser glue lives behind it). */
 export type SandboxBrowser = {
   navigate(url: string): Promise<BrowserNavigateResult>
@@ -266,6 +277,12 @@ export type SandboxBrowser = {
   captureStorageState(site: string): Promise<SessionBundle>
   injectStorageState(bundle: SessionBundle): Promise<void>
   takeover(): SandboxTakeover
+  /**
+   * Start (or reuse) the live take-over stream for this sandbox and return
+   * its capability URLs. Absent/null on backends without streaming — the
+   * caller falls back to the polled frame + per-event input routes.
+   */
+  openTakeoverStream?(): Promise<TakeoverStreamInfo | null>
 }
 
 /**

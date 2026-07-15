@@ -33,7 +33,13 @@ import type { BrainEpisodeIngestor, ChatEpisodeIngestor } from './ingest-port.js
 
 // Extraction runs on the Standard tier (model-routing.md Trigger #11); the
 // optional drift/kind classifier on the Background-Standard lite model.
-const EXTRACTION_MODEL = 'gemini-3-flash-standard'
+// EXTRACTION_MODEL is exported as the single source of truth: every Pipeline-B
+// construction site (the platform boot wires several webhook/media ingestors
+// of its own) must reference it rather than hardcode a model string — the
+// golden set (pipeline-b.golden-set.test.ts) and ingest-pipeline.md both pin
+// the extraction model to this constant, and a drifted literal misclassifies
+// the usage-tracking tier (2026-07-16: platform sites carried 'gemini-flash').
+export const EXTRACTION_MODEL = 'gemini-3-flash-standard'
 const CLASSIFIER_MODEL = 'gemini-3.1-flash-lite'
 
 /** Head of the raw text stored inline on a generic Episode's `content_ref`

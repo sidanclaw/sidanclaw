@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { orderMigrationFiles } from '../migration-order.js'
 
 describe('[COMP:api/migration-order] Migration file ordering', () => {
@@ -49,5 +50,15 @@ describe('[COMP:api/migration-order] Migration file ordering', () => {
         { dir: '/overlay', files: ['282_wa_auth_state.sql'] },
       ]),
     ).toThrow(/globally unique/)
+  })
+
+  it('uses real pg_policy catalog columns in the WhatsApp migration', () => {
+    const sql = readFileSync(
+      new URL('../../migrations/329_whatsapp_byon_runtime.sql', import.meta.url),
+      'utf8',
+    )
+    expect(sql).toContain("polrelid = 'public.ingest_rules'::regclass")
+    expect(sql).toContain("polname = 'ingest_rules_member'")
+    expect(sql).not.toMatch(/FROM pg_policy WHERE (?:schemaname|tablename|policyname)/)
   })
 })
