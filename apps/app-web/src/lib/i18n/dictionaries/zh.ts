@@ -2491,6 +2491,13 @@ export const zh: Dictionary = {
       done: "已完成",
       archived: "已封存",
     },
+    taskPriority: {
+      none: "無",
+      low: "低",
+      medium: "中",
+      high: "高",
+      urgent: "緊急",
+    },
     graphView: {
       empty: "尚未有相互連結的實體。",
       emptyHint:
@@ -2684,6 +2691,12 @@ export const zh: Dictionary = {
       entityKindContact: "聯絡人",
       entityKindDeal: "商機",
       entityKindTask: "任務",
+      captureKindMemory: "記憶",
+      captureHeading: "捕捉",
+      captureHint:
+        "除了填寫各章節外,填充時還能從來源寫入 Brain 記錄。開啟要捕捉的類型,並可補充說明寫入方式(例如任務要如何拆分:維護項目或業務跟進)。",
+      captureInstructionPlaceholder:
+        "選填:這類記錄的寫入方式(例如每個行動項目建立一項任務,使用祈使句標題)",
       keyLabel: "鍵",
       keyHint: "其他工作流讀取此欄位的固定位址。重新命名標題不會改變它。",
       requiredLabel: "必填",
@@ -3011,9 +3024,11 @@ export const zh: Dictionary = {
       threadSuggestion3: "有沒有過時的內容？",
       threadStop: "停止",
       threadStopped: "已停止。",
+      threadToolsSummary: "{count} 個步驟",
       propertyLabels: {
         title: "標題",
         status: "狀態",
+        priority: "優先級",
         due_at: "截止日期",
         tags: "標籤",
         sensitivity: "敏感度",
@@ -3021,7 +3036,6 @@ export const zh: Dictionary = {
         summary: "摘要",
         detail: "詳細內容",
         attributes: "屬性",
-        saved: "儲存時間",
         assignee_id: "負責人",
         created_by: "建立者",
         name: "名稱",
@@ -3040,6 +3054,7 @@ export const zh: Dictionary = {
         description: "描述",
       },
       memberUnknown: "未知成員",
+      assigneeUnassigned: "未指派",
       memberRole: {
         owner: "擁有者",
         admin: "管理員",
@@ -3051,6 +3066,16 @@ export const zh: Dictionary = {
         error: "無法載入此檔案。",
         download: "下載檔案",
         tagsPlaceholder: "標籤1, 標籤2",
+      },
+      fileReingest: {
+        action: "重新導入大腦",
+        confirmTitle: "要重新導入這個檔案嗎?",
+        confirmBody:
+          "{name} 已經導入過。重新導入會再次執行知識抽取:會消耗點數,且已抽取的記憶可能重複。",
+        confirmAction: "重新導入",
+        queued: "已開始導入。抽取的知識稍後就會出現。",
+        inFlight: "這個檔案的導入已在進行中。",
+        failed: "無法開始導入。",
       },
       authorUser: "你",
       authorAssistant: "{name}",
@@ -3201,7 +3226,7 @@ export const zh: Dictionary = {
     why: "為何？",
     hideWhy: "收起原因",
     whyUnavailable: "無法載入上下文。",
-    whyNoMessages: "這條記憶沒有保留原始對話。",
+    whyNoMessages: "這個項目沒有記錄來源。",
     whyLeadIn: "於與 {assistant} 對話時保存。前後輪次：",
     // ── 來源線索（source descriptor） ──
     originChat: "從{channel}對話中保存。",

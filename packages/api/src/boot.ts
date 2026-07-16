@@ -53,6 +53,8 @@ import {
   createInterAssistantTools,
   createReportBugTool,
   createConfirmRecordingProcessingTool,
+  createIngestStoredFileTool,
+  createReprocessRecordingTool,
   createReviewDataRequestTool,
   createWorkflowTools,
   createWorkflowBrainTools,
@@ -68,6 +70,7 @@ import {
   buildOneStepReminderWorkflow,
   type GoalRecord,
   createWorkspaceTools,
+  createTranscriptionPrefTools,
   type WorkspaceDirectoryStore,
   type WorkspaceMemberInfo,
   createCrmTools,
@@ -161,7 +164,7 @@ import { workspaceRoutes } from './routes/workspaces.js'
 import { invitationRoutes } from './routes/invitations.js'
 import { createWorkspaceInvitationStore } from './db/workspace-invitation-store.js'
 import { kbGapsRoutes } from './routes/kb-gaps.js'
-import { createWorkspaceStore, getWorkspaceMembershipWithClearanceSystem, getWorkspacePlan } from './db/workspace-store.js'
+import { createWorkspaceStore, getWorkspaceMembershipWithClearanceSystem, getWorkspacePlan, getWorkspaceTranscriptionPrefs, setWorkspaceTranscriptionPrefs } from './db/workspace-store.js'
 import { createWorkspaceAuditStore } from './db/workspace-audit-store.js'
 import { createConnectionStore } from './db/connection-store.js'
 import { createPendingMessageStore } from './db/pending-message-store.js'
@@ -170,7 +173,7 @@ import {
   deletePendingRecordingConfirmation,
   buildChannelSessionKey,
 } from './db/pending-recording-confirmations-store.js'
-import { enqueueRecordingJob } from './db/recording-jobs-store.js'
+import { enqueueRecordingJob, hasCompletedRecordingJob } from './db/recording-jobs-store.js'
 import { createChatConfirmationStore } from './db/chat-confirmation-store.js'
 import { createDeferredConfirmationStore } from './db/deferred-confirmation-store.js'
 import { createSnapshotStore } from './db/snapshot-store.js'
@@ -255,6 +258,7 @@ import {
 import { goalsRoutes } from './routes/goals.js'
 import { createDbCrmStore } from './db/crm-store.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
+import { getWorkspaceFileById } from './db/workspace-files.js'
 import { createGcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
 import { createFilesApi, createSingletonFilesClientResolver } from './files/files-api.js'
@@ -339,7 +343,7 @@ import { createDbDocNotificationsStore } from './db/doc-notifications-store.js'
 import { commentRoutes } from './routes/comments.js'
 import { inboxRoutes } from './routes/inbox.js'
 import { createDbEpisodicStore } from './db/episodic-store.js'
-import { createDbEpisodesStore } from './db/episodes-store.js'
+import { createDbEpisodesStore, getEpisodeByIdSystem } from './db/episodes-store.js'
 import { createDbEntityLinksStore } from './db/entity-links-store.js'
 import {
   createDbEntitiesStore,
@@ -1371,6 +1375,48 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }),
     )
 
+    // Existing-file re-ingest + recording re-process — the user-reachable
+    // recovery affordances (file-artifacts.md §"Re-ingest", transcription.md
+    // §"Re-processing"). Both are thin wrappers over the EXISTING job queues;
+    // both refuse to double-ingest silently: an already-ingested/processed
+    // target requires a user-approved confirm relayed by the model.
+    tools.set(
+      'ingestFile',
+      createIngestStoredFileTool({
+        getFile: async (actor, fileId) => {
+          const f = await getWorkspaceFileById(actor, fileId)
+          return f
+            ? {
+                id: f.id,
+                name: f.name,
+                mime: f.mime,
+                sizeBytes: f.sizeBytes,
+                sourceEpisodeId: f.sourceEpisodeId,
+              }
+            : null
+        },
+        enqueue: enqueueFileIngestJob,
+      }),
+    )
+    tools.set(
+      'reprocessRecording',
+      createReprocessRecordingTool({
+        getRecording: async (actorUserId, recordingId) => {
+          const ep = await getEpisodeByIdSystem(actorUserId, recordingId, {})
+          return ep
+            ? {
+                id: ep.id,
+                workspaceId: ep.workspaceId,
+                sourceKind: ep.sourceKind,
+                sourceRef: (ep.sourceRef ?? null) as Record<string, unknown> | null,
+              }
+            : null
+        },
+        hasProcessed: hasCompletedRecordingJob,
+        enqueue: enqueueRecordingJob,
+      }),
+    )
+
     // Closed capability-gated tools (triage / product-sentiment / analytics-query).
     // Open omits them; the platform injects via buildClosedTools.
     if (ports.buildClosedTools) {
@@ -1406,6 +1452,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         docPageStore: createDbDocPageStore(),
         crmStore,
         taskStore,
+        memoryStore,
         workflowRunStore,
         workspaceDirectory: workspaceDirectoryStore,
         usageStore,
@@ -1428,6 +1475,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         docPageStore: createDbDocPageStore(),
         crmStore,
         taskStore,
+        memoryStore,
         workflowRunStore,
         workspaceDirectory: workspaceDirectoryStore,
         embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
@@ -2401,6 +2449,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('waitForEvent', goalWorkTools.waitForEvent)
 
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
+
+  // Workspace transcription preference (migration 332) — the assistant is the
+  // configuration surface. Writes are admin/owner-gated in the store setter.
+  // See docs/architecture/platform/workspaces.md → "Transcription preferences".
+  allTools.set(
+    'configureTranscriptionPreference',
+    createTranscriptionPrefTools({
+      get: (workspaceId) => getWorkspaceTranscriptionPrefs(workspaceId),
+      set: (userId, workspaceId, patch) => setWorkspaceTranscriptionPrefs(userId, workspaceId, patch),
+    }).configureTranscriptionPreference,
+  )
 
   const crmTools = createCrmTools(crmStore, {
     entityLinks: entityLinksStore,
@@ -4476,6 +4535,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         docPageStore: createDbDocPageStore(),
         crmStore,
         taskStore,
+        memoryStore,
         workflowRunStore,
         workspaceDirectory: workspaceDirectoryStore,
         embedder: createGeminiEmbedder(env.GEMINI_API_KEY),

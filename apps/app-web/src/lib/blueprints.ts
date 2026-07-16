@@ -103,6 +103,23 @@ export function initialRecordingBlueprint(
 }
 
 /**
+ * The confirm-dialog picker's seed: the surface's explicit pick when it made
+ * one (the Studio upload button's inline picker — including an explicit
+ * "ingest only"), else the workspace-default ladder. The pre-flight confirm
+ * shows the blueprint picker on EVERY recording surface (chat dock, new-page
+ * landing, Studio) per the pre-flight-confirm invariant — a surface that made
+ * no choice seeds from the workspace default, and the user can still change
+ * it in the dialog. See docs/architecture/engine/preflight-confirmation.md.
+ */
+export function seedRecordingBlueprint(
+  explicit: string | undefined,
+  workspaceDefault: string | null,
+): string {
+  if (explicit !== undefined && explicit !== RECORDING_UNSET) return explicit;
+  return initialRecordingBlueprint(workspaceDefault);
+}
+
+/**
  * Map a picker selection to the `blueprintSlug` submitted to `/process`. A real
  * blueprint id submits verbatim; both the explicit `RECORDING_INGEST_ONLY` pick
  * and the `RECORDING_UNSET` placeholder submit `undefined` (Pipeline B only —

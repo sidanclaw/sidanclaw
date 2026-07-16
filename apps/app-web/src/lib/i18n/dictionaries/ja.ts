@@ -2515,6 +2515,13 @@ export const ja: Dictionary = {
       done: "完了",
       archived: "アーカイブ済み",
     },
+    taskPriority: {
+      none: "なし",
+      low: "低",
+      medium: "中",
+      high: "高",
+      urgent: "至急",
+    },
     graphView: {
       empty: "つながりのあるエンティティはまだありません。",
       emptyHint:
@@ -2708,6 +2715,12 @@ export const ja: Dictionary = {
       entityKindContact: "連絡先",
       entityKindDeal: "商談",
       entityKindTask: "タスク",
+      captureKindMemory: "メモリー",
+      captureHeading: "キャプチャ",
+      captureHint:
+        "セクションの入力に加えて、ソースからブレインのレコードを書き込めます。キャプチャする対象をオンにし、必要に応じて書き方を指示できます(例: タスクの分け方、保守項目か営業フォローアップか)。",
+      captureInstructionPlaceholder:
+        "任意: レコードの書き方(例: アクション項目ごとに1つのタスク、命令形のタイトル)",
       keyLabel: "キー",
       keyHint:
         "他のワークフローがこのフィールドを読むための固定アドレスです。見出しを変えてもキーは変わりません。",
@@ -3043,9 +3056,11 @@ export const ja: Dictionary = {
       threadSuggestion3: "古くなっている内容はありますか？",
       threadStop: "停止",
       threadStopped: "停止しました。",
+      threadToolsSummary: "{count}件のステップ",
       propertyLabels: {
         title: "タイトル",
         status: "ステータス",
+        priority: "優先度",
         due_at: "期限",
         tags: "タグ",
         sensitivity: "機密度",
@@ -3053,7 +3068,6 @@ export const ja: Dictionary = {
         summary: "概要",
         detail: "詳細",
         attributes: "属性",
-        saved: "保存日時",
         assignee_id: "担当者",
         created_by: "作成者",
         name: "名前",
@@ -3072,6 +3086,7 @@ export const ja: Dictionary = {
         description: "説明",
       },
       memberUnknown: "不明なメンバー",
+      assigneeUnassigned: "未割り当て",
       memberRole: {
         owner: "オーナー",
         admin: "管理者",
@@ -3083,6 +3098,16 @@ export const ja: Dictionary = {
         error: "このファイルを読み込めませんでした。",
         download: "ファイルをダウンロード",
         tagsPlaceholder: "タグ1, タグ2",
+      },
+      fileReingest: {
+        action: "ブレインに再取り込み",
+        confirmTitle: "このファイルを再取り込みしますか?",
+        confirmBody:
+          "{name} はすでに取り込み済みです。再取り込みするとナレッジ抽出が再実行され、クレジットを消費し、抽出済みメモリーが重複する可能性があります。",
+        confirmAction: "再取り込み",
+        queued: "取り込みを開始しました。抽出されたナレッジはまもなく表示されます。",
+        inFlight: "このファイルの取り込みはすでに実行中です。",
+        failed: "取り込みを開始できませんでした。",
       },
       authorUser: "あなた",
       authorAssistant: "{name}",
@@ -3234,7 +3259,7 @@ export const ja: Dictionary = {
     why: "なぜ？",
     hideWhy: "理由を閉じる",
     whyUnavailable: "コンテキストを読み込めませんでした。",
-    whyNoMessages: "このメモリーには元のチャットが残っていません。",
+    whyNoMessages: "このエントリーには出所が記録されていません。",
     whyLeadIn: "{assistant}との会話中に保存されました。前後のやり取り：",
     // ── ソース由来の手がかり（source descriptor） ──
     originChat: "{channel}での会話から保存されました。",

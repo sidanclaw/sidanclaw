@@ -101,6 +101,12 @@ function isValidPrimitive(s: string): s is BrainInboxPrimitive {
   return (VALID_PRIMITIVES as string[]).includes(s)
 }
 
+/** Accepted values for the conventional `attributes.priority` key (the
+ *  frozen-v1 tasks schema has no typed priority column — tasks.md design
+ *  decision #1). Validated here at the REST boundary only; the store layer
+ *  keeps attributes free-form. */
+const TASK_PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const
+
 export function brainInboxRoutes({
   workspaceStore,
   entityKindClassifier,
@@ -362,6 +368,7 @@ export function brainInboxRoutes({
         id: row.id,
         workspaceId: row.workspaceId,
         createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
         createdByAssistantId: row.createdByAssistantId,
         verifiedByUserId: row.verifiedByUserId,
         verifiedAt: row.verifiedAt,
@@ -906,15 +913,21 @@ export function brainInboxRoutes({
     }
 
     if (primitiveParam === 'task') {
-      // Task adjust — v1 supports the doc-like editable fields surfaced in
-      // the Brain detail panel: title, status, due date, and tags. Each
+      // Task adjust — the editable fields surfaced in the Brain detail
+      // panel: title, status, due date, tags, assignee, and priority.
+      // `assignee_id` must be a workspace_members row id in THIS workspace
+      // (null clears). `priority` is the conventional `attributes.priority`
+      // key (the frozen-v1 schema has no typed column — tasks.md decision
+      // #1), merged into the row's attributes (null removes the key). Each
       // edit supersedes the row (a new bi-temporal id), so the preserved
       // old row IS the audit trail — no brain_verification stamp here.
-      const { title, status, due_at, tags } = req.body as {
+      const { title, status, due_at, tags, assignee_id, priority } = req.body as {
         title?: unknown
         status?: unknown
         due_at?: unknown
         tags?: unknown
+        assignee_id?: unknown
+        priority?: unknown
       }
 
       const fields: TaskUpdateFields = {}
@@ -966,9 +979,33 @@ export function brainInboxRoutes({
         fields.tags = (tags as string[]).map((s) => s.trim()).filter(Boolean)
       }
 
-      if (Object.keys(fields).length === 0) {
+      if (assignee_id !== undefined) {
+        // null clears; a string is validated against workspace_members below
+        // (after the ownership pre-check) so a cross-workspace member id can
+        // never land on a task.
+        if (assignee_id !== null && (typeof assignee_id !== 'string' || assignee_id.length === 0)) {
+          res.status(400).json({ error: 'assignee_id must be a workspace member id or null' })
+          return
+        }
+        fields.assigneeId = assignee_id as string | null
+      }
+
+      // Tracked outside `fields` — it merges into the row's current
+      // attributes, which we only have after the pre-check SELECT.
+      let priorityChange: string | null | undefined
+      if (priority !== undefined) {
+        if (priority !== null && !TASK_PRIORITIES.includes(priority as (typeof TASK_PRIORITIES)[number])) {
+          res.status(400).json({
+            error: `priority must be one of ${TASK_PRIORITIES.join(', ')}, or null to clear`,
+          })
+          return
+        }
+        priorityChange = priority as string | null
+      }
+
+      if (Object.keys(fields).length === 0 && priorityChange === undefined) {
         res.status(400).json({
-          error: 'At least one field (title, status, due_at, tags) is required',
+          error: 'At least one field (title, status, due_at, tags, assignee_id, priority) is required',
         })
         return
       }
@@ -976,9 +1013,11 @@ export function brainInboxRoutes({
       try {
         // Workspace-ownership check — requireWorkspaceMember already gated
         // membership; this confirms the row lives in *this* workspace and
-        // distinguishes 404 (gone) from 403 (cross-workspace).
-        const before = await query<{ workspaceId: string }>(
-          `SELECT workspace_id as "workspaceId" FROM tasks WHERE id = $1 AND valid_to IS NULL`,
+        // distinguishes 404 (gone) from 403 (cross-workspace). Also carries
+        // the live attributes so a priority change merges instead of
+        // clobbering sibling keys (attributes is overwrite-on-update).
+        const before = await query<{ workspaceId: string; attributes: unknown }>(
+          `SELECT workspace_id as "workspaceId", attributes FROM tasks WHERE id = $1 AND valid_to IS NULL`,
           [rowId],
         )
         if (before.rows.length === 0) {
@@ -988,6 +1027,28 @@ export function brainInboxRoutes({
         if (before.rows[0].workspaceId !== workspaceId) {
           res.status(403).json({ error: 'Task belongs to a different workspace' })
           return
+        }
+
+        if (typeof fields.assigneeId === 'string') {
+          const member = await query(
+            `SELECT id FROM workspace_members WHERE id = $1 AND workspace_id = $2`,
+            [fields.assigneeId, workspaceId],
+          )
+          if (member.rows.length === 0) {
+            res.status(400).json({ error: 'assignee_id is not a member of this workspace' })
+            return
+          }
+        }
+
+        if (priorityChange !== undefined) {
+          const raw = before.rows[0].attributes
+          const attrs: Record<string, unknown> =
+            raw && typeof raw === 'object' && !Array.isArray(raw)
+              ? { ...(raw as Record<string, unknown>) }
+              : {}
+          if (priorityChange === null) delete attrs.priority
+          else attrs.priority = priorityChange
+          fields.attributes = attrs
         }
 
         const updated = await updateTask(userId, rowId, fields)

@@ -1284,6 +1284,14 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       },
       confirmationResolver,
       confirmationTimeoutMs: 300_000,
+      // Fresh-facts grounding gate — a figure-bearing answer about current
+      // facts with zero tool calls gets one forced-verification nudge.
+      // Messaging replies are final-only, so the draft is retracted (the
+      // `grounding_nudge` case below resets `responseText`) and never
+      // delivered. See docs/architecture/engine/grounding-gate.md.
+      ...(messageText
+        ? { groundingGate: { userMessage: messageText, draftDelivered: false } }
+        : {}),
       ...(tierBudget
         ? { maxTurns: tierBudget.maxTurns, maxToolCalls: tierBudget.maxToolCalls }
         : {}),
@@ -1297,6 +1305,20 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // can render text as it arrives.
           responseText += event.text
           await hooks.onTextDelta?.(event.text)
+          break
+        case 'grounding_nudge':
+          // The accumulated draft is superseded — the corrected turn's text
+          // re-accumulates from empty so the outbound message never carries
+          // the unverified figures.
+          responseText = ''
+          analytics?.logEvent({
+            userId, assistantId: assistant.id, sessionId: session.id,
+            eventName: 'grounding_nudge_fired', channelType,
+            metadata: {
+              matched_cue: sanitizeAnalytics(event.matchedCue),
+              model: sanitizeAnalytics(model),
+            },
+          })
           break
         case 'citation':
           // Grounding citations from web search / knowledge tools.
