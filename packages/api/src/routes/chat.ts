@@ -3142,6 +3142,9 @@ export function chatRoutes(options: WebChatOptions): Router {
             // `ingestPage` tool is injected so "add this page to the brain"
             // works on request. Absent (no Pipeline B) → tool not injected.
             ingestPage: options.ingestPage,
+            // Workspace files API — backs `fetchSiteIcon` (site logo →
+            // stored image → `img:` page-icon token). Absent → not injected.
+            filesApi: options.filesApi,
             pageId:
               typeof requestedDocViewId === 'string' && requestedDocViewId
                 ? requestedDocViewId
@@ -4314,6 +4317,16 @@ export function chatRoutes(options: WebChatOptions): Router {
               }
             : undefined,
           planNudgeCap: planNudgeCap({ model, researchMode }),
+          // Fresh-facts grounding gate — a figure-bearing answer about
+          // current facts (prices, offers, rates, deadlines) produced with
+          // zero tool calls gets one forced-verification nudge. Skipped in
+          // coordinator/research mode, whose protocol already forces
+          // evidence. `draftDelivered: true` — the web SSE already streamed
+          // the draft, so the nudge copy tells the model to correct it
+          // explicitly. See docs/architecture/engine/grounding-gate.md.
+          ...(!coordinatorMode && !researchMode && typeof message === 'string' && message.trim()
+            ? { groundingGate: { userMessage: message, draftDelivered: true } }
+            : {}),
           ...(researchMode ? {
             workerDrainPrompt: createResearchWorkerDrainPrompt(),
           } : {}),
@@ -4372,6 +4385,21 @@ export function chatRoutes(options: WebChatOptions): Router {
             // dropped from the persisted turn — tell the client to retract
             // the phantom timeline entry. See query-loop.ts strip branch.
             sendEvent('tool_dropped', { id: event.id })
+          }
+          if (event.type === 'grounding_nudge') {
+            // The grounding gate fired: the tool-less figure-bearing draft
+            // is being rewritten from tool results. The draft already
+            // streamed over SSE (no retraction on web); the corrected turn
+            // arrives as a visible continuation. Telemetry only — see
+            // docs/architecture/engine/grounding-gate.md.
+            options.analytics?.logEvent({
+              userId: user.id, assistantId: assistant.id, sessionId: session.id,
+              eventName: 'grounding_nudge_fired', channelType: 'web',
+              metadata: {
+                matched_cue: sanitize(event.matchedCue),
+                model: sanitize(model),
+              },
+            })
           }
           if (event.type === 'tool_result') {
             for (const block of event.results) {

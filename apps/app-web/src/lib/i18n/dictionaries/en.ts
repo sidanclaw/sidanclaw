@@ -2714,6 +2714,13 @@ export const en = {
       done: "Done",
       archived: "Archived",
     },
+    taskPriority: {
+      none: "None",
+      low: "Low",
+      medium: "Medium",
+      high: "High",
+      urgent: "Urgent",
+    },
     graphView: {
       empty: "No connected entities yet.",
       emptyHint:
@@ -2909,6 +2916,12 @@ export const en = {
       entityKindContact: "Contact",
       entityKindDeal: "Deal",
       entityKindTask: "Task",
+      captureKindMemory: "Memory",
+      captureHeading: "Capture",
+      captureHint:
+        "Beyond filling the sections, a fill can also write brain records from the source. Turn on what to capture, and optionally describe how (for example, how tasks should be broken down: maintenance items vs business follow-ups).",
+      captureInstructionPlaceholder:
+        "Optional: how to write these records (e.g. one task per action item, imperative title)",
       keyLabel: "Key",
       keyHint:
         "The stable address other workflows read this field by. Renaming the heading never changes it.",
@@ -3245,9 +3258,11 @@ export const en = {
       threadSuggestion3: "Is anything here outdated?",
       threadStop: "Stop",
       threadStopped: "Stopped.",
+      threadToolsSummary: "{count} steps",
       propertyLabels: {
         title: "Title",
         status: "Status",
+        priority: "Priority",
         due_at: "Due date",
         tags: "Tags",
         sensitivity: "Sensitivity",
@@ -3255,7 +3270,6 @@ export const en = {
         summary: "Summary",
         detail: "Detail",
         attributes: "Attributes",
-        saved: "Saved",
         assignee_id: "Assignee",
         created_by: "Created by",
         name: "Name",
@@ -3274,6 +3288,7 @@ export const en = {
         description: "Description",
       },
       memberUnknown: "Unknown member",
+      assigneeUnassigned: "Unassigned",
       memberRole: {
         owner: "Owner",
         admin: "Admin",
@@ -3448,7 +3463,7 @@ export const en = {
     why: "Why?",
     hideWhy: "Hide why",
     whyUnavailable: "Couldn't load context.",
-    whyNoMessages: "No source chat captured for this memory.",
+    whyNoMessages: "No source was recorded for this entry.",
     whyLeadIn: "Saved during a chat with {assistant}. Surrounding turns:",
     // ── Source origin clue (source descriptor) ──
     originChat: "Saved from a {channel} conversation.",

@@ -5,6 +5,7 @@ import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationReque
 import { createAccumulator } from '../providers/accumulator.js'
 import { createToolExecutor } from './tool-executor.js'
 import { createLoopDetector, DEFAULT_HARD_LIMIT } from './loop-detector.js'
+import { groundingGateCheck, buildGroundingNudge, type GroundingGateOptions } from './grounding-gate.js'
 import { compactConversation } from '../compaction/compact.js'
 import { isContextOverflowError } from '../providers/context-budget.js'
 
@@ -127,6 +128,16 @@ export type QueryEvent =
    * docs/architecture/integrations/search-and-fetch.md.
    */
   | { type: 'citation'; sources: Array<{ url: string; title: string }> }
+  /**
+   * The grounding gate fired: the turn's tool-less, figure-bearing draft is
+   * superseded — a verification nudge was injected and a corrected turn
+   * follows. Final-only channels (Telegram / Slack / WhatsApp) MUST reset
+   * their accumulated outbound text buffer on this event so the unverified
+   * draft is never delivered; all consumers should log it as the
+   * `grounding_nudge_fired` analytics event (`matchedCue` → `matched_cue`).
+   * See docs/architecture/engine/grounding-gate.md.
+   */
+  | { type: 'grounding_nudge'; matchedCue: string }
   | { type: 'turn_complete'; response: AssistantResponse; totalUsage: TokenUsage }
   | { type: 'status'; message: string }
   | { type: 'error'; error: Error }
@@ -183,6 +194,18 @@ export type QueryLoopOptions = {
   }
   /** Max plan continuation nudges per attempt (tier-scaled). Default 3. */
   planNudgeCap?: number
+  /**
+   * Fresh-facts grounding gate (interactive lanes only). When set, a
+   * tool-less turn about to ship a figure-bearing answer to a fresh-facts
+   * shaped question (current prices, offers, rates, deadlines) with ZERO
+   * tool calls this invocation gets one synthetic verification nudge
+   * instead of ending — the 2026-07-16 confabulated-welcome-offer guard.
+   * Runs after the plan gate, fires at most once per invocation, and yields
+   * a `grounding_nudge` event so final-only channels can retract the draft
+   * from their outbound buffer. See
+   * `docs/architecture/engine/grounding-gate.md`.
+   */
+  groundingGate?: GroundingGateOptions
   /** Compact model for reactive compaction on context overflow errors. */
   compactModel?: string
   /** Resolver for tools that require user confirmation. If not provided, confirmation is skipped. */
@@ -441,6 +464,10 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
   // single resumable-handoff turn so the loop can't re-nudge after it.
   let planNudges = 0
   let planHandoffDone = false
+
+  // Grounding gate state — fires at most once per invocation. A model that
+  // ignores the nudge ships its second attempt as-is rather than looping.
+  let groundingNudged = false
 
   // Shared across turns: tools denied or timed-out are blocked for the rest
   // of this queryLoop call (one user message) but reset on the next message.
@@ -1229,6 +1256,47 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
             }
             continue
           }
+        }
+      }
+
+      // ── Grounding gate (fresh-facts verification) ──────────────
+      // A figure-bearing answer to a fresh-facts-shaped question produced
+      // with ZERO tool calls this invocation is almost certainly confabulated
+      // from stale training data (2026-07-16 welcome-offer incident: two
+      // consecutive no-tool turns shipped invented promo figures). One
+      // synthetic verification nudge; the model's next attempt ships
+      // regardless. See docs/architecture/engine/grounding-gate.md.
+      if (
+        options.groundingGate &&
+        !groundingNudged &&
+        turn + 1 < maxTurns &&
+        loopDetector.totalToolCalls === 0
+      ) {
+        const draftText = response.content
+          .filter((b): b is ContentBlock & { type: 'text'; text: string } =>
+            b.type === 'text' && 'text' in b && typeof (b as { text?: unknown }).text === 'string')
+          .map((b) => b.text)
+          .join('\n')
+        const verdict = groundingGateCheck({
+          userMessage: options.groundingGate.userMessage,
+          draftText,
+          boundTools: options.tools,
+        })
+        if (verdict.fire) {
+          groundingNudged = true
+          suppressText = false
+          yield { type: 'grounding_nudge', matchedCue: verdict.matchedCue }
+          nextMessages = [{
+            role: 'user',
+            content: buildGroundingNudge({
+              draftDelivered: options.groundingGate.draftDelivered ?? false,
+            }),
+          }]
+          if (options.stateless) {
+            statelessHistory.push({ role: 'assistant', content: response.content })
+            statelessHistory.push(...nextMessages)
+          }
+          continue
         }
       }
 

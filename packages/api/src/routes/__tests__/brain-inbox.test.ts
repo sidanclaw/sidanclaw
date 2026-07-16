@@ -50,6 +50,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
           id: ROW,
           workspaceId: WS,
           createdAt: new Date('2026-06-24T07:41:18Z'),
+          updatedAt: new Date('2026-06-25T09:02:00Z'),
           createdByAssistantId: 'a_1',
           verifiedByUserId: null,
           verifiedAt: null,
@@ -63,6 +64,9 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ primitive: 'memory', id: ROW, workspaceId: WS })
     expect(res.body.body.summary).toBe('sandbox.md')
+    // Both audit timestamps ride the detail payload (drawer Created/Updated rows).
+    expect(res.body.createdAt).toBe('2026-06-24T07:41:18.000Z')
+    expect(res.body.updatedAt).toBe('2026-06-25T09:02:00.000Z')
     // The detail SELECT must be workspace-scoped + liveness-filtered.
     const sql = mockQuery.mock.calls[0][0] as string
     expect(sql).toMatch(/FROM memories/)
@@ -143,6 +147,78 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       title: 'Refreshed',
       status: 'in_progress',
       due: null,
+    })
+  })
+
+  it('task adjust rejects an invalid priority', async () => {
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
+      .send({ priority: 'asap' })
+    expect(res.status).toBe(400)
+    expect(mockUpdateTask).not.toHaveBeenCalled()
+  })
+
+  it('task adjust rejects a non-string assignee_id', async () => {
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
+      .send({ assignee_id: 42 })
+    expect(res.status).toBe(400)
+    expect(mockUpdateTask).not.toHaveBeenCalled()
+  })
+
+  it('task adjust rejects an assignee who is not a member of this workspace', async () => {
+    // 1) ownership pre-check ok, 2) workspace_members lookup misses.
+    mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: WS, attributes: {} }] } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never)
+
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
+      .send({ assignee_id: 'member-elsewhere' })
+
+    expect(res.status).toBe(400)
+    expect(mockUpdateTask).not.toHaveBeenCalled()
+    // The member lookup must be scoped to THIS workspace.
+    const [sql, params] = mockQuery.mock.calls[1] as [string, unknown[]]
+    expect(sql).toMatch(/FROM workspace_members/)
+    expect(params).toEqual(['member-elsewhere', WS])
+  })
+
+  it('task adjust assigns a member and merges priority into attributes', async () => {
+    // Existing attributes must survive the priority merge (overwrite-on-update).
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ workspaceId: WS, attributes: { order: 3 } }],
+    } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'member-1' }] } as never)
+    mockUpdateTask.mockResolvedValueOnce({ id: 'new-task-id' } as never)
+
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
+      .send({ assignee_id: 'member-1', priority: 'high' })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, id: 'new-task-id' })
+    expect(mockUpdateTask).toHaveBeenCalledWith('u_caller', ROW, {
+      assigneeId: 'member-1',
+      attributes: { order: 3, priority: 'high' },
+    })
+  })
+
+  it('task adjust clears assignee and priority with nulls (no member lookup)', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ workspaceId: WS, attributes: { order: 3, priority: 'high' } }],
+    } as never)
+    mockUpdateTask.mockResolvedValueOnce({ id: 'new-task-id' } as never)
+
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
+      .send({ assignee_id: null, priority: null })
+
+    expect(res.status).toBe(200)
+    // Only the ownership pre-check hit the DB; null never validates a member.
+    expect(mockQuery).toHaveBeenCalledTimes(1)
+    expect(mockUpdateTask).toHaveBeenCalledWith('u_caller', ROW, {
+      assigneeId: null,
+      attributes: { order: 3 },
     })
   })
 

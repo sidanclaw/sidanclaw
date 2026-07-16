@@ -70,6 +70,7 @@ import {
   buildOneStepReminderWorkflow,
   type GoalRecord,
   createWorkspaceTools,
+  createTranscriptionPrefTools,
   type WorkspaceDirectoryStore,
   type WorkspaceMemberInfo,
   createCrmTools,
@@ -163,7 +164,7 @@ import { workspaceRoutes } from './routes/workspaces.js'
 import { invitationRoutes } from './routes/invitations.js'
 import { createWorkspaceInvitationStore } from './db/workspace-invitation-store.js'
 import { kbGapsRoutes } from './routes/kb-gaps.js'
-import { createWorkspaceStore, getWorkspaceMembershipWithClearanceSystem, getWorkspacePlan } from './db/workspace-store.js'
+import { createWorkspaceStore, getWorkspaceMembershipWithClearanceSystem, getWorkspacePlan, getWorkspaceTranscriptionPrefs, setWorkspaceTranscriptionPrefs } from './db/workspace-store.js'
 import { createWorkspaceAuditStore } from './db/workspace-audit-store.js'
 import { createConnectionStore } from './db/connection-store.js'
 import { createPendingMessageStore } from './db/pending-message-store.js'
@@ -1451,6 +1452,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         docPageStore: createDbDocPageStore(),
         crmStore,
         taskStore,
+        memoryStore,
         workflowRunStore,
         workspaceDirectory: workspaceDirectoryStore,
         usageStore,
@@ -1473,6 +1475,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         docPageStore: createDbDocPageStore(),
         crmStore,
         taskStore,
+        memoryStore,
         workflowRunStore,
         workspaceDirectory: workspaceDirectoryStore,
         embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
@@ -2446,6 +2449,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('waitForEvent', goalWorkTools.waitForEvent)
 
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
+
+  // Workspace transcription preference (migration 332) — the assistant is the
+  // configuration surface. Writes are admin/owner-gated in the store setter.
+  // See docs/architecture/platform/workspaces.md → "Transcription preferences".
+  allTools.set(
+    'configureTranscriptionPreference',
+    createTranscriptionPrefTools({
+      get: (workspaceId) => getWorkspaceTranscriptionPrefs(workspaceId),
+      set: (userId, workspaceId, patch) => setWorkspaceTranscriptionPrefs(userId, workspaceId, patch),
+    }).configureTranscriptionPreference,
+  )
 
   const crmTools = createCrmTools(crmStore, {
     entityLinks: entityLinksStore,
@@ -4521,6 +4535,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         docPageStore: createDbDocPageStore(),
         crmStore,
         taskStore,
+        memoryStore,
         workflowRunStore,
         workspaceDirectory: workspaceDirectoryStore,
         embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
