@@ -3084,6 +3084,16 @@ export const ja: Dictionary = {
         download: "ファイルをダウンロード",
         tagsPlaceholder: "タグ1, タグ2",
       },
+      fileReingest: {
+        action: "ブレインに再取り込み",
+        confirmTitle: "このファイルを再取り込みしますか?",
+        confirmBody:
+          "{name} はすでに取り込み済みです。再取り込みするとナレッジ抽出が再実行され、クレジットを消費し、抽出済みメモリーが重複する可能性があります。",
+        confirmAction: "再取り込み",
+        queued: "取り込みを開始しました。抽出されたナレッジはまもなく表示されます。",
+        inFlight: "このファイルの取り込みはすでに実行中です。",
+        failed: "取り込みを開始できませんでした。",
+      },
       authorUser: "あなた",
       authorAssistant: "{name}",
       nameLabel: "名前",

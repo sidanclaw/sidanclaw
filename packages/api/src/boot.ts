@@ -53,6 +53,8 @@ import {
   createInterAssistantTools,
   createReportBugTool,
   createConfirmRecordingProcessingTool,
+  createIngestStoredFileTool,
+  createReprocessRecordingTool,
   createReviewDataRequestTool,
   createWorkflowTools,
   createWorkflowBrainTools,
@@ -170,7 +172,7 @@ import {
   deletePendingRecordingConfirmation,
   buildChannelSessionKey,
 } from './db/pending-recording-confirmations-store.js'
-import { enqueueRecordingJob } from './db/recording-jobs-store.js'
+import { enqueueRecordingJob, hasCompletedRecordingJob } from './db/recording-jobs-store.js'
 import { createChatConfirmationStore } from './db/chat-confirmation-store.js'
 import { createDeferredConfirmationStore } from './db/deferred-confirmation-store.js'
 import { createSnapshotStore } from './db/snapshot-store.js'
@@ -255,6 +257,7 @@ import {
 import { goalsRoutes } from './routes/goals.js'
 import { createDbCrmStore } from './db/crm-store.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
+import { getWorkspaceFileById } from './db/workspace-files.js'
 import { createGcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
 import { createFilesApi, createSingletonFilesClientResolver } from './files/files-api.js'
@@ -339,7 +342,7 @@ import { createDbDocNotificationsStore } from './db/doc-notifications-store.js'
 import { commentRoutes } from './routes/comments.js'
 import { inboxRoutes } from './routes/inbox.js'
 import { createDbEpisodicStore } from './db/episodic-store.js'
-import { createDbEpisodesStore } from './db/episodes-store.js'
+import { createDbEpisodesStore, getEpisodeByIdSystem } from './db/episodes-store.js'
 import { createDbEntityLinksStore } from './db/entity-links-store.js'
 import {
   createDbEntitiesStore,
@@ -1368,6 +1371,48 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         },
         deletePending: deletePendingRecordingConfirmation,
         enqueueRecordingJob,
+      }),
+    )
+
+    // Existing-file re-ingest + recording re-process — the user-reachable
+    // recovery affordances (file-artifacts.md §"Re-ingest", transcription.md
+    // §"Re-processing"). Both are thin wrappers over the EXISTING job queues;
+    // both refuse to double-ingest silently: an already-ingested/processed
+    // target requires a user-approved confirm relayed by the model.
+    tools.set(
+      'ingestFile',
+      createIngestStoredFileTool({
+        getFile: async (actor, fileId) => {
+          const f = await getWorkspaceFileById(actor, fileId)
+          return f
+            ? {
+                id: f.id,
+                name: f.name,
+                mime: f.mime,
+                sizeBytes: f.sizeBytes,
+                sourceEpisodeId: f.sourceEpisodeId,
+              }
+            : null
+        },
+        enqueue: enqueueFileIngestJob,
+      }),
+    )
+    tools.set(
+      'reprocessRecording',
+      createReprocessRecordingTool({
+        getRecording: async (actorUserId, recordingId) => {
+          const ep = await getEpisodeByIdSystem(actorUserId, recordingId, {})
+          return ep
+            ? {
+                id: ep.id,
+                workspaceId: ep.workspaceId,
+                sourceKind: ep.sourceKind,
+                sourceRef: (ep.sourceRef ?? null) as Record<string, unknown> | null,
+              }
+            : null
+        },
+        hasProcessed: hasCompletedRecordingJob,
+        enqueue: enqueueRecordingJob,
       }),
     )
 

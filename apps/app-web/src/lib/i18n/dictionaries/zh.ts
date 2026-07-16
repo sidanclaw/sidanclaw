@@ -3052,6 +3052,16 @@ export const zh: Dictionary = {
         download: "下載檔案",
         tagsPlaceholder: "標籤1, 標籤2",
       },
+      fileReingest: {
+        action: "重新導入大腦",
+        confirmTitle: "要重新導入這個檔案嗎?",
+        confirmBody:
+          "{name} 已經導入過。重新導入會再次執行知識抽取:會消耗點數,且已抽取的記憶可能重複。",
+        confirmAction: "重新導入",
+        queued: "已開始導入。抽取的知識稍後就會出現。",
+        inFlight: "這個檔案的導入已在進行中。",
+        failed: "無法開始導入。",
+      },
       authorUser: "你",
       authorAssistant: "{name}",
       nameLabel: "名稱",

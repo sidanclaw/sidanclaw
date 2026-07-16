@@ -3286,6 +3286,16 @@ export const en = {
         download: "Download file",
         tagsPlaceholder: "tag1, tag2",
       },
+      fileReingest: {
+        action: "Re-ingest to brain",
+        confirmTitle: "Re-ingest this file?",
+        confirmBody:
+          "{name} was already ingested. Re-ingesting runs knowledge extraction again: it spends credits and may duplicate extracted memories.",
+        confirmAction: "Re-ingest",
+        queued: "Ingestion started. Extracted knowledge will appear shortly.",
+        inFlight: "An ingest for this file is already running.",
+        failed: "Could not start ingestion.",
+      },
       authorUser: "you",
       authorAssistant: "{name}",
       nameLabel: "Name",

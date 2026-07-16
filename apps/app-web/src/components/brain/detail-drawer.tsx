@@ -41,6 +41,7 @@ import Markdown from "react-markdown";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import { reingestStoredFile } from "@/lib/api/ingest";
 import { originClue } from "./source-origin";
 import {
   type BrainRow,
@@ -1760,6 +1761,81 @@ function FileContentPreview({
  * markdown; clicking it (or the pencil next to the heading) swaps in a
  * textarea. Blur or Cmd/Ctrl+Enter commits; Escape cancels.
  */
+/**
+ * "Re-ingest to brain" on a stored file's drawer — the user-reachable recovery
+ * for "this file never made it into the brain" (file-artifacts.md
+ * §"Re-ingest"). The SERVER owns the double-ingestion guard: an
+ * already-ingested file answers requires_confirmation, which this section
+ * relays through `confirmDialog` (re-ingesting spends credits and can
+ * duplicate extracted memories) before re-sending with confirm: true. Inline
+ * status text, matching the drawer's local idiom (no toast system here).
+ */
+function FileReingestSection({
+  workspaceId,
+  fileId,
+  fileName,
+  labels,
+  cancelLabel,
+}: {
+  workspaceId: string;
+  fileId: string;
+  fileName: string;
+  labels: {
+    action: string;
+    confirmTitle: string;
+    confirmBody: string;
+    confirmAction: string;
+    queued: string;
+    inFlight: string;
+    failed: string;
+  };
+  cancelLabel: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<"queued" | "in_flight" | "failed" | null>(null);
+
+  async function handleReingest() {
+    setBusy(true);
+    setStatus(null);
+    try {
+      let outcome = await reingestStoredFile(workspaceId, fileId);
+      if (outcome.status === "requires_confirmation") {
+        const ok = await confirmDialog({
+          title: labels.confirmTitle,
+          description: format(labels.confirmBody, {
+            name: outcome.fileName || fileName,
+          }),
+          confirmLabel: labels.confirmAction,
+          cancelLabel,
+        });
+        if (!ok) return;
+        outcome = await reingestStoredFile(workspaceId, fileId, { confirm: true });
+      }
+      setStatus(outcome.status === "queued" ? "queued" : "in_flight");
+    } catch {
+      setStatus("failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={handleReingest}
+        className="self-start text-xs px-3 py-1.5 rounded-md border border-border text-foreground hover:bg-accent disabled:opacity-50"
+      >
+        {labels.action}
+      </button>
+      {status === "queued" && <p className="text-xs text-emerald-600 dark:text-emerald-400">{labels.queued}</p>}
+      {status === "in_flight" && <p className="text-xs text-muted-foreground">{labels.inFlight}</p>}
+      {status === "failed" && <p className="text-xs text-red-500">{labels.failed}</p>}
+    </div>
+  );
+}
+
 function MemoryDetailBody({
   value,
   onCommit,
@@ -2323,6 +2399,13 @@ function PrimitiveSection({
             fileId={detail.id}
             mime={String(detail.body.mime_type ?? "")}
             name={String(detail.body.name ?? "file")}
+          />
+          <FileReingestSection
+            workspaceId={workspaceId}
+            fileId={detail.id}
+            fileName={String(detail.body.name ?? "file")}
+            labels={labels.fileReingest}
+            cancelLabel={review.cancel}
           />
         </section>
       )}
