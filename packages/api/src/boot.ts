@@ -264,6 +264,7 @@ import { createLocalFilesClient } from './files/local-files-client.js'
 import { createFilesApi, createSingletonFilesClientResolver } from './files/files-api.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import { createArtifactPromoter } from './files/artifact-promote.js'
+import { createFileIngestor } from './files/ingest-file.js'
 import { createFileIngestWorker } from './files/file-ingest-worker.js'
 import { enqueueFileIngestJob, claimNextFileIngestJob, markFileIngestJobDone, markFileIngestJobFailed } from './db/file-ingest-jobs-store.js'
 import { createCachedByoFilesResolver, type WorkspaceStorageBinding } from './files/byo-files-resolver.js'
@@ -624,18 +625,6 @@ export interface OpenApiPorts {
       ReturnType<typeof import('./db/connector-grant-store.js').createConnectorGrantStore>
     >
   }) => SyncCredentials
-
-  // ── Direct file ingest — open default: unset (no /api/files/ingest) ──
-  /**
-   * Builds the closed FileIngestor over boot's FilesApi + the platform's brain
-   * ingestor (boot passes the one it built via `buildEpisodeIngestors`).
-   * Open default: unset → fileRoutes mounts without an ingest seam.
-   */
-  buildFileIngestor?: (deps: {
-    filesApi: ReturnType<typeof createFilesApi>
-    brainEpisodeIngestor: BrainEpisodeIngestor
-    distill: (input: { buffer: Buffer; mime: string }) => Promise<string>
-  }) => unknown
 
   // ── Closed first-party tool factories — open default: omitted ──
   /** Capability-gated triage/sentiment/analytics-query tools (platform-only). */
@@ -2652,12 +2641,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     for (const tool of createDeckTools({ filesApi, deckStore, appOrigin: env.AUTHED_APP_URL ?? env.APP_URL })) {
       allTools.set(tool.name, tool)
     }
-    // Direct ingest seam — closed (FileIngestor builds Pipeline B). Injected as a
-    // port; open default leaves it null (no /api/files/ingest ingest).
-    if (ports.buildFileIngestor && brainEpisodeIngestor) {
-      fileIngestor = ports.buildFileIngestor({
+    // Direct file ingest is open: store the original bytes, derive text, then
+    // run the same boot-built Pipeline B ingestor used by brain MCP and docs.
+    if (brainEpisodeIngestor) {
+      fileIngestor = createFileIngestor({
         filesApi,
-        brainEpisodeIngestor,
+        ingest: brainEpisodeIngestor,
         distill: async ({ buffer, mime }) =>
           (await distillFileToText({ buffer, mime }, { apiKey: env.GEMINI_API_KEY })).text,
       })
