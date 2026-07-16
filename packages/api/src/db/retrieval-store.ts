@@ -106,10 +106,25 @@ const KNOWN_SCOPES = [
   // transcript_segments (deliberately out so recordings never flood), this
   // scope participates in unscoped search BUT is hard-capped per source
   // artifact: ROW_NUMBER ≤ FILE_SEGMENT_ARM_CAP per file inside each arm,
-  // and ≤ FILE_SEGMENT_GROUP_CAP per file in the final fused page
+  // and ≤ ARTIFACT_GROUP_CAP per file in the final fused page
   // (groupKey in fuseAndDiversifyTraced). Precision retrieval inside one
   // file is the dedicated searchFileSegments handler.
   'file_segment',
+  // Recording transcript chunks (`transcript_segments`, migration 280).
+  //
+  // This scope was DELIBERATELY absent until now — "so recordings never flood"
+  // — and that was right WHEN NO CAP MECHANISM EXISTED. It exists now, it is
+  // proven by file_segment, and it was built for exactly this shape of content:
+  // one large artifact whose chunks would otherwise dominate a page. A
+  // 110-segment recording can hold at most ARTIFACT_GROUP_CAP slots in the fused
+  // page — a factor-of-50 improvement on the failure mode that motivated the
+  // exclusion, not a regression of it.
+  //
+  // Without this, a recording's transcript is reachable ONLY by a caller who
+  // already knows the recordingId, so "what did we decide about pricing?" can
+  // never surface the meeting that answers it. Precision retrieval inside one
+  // recording remains the dedicated searchRecording handler.
+  'transcript_segment',
 ] as const
 type Scope = (typeof KNOWN_SCOPES)[number]
 
@@ -128,6 +143,7 @@ const ALLOWED_FILTERS_BY_SCOPE: Record<Scope, ReadonlySet<string>> = {
   deal:     new Set(['since', 'sensitivity', 'source']),
   kb_chunk: new Set(['tag', 'tags', 'since', 'sensitivity', 'source']),
   file_segment: new Set(['tag', 'tags', 'since', 'sensitivity', 'source']),
+  transcript_segment: new Set(['tag', 'tags', 'since', 'sensitivity', 'source']),
   // `entity_instances` has no bi-temporal / sensitivity / tags columns;
   // `since` filters on `created_at`, `entity_type_id` narrows the search
   // to one user-defined type, and `source_app` matches the provenance
@@ -470,7 +486,7 @@ export type ScoredRow = {
   /**
    * Per-source-cap group for the fused page (large-content-artifacts): set
    * ONLY by the file_segment handlers (`file:{file_id}`) so one artifact's
-   * chunks hold at most FILE_SEGMENT_GROUP_CAP slots in the final results.
+   * chunks hold at most ARTIFACT_GROUP_CAP slots in the final results.
    * Rows without a groupKey are never capped.
    */
   groupKey?: string
@@ -495,7 +511,7 @@ function scoredRow(args: {
   tags?: readonly string[]
   /** Set only by the vector arm; omitted ⇒ null. */
   vectorDistance?: number | null
-  /** Set only by the file_segment handlers (per-source fused-page cap). */
+  /** Set only by the chunked scopes (per-source-artifact fused-page cap). */
   groupKey?: string
 }): ScoredRow {
   return {
@@ -1095,8 +1111,17 @@ async function searchKbChunksScope(
 /** How many segments of ONE file each ARM may contribute as candidates
  *  (candidate hygiene — one artifact must not consume the fetch depth). */
 const FILE_SEGMENT_ARM_CAP = 4
-/** How many segments of ONE file survive into the final fused page. */
-export const FILE_SEGMENT_GROUP_CAP = 2
+/** Per-arm candidate cap for ONE recording's transcript chunks. Mirrors
+ *  FILE_SEGMENT_ARM_CAP — same shape of content, same hazard. */
+const TRANSCRIPT_SEGMENT_ARM_CAP = 4
+/**
+ * How many chunks of ONE source artifact survive into the final fused page.
+ *
+ * The cap logic in `fuseAndDiversifyTraced` was always generic — it caps any row
+ * carrying a `groupKey`, whatever produced it. Only the name claimed otherwise.
+ * Both chunked scopes use it: `file:<id>` and `recording:<id>`.
+ */
+export const ARTIFACT_GROUP_CAP = 2
 
 /**
  * Workspace-file body chunks (`file_segments`, migration 297) — the
@@ -1291,6 +1316,97 @@ async function searchEntityInstancesScope(
   })
 }
 
+/**
+ * Recording transcript chunks (`transcript_segments`, migration 280) — the
+ * unscoped-discoverability arm, and the mirror of `searchFileSegmentsScope`.
+ * ILIKE over the segment text, LEFT JOIN to `recordings` for a display name,
+ * window-capped at TRANSCRIPT_SEGMENT_ARM_CAP rows per recording so a
+ * 1000-segment meeting cannot monopolize the candidate fetch.
+ *
+ * The ILIKE is indexed as of migration 332 (`gin_trgm_ops` on segment_text).
+ * That is load-bearing HERE specifically: unlike `searchRecording`, this arm has
+ * no `recording_id` gate to ride, so the same predicate that was safe when
+ * always scoped would otherwise scan every transcript in the workspace.
+ *
+ * Hits carry `recording_id` + `segment_index` + `start_ms` + `speaker`, so the
+ * model can cite the moment ("around 47:12, Priya said ...") and drill into the
+ * per-recording searchRecording tool. The fused-page guarantee is the groupKey
+ * cap in fuseAndDiversifyTraced.
+ */
+async function searchTranscriptSegmentsScope(
+  actor: RetrievalActor,
+  opts: FetchOpts,
+): Promise<ScoredRow[]> {
+  const values: unknown[] = []
+  const visibility = visibilityPredicate(actor, opts.asOf, values, { tableAlias: 'ts' })
+  const filters = applyFlatFilters(opts.filters, values, {
+    sinceColumn: 'ts.valid_from',
+    tagsColumn: 'ts.tags',
+    sourceColumn: 'ts.source',
+    sensitivityColumn: 'ts.sensitivity',
+  })
+
+  values.push(`%${opts.query}%`)
+  const likeIdx = values.length
+  values.push(opts.take)
+  const limIdx = values.length
+  values.push(opts.skip)
+  const offIdx = values.length
+  const result = await queryWithRLS<
+    TrustCols & {
+      row_id: string
+      recording_id: string
+      recording_name: string | null
+      segment_index: number
+      start_ms: string | number
+      speaker: string | null
+      snippet: string
+      tags: string[] | null
+      sensitivity: string
+      valid_from: Date
+    }
+  >(
+    actor.userId,
+    `SELECT * FROM (
+       SELECT ts.id AS row_id, ts.recording_id, ts.segment_index, ts.start_ms, ts.speaker,
+              left(ts.segment_text, 240) AS snippet, ts.tags, ts.sensitivity, ts.valid_from,
+              ts.source, ts.verified_by_user_id, ts.retracted_at,
+              (SELECT coalesce(r.title, r.file_name) FROM recordings r WHERE r.id = ts.recording_id) AS recording_name,
+              ROW_NUMBER() OVER (PARTITION BY ts.recording_id ORDER BY ts.segment_index) AS grp_rn
+         FROM transcript_segments ts
+        WHERE ${visibility}${filters}
+          AND ts.segment_text ILIKE $${likeIdx}
+     ) sub
+      WHERE sub.grp_rn <= ${TRANSCRIPT_SEGMENT_ARM_CAP}
+      ORDER BY sub.valid_from DESC, sub.row_id DESC
+      LIMIT $${limIdx} OFFSET $${offIdx}`,
+    values,
+  )
+  return result.rows.map((r) =>
+    scoredRow({
+      row: {
+        primitive: 'transcript_segment',
+        row_id: r.row_id,
+        recording_id: r.recording_id,
+        recording_name: r.recording_name,
+        segment_index: Number(r.segment_index),
+        // BIGINT — pg returns int8 as a string; a raw pass-through would make
+        // the citation stamp render as garbage.
+        start_ms: Number(r.start_ms),
+        speaker: r.speaker,
+        snippet: r.snippet,
+        tags: r.tags ?? [],
+        sensitivity: r.sensitivity,
+        valid_from: r.valid_from.toISOString(),
+      },
+      validFrom: r.valid_from,
+      ftsRank: null,
+      trust: r,
+      groupKey: `recording:${r.recording_id}`,
+    }),
+  )
+}
+
 const SCOPE_DISPATCH: Record<
   Scope,
   (actor: RetrievalActor, opts: FetchOpts) => Promise<ScoredRow[]>
@@ -1305,6 +1421,7 @@ const SCOPE_DISPATCH: Record<
   kb_chunk: searchKbChunksScope,
   entity_instance: searchEntityInstancesScope,
   file_segment: searchFileSegmentsScope,
+  transcript_segment: searchTranscriptSegmentsScope,
 }
 
 // ── Vector arm (WU-8.5) ──────────────────────────────────────────────
@@ -1465,6 +1582,33 @@ const VECTOR_SCOPES: readonly VectorScopeConfig[] = [
       },
       tags: (r.tags as string[]) ?? [],
       groupKey: `file:${r.file_id as string}`,
+    }),
+  },
+  {
+    scope: 'transcript_segment',
+    table: 'transcript_segments',
+    projection:
+      "recording_id, segment_index, start_ms, speaker, left(segment_text, 240) AS snippet, tags, (SELECT coalesce(r.title, r.file_name) FROM recordings r WHERE r.id = recording_id) AS recording_name",
+    filterCols: { sinceColumn: 'valid_from', tagsColumn: 'tags', sourceColumn: 'source', sensitivityColumn: 'sensitivity' },
+    // Candidate hygiene: at most TRANSCRIPT_SEGMENT_ARM_CAP nearest segments per
+    // recording inside the vector arm, so one meeting can't consume `take`.
+    perGroupCap: { column: 'recording_id', cap: TRANSCRIPT_SEGMENT_ARM_CAP },
+    toRow: (r) => ({
+      row: {
+        primitive: 'transcript_segment',
+        row_id: r.row_id as string,
+        recording_id: r.recording_id as string,
+        recording_name: (r.recording_name as string | null) ?? null,
+        segment_index: Number(r.segment_index),
+        start_ms: Number(r.start_ms),
+        speaker: (r.speaker as string | null) ?? null,
+        snippet: r.snippet as string,
+        tags: (r.tags as string[]) ?? [],
+        sensitivity: r.sensitivity as string,
+        valid_from: (r.valid_from as Date).toISOString(),
+      },
+      tags: (r.tags as string[]) ?? [],
+      groupKey: `recording:${r.recording_id as string}`,
     }),
   },
 ]
@@ -1734,9 +1878,10 @@ export function fuseAndDiversifyTraced(
   weighted.sort((a, b) => b.relevance - a.relevance)
 
   // Per-source group cap (large-content-artifacts hybrid discoverability):
-  // rows carrying a groupKey (file_segment handlers only) keep at most
-  // FILE_SEGMENT_GROUP_CAP slots per group. Applied after trust-weighting
-  // (each artifact's BEST segments survive) and before MMR so the diversity
+  // rows carrying a groupKey (the chunked scopes — `file:<id>` from
+  // file_segment, `recording:<id>` from transcript_segment) keep at most
+  // ARTIFACT_GROUP_CAP slots per group. Applied after trust-weighting
+  // (each artifact's BEST chunks survive) and before MMR so the diversity
   // rerank can never resurrect capped rows. Rows without a groupKey are
   // untouched by construction.
   const groupCounts = new Map<string, number>()
@@ -1745,7 +1890,7 @@ export function fuseAndDiversifyTraced(
     if (!g) return true
     const n = (groupCounts.get(g) ?? 0) + 1
     groupCounts.set(g, n)
-    return n <= FILE_SEGMENT_GROUP_CAP
+    return n <= ARTIFACT_GROUP_CAP
   })
 
   // MMR diversification rerank — λ default 0.6. Similarity is tag /

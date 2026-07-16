@@ -40,11 +40,12 @@ export type TranscriptSegment = {
   utteranceRefs: Array<{ start_ms: number; end_ms: number; speaker: string | null }>
 }
 
-// Packing bounds — see plan §"Segment granularity + timestamp model".
-const TARGET_CHARS = 1200
-const MAX_CHARS = 1500
-const MIN_CHARS = 200
-const SENTENCE_SPLIT_AT = 900
+// Packing bounds — see plan §"Segment granularity + timestamp model". Shared
+// with file_segments (same embedder, same retrieval unit, same granularity):
+// they used to be declared twice with two different sentence regexes, and the
+// transcript copy was the CJK-blind one.
+import { TARGET_CHARS, MAX_CHARS, MIN_CHARS, splitLongText } from './text-chunking.js'
+
 const TARGET_MS = 90_000 // ~90s of speech
 
 /** Collapse runs of whitespace and trim. Returns '' for whitespace-only input. */
@@ -57,26 +58,6 @@ function hasReadableContent(text: string): boolean {
   return normalizeText(text).length > 0
 }
 
-/**
- * Split a single over-long utterance on sentence boundaries near
- * SENTENCE_SPLIT_AT, hard-splitting at MAX_CHARS. Keeps sentences intact when
- * it can; never emits an empty piece.
- */
-function splitLongText(text: string): string[] {
-  if (text.length <= MAX_CHARS) return [text]
-  const pieces: string[] = []
-  let rest = text
-  while (rest.length > MAX_CHARS) {
-    // Prefer a sentence end (. ! ?) at/after SENTENCE_SPLIT_AT, before MAX_CHARS.
-    const window = rest.slice(SENTENCE_SPLIT_AT, MAX_CHARS)
-    const m = window.search(/[.!?]\s/)
-    const cut = m >= 0 ? SENTENCE_SPLIT_AT + m + 1 : MAX_CHARS
-    pieces.push(rest.slice(0, cut).trim())
-    rest = rest.slice(cut).trim()
-  }
-  if (rest.length > 0) pieces.push(rest)
-  return pieces.filter((p) => p.length > 0)
-}
 
 /**
  * Pack consecutive utterances into segments. Rules (plan §"Segment

@@ -442,3 +442,66 @@ describe('[COMP:retrieval/file-segments] vector scope gating includes file_segme
     expect(segOnly).toEqual(['file_segment'])
   })
 })
+
+// ── transcript_segment: the flooding guarantee that unblocked the scope ──
+//
+// `transcript_segment` was DELIBERATELY kept out of KNOWN_SCOPES — "so
+// recordings never flood" — and that was right WHEN NO CAP MECHANISM EXISTED.
+// The cap is the entire basis for admitting it, so it gets pinned here: a
+// 1067-segment meeting (a real local recording) must never take more than 2 of
+// ~20 slots. That is ~50x better than the failure mode the exclusion was
+// defending against, not a regression of it.
+describe('[COMP:retrieval/transcript-scope] transcript_segment per-recording fused-page cap', () => {
+  function tsRow(id: string, recordingId: string, ftsRank: number): ScoredRow {
+    return {
+      ...makeRow({ id, primitive: 'transcript_segment', ftsRank }),
+      groupKey: `recording:${recordingId}`,
+    }
+  }
+
+  it('a 1067-segment meeting cannot monopolize the page', () => {
+    const candidates: ScoredRow[] = [
+      // Every segment scores higher than the unrelated rows — without the cap
+      // this recording IS the entire page.
+      ...Array.from({ length: 1067 }, (_, i) => tsRow(`r1-s${i}`, 'rec-1', 0.99 - i * 0.0001)),
+      makeRow({ id: 'mem-1', ftsRank: 0.3 }),
+      makeRow({ id: 'mem-2', ftsRank: 0.2 }),
+    ]
+    const out = fuseAndDiversify(candidates, 20)
+    expect(out.filter((r) => r.primitive === 'transcript_segment').length).toBeLessThanOrEqual(2)
+    // The cap frees slots rather than truncating the page — the other facts
+    // still surface.
+    expect(out.some((r) => r.row_id === 'mem-1')).toBe(true)
+    expect(out.some((r) => r.row_id === 'mem-2')).toBe(true)
+  })
+
+  it('caps each recording independently (two meetings → up to 2 each)', () => {
+    const candidates: ScoredRow[] = [
+      ...Array.from({ length: 50 }, (_, i) => tsRow(`a-s${i}`, 'rec-a', 0.9 - i * 0.001)),
+      ...Array.from({ length: 50 }, (_, i) => tsRow(`b-s${i}`, 'rec-b', 0.8 - i * 0.001)),
+    ]
+    const out = fuseAndDiversify(candidates, 20)
+    expect(out.filter((r) => String(r.row_id).startsWith('a-')).length).toBeLessThanOrEqual(2)
+    expect(out.filter((r) => String(r.row_id).startsWith('b-')).length).toBeLessThanOrEqual(2)
+    expect(out.length).toBeGreaterThanOrEqual(3) // both meetings represented
+  })
+
+  it('a recording and a file are capped in their own namespaces', () => {
+    // `file:<id>` and `recording:<id>` must not collide — a file and a recording
+    // sharing a uuid would otherwise share one cap budget.
+    const sharedId = 'same-uuid'
+    const candidates: ScoredRow[] = [
+      ...Array.from({ length: 10 }, (_, i) => ({
+        ...makeRow({ id: `f-s${i}`, primitive: 'file_segment', ftsRank: 0.9 - i * 0.01 }),
+        groupKey: `file:${sharedId}`,
+      })),
+      ...Array.from({ length: 10 }, (_, i) => tsRow(`t-s${i}`, sharedId, 0.85 - i * 0.01)),
+    ]
+    const out = fuseAndDiversify(candidates, 20)
+    expect(out.filter((r) => r.primitive === 'file_segment').length).toBeLessThanOrEqual(2)
+    expect(out.filter((r) => r.primitive === 'transcript_segment').length).toBeLessThanOrEqual(2)
+    // Both survive: prefixed namespaces keep the budgets separate.
+    expect(out.some((r) => r.primitive === 'file_segment')).toBe(true)
+    expect(out.some((r) => r.primitive === 'transcript_segment')).toBe(true)
+  })
+})
