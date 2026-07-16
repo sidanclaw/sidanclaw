@@ -69,7 +69,7 @@ import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { groupConnectors } from "@/lib/connector-groups";
 import { cn } from "@/lib/utils";
 import { OFFICIAL_OAUTH_SCOPES, OFFICIAL_CONNECTOR_TOOLS, type ConnectorAuthType } from "@sidanclaw/shared/builtin-connectors";
-import { BUILTIN_PRIMITIVE_CONNECTOR_IDS } from "@sidanclaw/shared/connector-registry";
+import { BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTORS } from "@sidanclaw/shared/connector-registry";
 import { useT } from "@/lib/i18n/client";
 import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expose";
 import { buildConnectorState } from "@/lib/connector-oauth-state";
@@ -118,6 +118,11 @@ function isBuiltinPrimitive(c: { id: string; custom?: boolean }): boolean {
 
 /** Built-in connectors that have a configurable settings tab. */
 const CONFIGURABLE_CONNECTORS = new Set(["gcal", "gdrive"]);
+
+/** Storage bindings route Workspace Files bytes and expose no tools of their own. */
+const STORAGE_CONNECTOR_IDS = new Set(
+  OFFICIAL_CONNECTORS.filter((connector) => connector.tags.includes("storage")).map((connector) => connector.id),
+);
 
 type Connector = {
   id: string;
@@ -1259,7 +1264,7 @@ function ConnectorsList() {
         setShowS3Form(null);
         setS3Bucket(""); setS3Region(""); setS3Endpoint(""); setS3AccessKeyId(""); setS3SecretKey("");
         fetchConnectors();
-        setJustConnectedId(c.id);
+        setJustConnected({ slug: c.id, instanceId: c.connectorInstanceId });
       } else {
         const data = (await res.json().catch(() => ({}))) as { code?: string };
         setS3Error(
@@ -2072,25 +2077,27 @@ function ConnectorsList() {
 
                   {/* Shared per-tool allow/ask/block — the WORKSPACE policy the
                       team assistant enforces (not the per-user one). */}
-                  <div className="space-y-2">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                      {tc.wsToolPolicyTitle}
+                  {!STORAGE_CONNECTOR_IDS.has(sel.id) && (
+                    <div className="space-y-2">
+                      <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {tc.wsToolPolicyTitle}
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">{tc.wsToolPolicyDesc}</p>
+                      <ConnectorToolList
+                        connectorId={sel.id}
+                        loading={polEntry?.loading}
+                        tools={toolItems}
+                        onPolicyChange={(toolName, policy) =>
+                          handleWsToolPolicy(
+                            iid,
+                            toolName,
+                            policy,
+                            catalog.find((tool) => tool.name === toolName)?.classification,
+                          )
+                        }
+                      />
                     </div>
-                    <p className="text-[11px] text-muted-foreground">{tc.wsToolPolicyDesc}</p>
-                    <ConnectorToolList
-                      connectorId={sel.id}
-                      loading={polEntry?.loading}
-                      tools={toolItems}
-                      onPolicyChange={(toolName, policy) =>
-                        handleWsToolPolicy(
-                          iid,
-                          toolName,
-                          policy,
-                          catalog.find((tool) => tool.name === toolName)?.classification,
-                        )
-                      }
-                    />
-                  </div>
+                  )}
                 </div>
               );
             }
@@ -2689,7 +2696,7 @@ function ConnectorsList() {
                     built-ins). Built-in primitives always show their tools —
                     the per-tool allow/ask/block governance is the point of
                     the page for them. */}
-                {(sel.connected || builtin) && (
+                {(sel.connected || builtin) && !STORAGE_CONNECTOR_IDS.has(sel.id) && (
                   <>
                     <div className="flex gap-0 border-b border-border">
                       <button

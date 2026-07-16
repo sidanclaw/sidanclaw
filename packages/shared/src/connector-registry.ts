@@ -177,6 +177,7 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     oauth_required: false,
     enabled: true,
     tags: ['storage', 's3', 'workspace'],
+    single_instance: true,
   },
 ]
 
@@ -198,8 +199,8 @@ export const BUILTIN_PRIMITIVE_CONNECTOR_IDS: ReadonlySet<string> = new Set(
 
 // ── Single-instance connectors ────────────────────────────────
 //
-// Officials marked `single_instance` bind a resource, not an account (gcs —
-// one storage bucket per workspace), so the connector surfaces suppress
+// Officials marked `single_instance` bind a resource, not an account (gcs/s3
+// storage — one bucket per workspace), so the connector surfaces suppress
 // "Add another" for them and the multi-account runtime skips them. Derived
 // from the registry — never hardcode a slug list for this (the "all
 // built-ins" drift anti-pattern).
