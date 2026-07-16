@@ -109,6 +109,10 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
       createdByAssistantId: input.assistantId,
       sensitivity,
       summaryText: input.sourceLabel ?? null,
+      // The recording path's anchor back-edge — same parity rule as contentRef
+      // below: an OSS build that dropped it would orphan every fact extracted
+      // from a recording from its audio.
+      ...(input.parentEpisodeId ? { parentEpisodeId: input.parentEpisodeId } : {}),
       // File-upload ingest points content_ref at the stored artifact
       // ({source_kind:'file_upload', file_id}); generic text falls back to an
       // inline manual-paste peek, matching the closed impl (parity across builds).

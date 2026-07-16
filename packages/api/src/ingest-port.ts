@@ -56,6 +56,15 @@ export type BrainEpisodeInput = {
    * ingestor falls back to a `manual_paste` inline ref). Persisted verbatim.
    */
   contentRef?: Record<string, unknown>
+  /**
+   * The anchor Episode this ingest derives from (`episodes.parent_episode_id`).
+   * The recording path passes the recording Episode's id, so the derived
+   * `voice_memo` Episode — and through it every extracted memory, entity, and
+   * task — keeps a native FK back to the audio. `sourceRef` carries the same
+   * edge as JSONB for callers that read provenance; this is the queryable half
+   * (`EpisodeFilters.parentEpisodeId`). Omitted for standalone ingests.
+   */
+  parentEpisodeId?: string
 }
 
 /** Ingest an arbitrary text Episode (e.g. an MCP `ingestToBrain` call). */
