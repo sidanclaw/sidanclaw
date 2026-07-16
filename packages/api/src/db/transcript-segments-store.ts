@@ -18,7 +18,7 @@
  * [COMP:brain/transcript-segments-store]
  */
 
-import { getPool } from './client.js'
+import { getPool, query } from './client.js'
 
 /** One diarized speaker-turn from the transcription step. */
 export type Utterance = {
@@ -264,4 +264,31 @@ export async function insertTranscriptSegments(
   } finally {
     client.release()
   }
+}
+
+/**
+ * Point a recording's segments at their persisted transcript file.
+ *
+ * `transcript_file_id` has existed since migration 280 ("raw transcript bytes …
+ * for UI deep-link") and NOTHING ever wrote it — the column and its FK were
+ * built for exactly this and sat dead. This is the writer.
+ *
+ * Two-phase by necessity: the segments must exist (the insert above) before they
+ * can carry the FK, and the file is written between the two. Runs on the system
+ * pool (background job, no per-user RLS context), matching the insert.
+ *
+ * @returns the number of segment rows linked.
+ */
+export async function linkTranscriptSegmentsFile(
+  recordingId: string,
+  transcriptFileId: string,
+): Promise<number> {
+  const res = await query(
+    `UPDATE transcript_segments
+        SET transcript_file_id = $2
+      WHERE recording_id = $1
+        AND transcript_file_id IS DISTINCT FROM $2`,
+    [recordingId, transcriptFileId],
+  )
+  return res.rowCount ?? 0
 }

@@ -1,4 +1,13 @@
 export type { MediaAttachment } from './types.js'
+export {
+  formatStamp,
+  parseStamp,
+  formatTranscriptLine,
+  formatTranscript,
+  STAMP_RE,
+  UNKNOWN_SPEAKER,
+  type TranscriptLineSource,
+} from './transcript-format.js'
 export { transcribeAudio, type TranscribeOptions, type TranscribeResult } from './transcribe.js'
 export { transcribeFirstAudio, type PreflightOptions } from './preflight.js'
 export {
