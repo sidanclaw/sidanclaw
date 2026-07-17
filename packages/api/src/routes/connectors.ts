@@ -55,8 +55,8 @@
  */
 
 import { Router } from 'express'
-import { classifyTool, defaultPolicy } from '@sidanclaw/core'
-import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@sidanclaw/shared'
+import { classifyTool, defaultPolicy } from '@use-brian/core'
+import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@use-brian/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance, ConnectorHealthStatus } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'

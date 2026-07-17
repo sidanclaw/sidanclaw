@@ -115,7 +115,7 @@ export async function validateS3ByoBinding(
     return { ok: false, code: code === 'unknown' ? 'invalid_key' : code, message }
   }
 
-  const probe = Buffer.from('sidanclaw byo s3 storage healthcheck')
+  const probe = Buffer.from('Use Brian byo s3 storage healthcheck')
   try {
     await client.writeBlob(S3_BYO_HEALTHCHECK_KEY, probe, { workspaceId: 'healthcheck', mime: 'text/plain' })
     const read = await client.readBlob(S3_BYO_HEALTHCHECK_KEY)
