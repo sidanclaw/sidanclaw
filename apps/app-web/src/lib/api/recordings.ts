@@ -118,3 +118,83 @@ export async function processRecording(
   if (!res.ok) throw await asError(res, "Transcription failed");
   return res.json();
 }
+
+// ── The read surface ────────────────────────────────────────────────
+//
+// Until these routes existed the recordings router was write-only: a recording
+// could be uploaded and transcribed but never listed, and the audio was never
+// handed back to the browser at all — a player had no possible `src`.
+
+type RecordingKind = "memo" | "meeting";
+type RecordingStatus =
+  | "awaiting_upload"
+  | "queued"
+  | "processing"
+  | "processed"
+  | "failed";
+
+export type RecordingSummary = {
+  recordingId: string;
+  title: string | null;
+  fileName: string | null;
+  kind: RecordingKind;
+  status: RecordingStatus;
+  mime: string;
+  durationMs: number | null;
+  bytes: number | null;
+  occurredAt: string;
+  truncated: boolean;
+  lastError: string | null;
+  hasTranscript: boolean;
+  transcriptFileId: string | null;
+  participants: Array<{ speaker: string; name?: string; contactId?: string; email?: string }>;
+};
+
+export type TranscriptSegment = {
+  segment_index: number;
+  start_ms: number;
+  end_ms: number;
+  speaker: string | null;
+  segment_text: string;
+};
+
+export async function getRecording(recordingId: string): Promise<RecordingSummary> {
+  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}`);
+  if (!res.ok) throw await asError(res, "Could not load the recording");
+  return (await res.json()) as RecordingSummary;
+}
+
+/**
+ * Mint a playback URL. It points straight at GCS (which honors Range, so the
+ * browser seeks against storage rather than through our API) and is a
+ * time-limited bearer token — `expiresAt` is why the player refreshes
+ * proactively instead of discovering expiry as a playback failure.
+ */
+export async function getRecordingMediaUrl(
+  recordingId: string,
+): Promise<{ url: string; expiresAt: string; mime: string; durationMs: number | null }> {
+  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/media-url`);
+  if (!res.ok) throw await asError(res, "Could not load the audio");
+  return (await res.json()) as {
+    url: string;
+    expiresAt: string;
+    mime: string;
+    durationMs: number | null;
+  };
+}
+
+/** One page of transcript. The server bounds the window regardless of `toIndex`. */
+export async function getRecordingTranscript(
+  recordingId: string,
+  fromIndex = 0,
+): Promise<{ segments: TranscriptSegment[]; hasMore: boolean; toIndex: number }> {
+  const res = await authFetch(
+    `${API_URL}/api/recordings/${recordingId}/transcript?fromIndex=${fromIndex}`,
+  );
+  if (!res.ok) throw await asError(res, "Could not load the transcript");
+  return (await res.json()) as {
+    segments: TranscriptSegment[];
+    hasMore: boolean;
+    toIndex: number;
+  };
+}
