@@ -259,6 +259,10 @@ import { createGcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
 import { createFilesApi, createSingletonFilesClientResolver } from './files/files-api.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
+import {
+  createChatSearchRecordingTool,
+  createListRecordingsTool,
+} from './recordings/recording-chat-tools.js'
 import { createArtifactPromoter } from './files/artifact-promote.js'
 import { createFileIngestWorker } from './files/file-ingest-worker.js'
 import { enqueueFileIngestJob, claimNextFileIngestJob, markFileIngestJobDone, markFileIngestJobFailed } from './db/file-ingest-jobs-store.js'
@@ -1340,6 +1344,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       'searchFileContent',
       createSearchFileContentTool({ embedder: createGeminiEmbedder(env.GEMINI_API_KEY) }),
     )
+
+    // The recording surface for chat, registered at the same seam and for the
+    // same reason: chat, the callee executor, and workflows all carry it by
+    // construction, and the actor is rebuilt from the ToolContext per call so
+    // read ceilings hold everywhere.
+    //
+    // Two axes, neither redundant: listRecordings is TEMPORAL ("Tuesday's
+    // call" — semantic search structurally cannot answer that), searchRecording
+    // is PRECISION inside one recording (what was said, by whom, and WHEN, so
+    // the model can cite the moment). Note this searchRecording takes
+    // `recordingId` as a model INPUT — unlike the synthesis-loop twin in
+    // recordings/recording-search-tool.ts, which pins it in the closure so that
+    // loop cannot pivot off the recording it was told to summarize.
+    tools.set(
+      'searchRecording',
+      createChatSearchRecordingTool({ embedder: createGeminiEmbedder(env.GEMINI_API_KEY) }),
+    )
+    tools.set('listRecordings', createListRecordingsTool())
 
     // Bug report tool — the create sink is a port; open default returns a
     // synthetic id (no persistence). The platform injects its bug-report store.
