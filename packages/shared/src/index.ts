@@ -5,6 +5,7 @@
 // This split is load-bearing for the OSS extraction (the open package ships no
 // secrets); `@sidanclaw/shared-server` stays in the platform, not the submodule.
 // See packages/shared/CLAUDE.md → "Subpath exports".
+export * from './transcript-format.js'
 export * from './connector-registry.js'
 export * from './builtin-connectors.js'
 export * from './tool-display-names.js'
