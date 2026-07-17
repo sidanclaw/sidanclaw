@@ -86,6 +86,8 @@ import { DocTopBar, type TabView } from "./doc-topbar";
 import { PageHeader } from "./page-header";
 import { PageTitle } from "./page-title";
 import { CollabPageEditor } from "./collab-page-editor";
+import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
+import { recordingIdFromAnchorKey } from "@/lib/recordings/anchor";
 import { commentGutterWidth } from "./comment-rail";
 import { useCollabProvider } from "@/lib/collab/use-collab-provider";
 import { usePublishPresenceActivity } from "@/lib/collab/use-presence";
@@ -1363,6 +1365,14 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                       <div className="h-9 w-2/3 animate-pulse rounded bg-muted md:h-10" />
                     </div>
                   )}
+                  <RecordingPlayerProvider
+                    // A recording brief's anchor key is
+                    // `recording-synthesis:<recordingId>` — the only link from
+                    // the page back to the recording it was written from. Null
+                    // on every other page, so the provider is inert and the
+                    // page's `[H:MM:SS]` text stays plain prose.
+                    recordingId={recordingIdFromAnchorKey(pageView?.anchorKey)}
+                  >
                   <CollabPageEditor
                     collab={collab}
                     canEdit
@@ -1382,6 +1392,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                     onTemplateSeeded={() => setSeedTemplate(null)}
                     onContentChange={handleDraftContentChange}
                   />
+                  </RecordingPlayerProvider>
                 </div>
               </div>
             )}

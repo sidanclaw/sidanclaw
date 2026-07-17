@@ -79,6 +79,7 @@ function makeSavedView(overrides: Partial<SavedView> & Pick<SavedView, 'name' | 
     workspaceId: WORKSPACE_ID,
     createdBy: USER_ID,
     nameOrigin: 'placeholder',
+    anchorKey: null,
     fullWidth: false,
     clearance: 'internal',
     description: null,

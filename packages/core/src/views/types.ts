@@ -298,6 +298,17 @@ export type SavedView = {
    * `null` to fall back to a derived glyph in the UI.
    */
   icon: string | null
+  /**
+   * Stable cross-run identity for a machine-authored page (the partial unique
+   * index on `(workspace_id, anchor_key)`), so a re-run converges on the same
+   * page instead of littering drafts.
+   *
+   * It is also the ONLY link from a page back to what produced it. A recording
+   * brief carries `recording-synthesis:<recordingId>`, which is how the doc
+   * shell knows to mount a player and make the page's `[H:MM:SS]` citations
+   * seekable. Null for a hand-authored page.
+   */
+  anchorKey: string | null
   entity: ViewEntity
   viewType: ViewType
   /** Legacy single-binding source of truth — used by pre-Notion-redesign rows. */

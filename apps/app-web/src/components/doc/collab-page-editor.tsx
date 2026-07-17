@@ -70,6 +70,7 @@ import {
   type AssistantIdentity,
 } from "@/lib/api/views";
 import { browserDocExtensions } from "./doc-schema";
+import { useRecordingPlayer } from "@/lib/recordings/recording-player-context";
 import { FloatingToolbar } from "./floating-toolbar";
 import { DocDragHandle } from "./drag-handle";
 import { findBlockPos, ensureBlockId } from "./block-actions";
@@ -255,6 +256,10 @@ function CollabEditorInner({
   onTemplateSeeded?: () => void;
   onContentChange?: () => void;
 }) {
+  // The recording this page was synthesized from, if any — supplied by the doc
+  // shell from the page's anchor key. Null on every other page, which is what
+  // keeps the citation decoration inert outside a brief.
+  const recordingPlayer = useRecordingPlayer();
   const t = useT().docPage;
   const ws = useWorkspaceContext();
 
@@ -653,7 +658,21 @@ function CollabEditorInner({
         },
       },
       extensions: [
-        ...browserDocExtensions({ workspaceId: ws.workspaceId }),
+        ...browserDocExtensions({
+          workspaceId: ws.workspaceId,
+          // On a recording brief, the model's literal `[H:MM:SS]` prose becomes
+          // seek links. `recordingId` is null on every other page, so the
+          // decoration stays inert and the timestamps render as plain text.
+          // `seekTo` is stable, so this does not churn the extension list.
+          ...(recordingPlayer.recordingId
+            ? {
+                timecodes: {
+                  onSeek: recordingPlayer.seekTo,
+                  hrefBase: `/w/${ws.workspaceId}/recordings/${recordingPlayer.recordingId}`,
+                },
+              }
+            : {}),
+        }),
         ...editingExtensions,
         commentExtension,
         Collaboration.configure({ document: doc, field: FRAGMENT_FIELD }),

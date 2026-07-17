@@ -55,6 +55,7 @@ const FULL_SELECT = `
   full_width     AS "fullWidth",
   clearance,
   origin_prompt  AS "originPrompt",
+  anchor_key     AS "anchorKey",
   auto_prune_at  AS "autoPruneAt",
   brain_sync_enabled   AS "brainSyncEnabled",
   brain_last_ingest_hash AS "brainLastIngestHash",
@@ -98,6 +99,7 @@ type FullRow = {
   teamspaceId: string | null
   fullWidth: boolean
   clearance: 'public' | 'internal' | 'confidential'
+  anchorKey: string | null
   originPrompt: string | null
   autoPruneAt: Date | null
   brainSyncEnabled: boolean
@@ -121,6 +123,7 @@ type ListRow = {
   nestParentId: string | null
   position: number
   teamspaceId: string | null
+  anchorKey: string | null
   updatedAt: Date
 }
 
@@ -133,6 +136,7 @@ function rowToFull(row: FullRow): SavedView {
     nameOrigin: row.nameOrigin,
     description: row.description,
     icon: row.icon,
+    anchorKey: row.anchorKey ?? null,
     entity: row.entity,
     viewType: row.viewType,
     binding: row.binding,

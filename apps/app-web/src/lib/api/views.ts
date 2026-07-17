@@ -465,6 +465,14 @@ export type ViewMetadata = {
    */
   nameOrigin: NameOrigin;
   description: string | null;
+  /**
+   * Stable identity for a machine-authored page, and the ONLY link from a page
+   * back to what produced it. A recording brief carries
+   * `recording-synthesis:<recordingId>` — which is how the doc shell knows to
+   * mount a player and make this page's `[H:MM:SS]` citations seekable. Null
+   * for a hand-authored page.
+   */
+  anchorKey: string | null;
   entity: ViewEntity;
   viewType: ViewType;
   state: ViewState;

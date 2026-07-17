@@ -83,6 +83,7 @@ function makeSavedView(over: Partial<SavedView>): SavedView {
     createdBy: USER_ID,
     name: 'Untitled',
     nameOrigin: 'placeholder',
+    anchorKey: null,
     fullWidth: false,
     clearance: 'internal',
     description: null,
