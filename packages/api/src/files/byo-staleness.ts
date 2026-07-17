@@ -50,12 +50,12 @@ export type ByoStalenessSweepResult = {
 }
 
 /** BYO storage backends whose disconnected bindings this sweep reclaims. */
-const BYO_STORAGE_PROVIDERS = ['gcs', 's3'] as const
+const OFFICIAL_BYO_STORAGE_PROVIDERS = ['gcs', 's3'] as const
 
 export async function sweepStaleByoBindings(deps: ByoStalenessSweepDeps): Promise<ByoStalenessSweepResult> {
   const grace = deps.graceMs ?? BYO_DISCONNECT_GRACE_MS
   const instances = (
-    await Promise.all(BYO_STORAGE_PROVIDERS.map((p) => deps.connectorInstanceStore.listByProviderSystem(p)))
+    await Promise.all(OFFICIAL_BYO_STORAGE_PROVIDERS.map((p) => deps.connectorInstanceStore.listByProviderSystem(p)))
   ).flat()
   const result: ByoStalenessSweepResult = { scanned: 0, swept: 0, retractedFiles: 0 }
 
@@ -80,6 +80,7 @@ export async function sweepStaleByoBindings(deps: ByoStalenessSweepDeps): Promis
       const n = await deps.workspaceFilesStore.retractByStorageBucketSystem(
         inst.workspaceId,
         bucket,
+        inst.provider === 's3' ? 's3' : 'gs',
         BYO_STALE_RETRACT_REASON,
       )
       result.retractedFiles += n

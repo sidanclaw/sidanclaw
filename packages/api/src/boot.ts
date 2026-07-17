@@ -261,7 +261,7 @@ import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
 import { createGcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
-import { createFilesApi, createSingletonFilesClientResolver } from './files/files-api.js'
+import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import { createArtifactPromoter } from './files/artifact-promote.js'
 import { createFileIngestor } from './files/ingest-file.js'
@@ -1526,6 +1526,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // lazy references in the callee executor + workflow tool registry are
   // TDZ-safe: pre-assignment access reads `null` and degrades honestly.
   let filesApi: ReturnType<typeof createFilesApi> | null = null
+  let filesResolver: FilesClientResolver | null = null
   let deckStore: ReturnType<typeof createDeckStore> | null = null
 
   const calleeExecutor = createCalleeExecutor({
@@ -2545,8 +2546,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }
       return null
     }
+    filesResolver = createCachedByoFilesResolver({ lookup: lookupStorageBinding, fallback: defaultFilesResolver })
     filesApi = createFilesApi({
-      resolver: createCachedByoFilesResolver({ lookup: lookupStorageBinding, fallback: defaultFilesResolver }),
+      resolver: filesResolver,
       store: workspaceFilesStore,
       auditStore: workspaceAuditStore,
     })
@@ -3212,6 +3214,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       filesApi,
       store: workspaceFilesStore,
       gcs: filesBlobClient,
+      resolver: filesResolver ?? undefined,
       membership: getWorkspaceMembershipWithClearanceSystem,
     }))
   }

@@ -43,7 +43,7 @@ describe('[COMP:files/byo-staleness] sweepStaleByoBindings', () => {
     const res = await sweepStaleByoBindings(deps)
     expect(res.swept).toBe(1)
     expect(res.retractedFiles).toBe(3)
-    expect(deps.retractByStorageBucketSystem).toHaveBeenCalledWith('ws_1', 'cust-bucket', BYO_STALE_RETRACT_REASON)
+    expect(deps.retractByStorageBucketSystem).toHaveBeenCalledWith('ws_1', 'cust-bucket', 'gs', BYO_STALE_RETRACT_REASON)
     expect(deps.setConfigSystem).toHaveBeenCalledWith('old', { staleSwept: true })
     expect(deps.updateCredentialsSystem).toHaveBeenCalledWith('old', { type: 'none' })
   })
@@ -91,7 +91,7 @@ describe('[COMP:files/byo-staleness] sweepStaleByoBindings', () => {
     const res = await sweepStaleByoBindings(deps)
     expect(res.swept).toBe(1)
     expect(res.retractedFiles).toBe(3)
-    expect(deps.retractByStorageBucketSystem).toHaveBeenCalledWith('ws_1', 's3-bucket', BYO_STALE_RETRACT_REASON)
+    expect(deps.retractByStorageBucketSystem).toHaveBeenCalledWith('ws_1', 's3-bucket', 's3', BYO_STALE_RETRACT_REASON)
     expect(deps.setConfigSystem).toHaveBeenCalledWith('s3old', { staleSwept: true })
   })
 
