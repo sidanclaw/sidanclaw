@@ -261,9 +261,10 @@ import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
 import { createGcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
-import { createFilesApi, createSingletonFilesClientResolver } from './files/files-api.js'
+import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import { createArtifactPromoter } from './files/artifact-promote.js'
+import { createFileIngestor } from './files/ingest-file.js'
 import { createFileIngestWorker } from './files/file-ingest-worker.js'
 import { enqueueFileIngestJob, claimNextFileIngestJob, markFileIngestJobDone, markFileIngestJobFailed } from './db/file-ingest-jobs-store.js'
 import { createCachedByoFilesResolver, type WorkspaceStorageBinding } from './files/byo-files-resolver.js'
@@ -312,6 +313,7 @@ import { createEmailInboxProvider, setGlobalEmailInboxProvider } from './agentma
 import { docThemesRoutes } from './routes/doc-themes.js'
 import { runIngestPage } from './doc/ingest-page-runner.js'
 import { internalIngestRoutes } from './doc/internal-ingest-route.js'
+import { internalPageEventRoutes } from './doc/internal-page-event-route.js'
 import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanout.js'
@@ -623,18 +625,6 @@ export interface OpenApiPorts {
       ReturnType<typeof import('./db/connector-grant-store.js').createConnectorGrantStore>
     >
   }) => SyncCredentials
-
-  // ── Direct file ingest — open default: unset (no /api/files/ingest) ──
-  /**
-   * Builds the closed FileIngestor over boot's FilesApi + the platform's brain
-   * ingestor (boot passes the one it built via `buildEpisodeIngestors`).
-   * Open default: unset → fileRoutes mounts without an ingest seam.
-   */
-  buildFileIngestor?: (deps: {
-    filesApi: ReturnType<typeof createFilesApi>
-    brainEpisodeIngestor: BrainEpisodeIngestor
-    distill: (input: { buffer: Buffer; mime: string }) => Promise<string>
-  }) => unknown
 
   // ── Closed first-party tool factories — open default: omitted ──
   /** Capability-gated triage/sentiment/analytics-query tools (platform-only). */
@@ -1536,6 +1526,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // lazy references in the callee executor + workflow tool registry are
   // TDZ-safe: pre-assignment access reads `null` and degrades honestly.
   let filesApi: ReturnType<typeof createFilesApi> | null = null
+  let filesResolver: FilesClientResolver | null = null
   let deckStore: ReturnType<typeof createDeckStore> | null = null
 
   const calleeExecutor = createCalleeExecutor({
@@ -2526,19 +2517,38 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       filesBlobClient,
       env.GCS_FILES_BUCKET ?? 'local-dev',
     )
-    const lookupGcsBinding = async (workspaceId: string): Promise<WorkspaceStorageBinding | null> => {
+    const lookupStorageBinding = async (workspaceId: string): Promise<WorkspaceStorageBinding | null> => {
       // A binding resolves only while we hold the key. Disconnect wipes the key
       // (credential type 'none'), so a disconnected workspace returns null here
       // and falls back to the app default bucket for both reads and writes —
-      // its BYO files go dormant until a reconnect re-supplies the key.
-      const inst = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'gcs')
-      if (!inst) return null
-      const creds = await connectorInstanceStore.getAuthCredentialsSystem(inst.id)
-      if (!creds || creds.type !== 'gcs') return null
-      return { credentials: creds.serviceAccountKey, bucket: creds.bucket, projectId: creds.projectId }
+      // its BYO files go dormant until a reconnect re-supplies the key. GCS
+      // takes precedence when a workspace somehow has both bindings connected.
+      const gcsInst = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'gcs')
+      if (gcsInst) {
+        const creds = await connectorInstanceStore.getAuthCredentialsSystem(gcsInst.id)
+        if (creds && creds.type === 'gcs') {
+          return { kind: 'gcs', credentials: creds.serviceAccountKey, bucket: creds.bucket, projectId: creds.projectId }
+        }
+      }
+      const s3Inst = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 's3')
+      if (s3Inst) {
+        const creds = await connectorInstanceStore.getAuthCredentialsSystem(s3Inst.id)
+        if (creds && creds.type === 's3') {
+          return {
+            kind: 's3',
+            credentials: creds.accessKey,
+            bucket: creds.bucket,
+            region: creds.region,
+            endpoint: creds.endpoint,
+            forcePathStyle: creds.forcePathStyle,
+          }
+        }
+      }
+      return null
     }
+    filesResolver = createCachedByoFilesResolver({ lookup: lookupStorageBinding, fallback: defaultFilesResolver })
     filesApi = createFilesApi({
-      resolver: createCachedByoFilesResolver({ lookup: lookupGcsBinding, fallback: defaultFilesResolver }),
+      resolver: filesResolver,
       store: workspaceFilesStore,
       auditStore: workspaceAuditStore,
     })
@@ -2633,12 +2643,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     for (const tool of createDeckTools({ filesApi, deckStore, appOrigin: env.AUTHED_APP_URL ?? env.APP_URL })) {
       allTools.set(tool.name, tool)
     }
-    // Direct ingest seam — closed (FileIngestor builds Pipeline B). Injected as a
-    // port; open default leaves it null (no /api/files/ingest ingest).
-    if (ports.buildFileIngestor && brainEpisodeIngestor) {
-      fileIngestor = ports.buildFileIngestor({
+    // Direct file ingest is open: store the original bytes, derive text, then
+    // run the same boot-built Pipeline B ingestor used by brain MCP and docs.
+    if (brainEpisodeIngestor) {
+      fileIngestor = createFileIngestor({
         filesApi,
-        brainEpisodeIngestor,
+        ingest: brainEpisodeIngestor,
         distill: async ({ buffer, mime }) =>
           (await distillFileToText({ buffer, mime }, { apiKey: env.GEMINI_API_KEY })).text,
       })
@@ -3204,6 +3214,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       filesApi,
       store: workspaceFilesStore,
       gcs: filesBlobClient,
+      resolver: filesResolver ?? undefined,
       membership: getWorkspaceMembershipWithClearanceSystem,
     }))
   }
@@ -3228,6 +3239,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       connectorStore,
       connectorInstanceStore,
       gcsByo: {
+        requireWorkspaceAdmin: async (userId, workspaceId) => {
+          const m = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+          return m?.role === 'owner' || m?.role === 'admin'
+        },
+      },
+      s3Byo: {
         requireWorkspaceAdmin: async (userId, workspaceId) => {
           const m = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
           return m?.role === 'owner' || m?.role === 'admin'
@@ -3654,6 +3671,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       ingestPage: ingestPageRunner,
     }))
   }
+
+  // Internal content-edit page-event endpoint — doc-sync POSTs here on a
+  // debounced Yjs settle so a *block-content* edit (which never flows through
+  // the saved-views store's metadata `update`) still fires a `page`-source
+  // `updated` workflow. Shared-secret gated (DOC_SYNC_SECRET); no Pipeline B
+  // dependency, so mounted UNCONDITIONALLY — both editions get content-edit
+  // triggers. Feeds the same late-bound `publishPageLifecycle` seam the store's
+  // metadata writes use. NB: NO requireAuth (shared-secret header, not a JWT).
+  app.use('/', internalPageEventRoutes({
+    savedViewStore,
+    publish: publishPageLifecycle,
+  }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), docEntitiesRoutes({ docEntityStore, workspaceStore }))
 
