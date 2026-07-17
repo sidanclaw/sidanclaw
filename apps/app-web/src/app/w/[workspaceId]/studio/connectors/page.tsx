@@ -37,7 +37,7 @@
  * fathom}` (workspace-aware via `state`). Each client id must reach the browser
  * bundle as a real `NEXT_PUBLIC_*` build var: Turborepo strict env mode strips
  * bare vars like `GOOGLE_CLIENT_ID`, so the `next.config.ts` env mapping only
- * lands when that var is declared in `sidanclaw/turbo.json` build.env (or a
+ * lands when that var is declared in `use-brian/turbo.json` build.env (or a
  * real `NEXT_PUBLIC_*` var is set in the Vercel project). Missing it ships an
  * empty `client_id` (Google `Error 400: invalid_request`). PAT connectors
  * (GitHub) and custom MCP servers need no OAuth. See

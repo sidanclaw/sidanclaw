@@ -14,7 +14,7 @@
  * authorize URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID`, which must
  * reach the browser bundle as a real `NEXT_PUBLIC_*` build var — Turborepo
  * strict env mode strips bare `GOOGLE_CLIENT_ID` unless it's declared in
- * `sidanclaw/turbo.json` build.env, which `next.config.ts` maps to it; missing
+ * `use-brian/turbo.json` build.env, which `next.config.ts` maps to it; missing
  * either ships an empty `client_id`. Non-OAuth connectors ("Add" → backend
  * connect) and the skills tab work regardless. See the connectors page header
  * and docs/architecture/platform/deployment.md → "Turbo strict env mode".

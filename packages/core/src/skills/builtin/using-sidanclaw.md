@@ -7,7 +7,7 @@ metadata:
   author: Use Brian
   category: productivity
   applies_to_app_type: any
-  when_to_use: The user asks whether sidanclaw/you can do something, how a Use Brian feature works, what triggers/integrations/limits exist, for advice on using Use Brian itself, or proposes an automation you are not sure is supported. Activate BEFORE answering capability questions.
+  when_to_use: The user asks whether use-brian/you can do something, how a Use Brian feature works, what triggers/integrations/limits exist, for advice on using Use Brian itself, or proposes an automation you are not sure is supported. Activate BEFORE answering capability questions.
   tags: official
 ---
 
