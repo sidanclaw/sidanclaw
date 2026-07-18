@@ -1,13 +1,13 @@
-# @use-brian/sidanclaw-kb
+# @use-brian/brian-kb
 
 Parser, wikilink resolver, and lint checks for [Use Brian](https://usebrian.ai) knowledge bases. Shared between the API sync worker and the public CLI — single source of truth for how KB markdown is read and validated.
 
 ## Install (CLI use)
 
 ```
-npm install -g @use-brian/sidanclaw-kb
+npm install -g @use-brian/brian-kb
 # or invoke directly:
-npx @use-brian/sidanclaw-kb <command>
+npx @use-brian/brian-kb <command>
 ```
 
 ## CLI — `kb lint`
@@ -66,7 +66,7 @@ import {
 
   readFrontmatter,         // low-level utility
   report,                  // CLI-side formatter
-} from '@use-brian/sidanclaw-kb'
+} from '@use-brian/brian-kb'
 ```
 
 ### Sync-worker use (pre-parsed entries, no filesystem)

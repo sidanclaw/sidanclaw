@@ -331,7 +331,7 @@ export type ChannelPipelineParams = {
    * and rewrites `messageText` + `userContentBlocks` to carry the manifest +
    * head excerpt instead of the blob. Absent (or below threshold) ⇒ the turn
    * is untouched. See large-content-artifacts §Phase 3.2 +
-   * sidanclaw/packages/api/src/files/paste-promotion.ts.
+   * use-brian/packages/api/src/files/paste-promotion.ts.
    */
   rawUserText?: string
   /** Whether this is a group chat (affects context assembly). */
@@ -408,7 +408,7 @@ export type ChannelPipelineParams = {
    * Promotes an over-threshold paste to a durable workspace_files artifact
    * (large-content-artifacts §Phase 3.2, decision D6). Wired once at boot from
    * the channel route options. Absent/null ⇒ pastes pass through untouched.
-   * See sidanclaw/packages/api/src/files/artifact-promote.ts.
+   * See use-brian/packages/api/src/files/artifact-promote.ts.
    */
   artifactPromoter?: ArtifactPromoter | null
   skillStore?: SkillStore

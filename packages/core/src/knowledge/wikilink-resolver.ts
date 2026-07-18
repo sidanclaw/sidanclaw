@@ -1,8 +1,8 @@
 /**
- * Wikilink resolver — now lives in @use-brian/sidanclaw-kb. This file is a
+ * Wikilink resolver — now lives in @use-brian/brian-kb. This file is a
  * thin re-export to keep existing internal imports working.
  *
- * See packages/sidanclaw-kb/src/lib/wikilink-resolver.ts.
+ * See packages/brian-kb/src/lib/wikilink-resolver.ts.
  */
 
-export { buildPathIndex, resolveWikilink } from '@use-brian/sidanclaw-kb'
+export { buildPathIndex, resolveWikilink } from '@use-brian/brian-kb'

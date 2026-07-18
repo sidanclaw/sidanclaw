@@ -34,7 +34,7 @@ const CONFIG_DIR = join(homedir(), '.sidanclaw')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const BRAIN_DIR = join(CONFIG_DIR, 'brain')
 
-// Load sidanclaw/.env into process.env BEFORE any env read below, so `pnpm
+// Load use-brian/.env into process.env BEFORE any env read below, so `pnpm
 // start` honors it the same way the standalone migrate + doc-sync paths
 // already do (both dotenv.config this exact file). Without this the launcher
 // only saw real shell vars, so a DATABASE_URL in .env was silently ignored and

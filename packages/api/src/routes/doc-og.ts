@@ -64,7 +64,7 @@ type CacheEntry = { value: OgPreviewResponse; storedAt: number }
 /**
  * Process-local TTL cache for OG previews.
  *
- * TODO(redis): replace this with a `RedisCache` adapter when sidanclaw-api
+ * TODO(redis): replace this with a `RedisCache` adapter when brian-api
  * scales beyond a single Cloud Run instance. The same in-memory shape
  * is used by `feed/insights-cache.ts`; a future shared cache abstraction
  * should cover both.

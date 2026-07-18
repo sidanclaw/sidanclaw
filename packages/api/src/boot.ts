@@ -10,7 +10,7 @@
  * platform entry (`apps/api/src/index.ts`, `@use-brian/api-server`) calls this
  * with the real impls + a `mountExtraRoutes` hook that mounts the 33 closed
  * routes onto the same app against the SAME store instances exposed on
- * `BootContext`. A standalone open entry (`sidanclaw/apps/api`,
+ * `BootContext`. A standalone open entry (`use-brian/apps/api`,
  * `@use-brian/api-open`) calls it with no ports → all safe defaults.
  *
  * See the open-core split (repo CLAUDE.md; plan in git history) §10 (ports & adapters DI), §12.5
@@ -4446,7 +4446,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Pipeline B (when the platform passed an episode-ingestor port; OSS
   // without one runs store-only) → stamp source_episode_id + indexing status.
   // Same single-service model as every worker: runs only where runWorkers is
-  // set (prod: sidanclaw-api-workers).
+  // set (prod: brian-api-workers).
   const fileIngestWorker = filesApi
     ? createFileIngestWorker({
         claim: claimNextFileIngestJob,

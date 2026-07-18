@@ -73,7 +73,7 @@ describe('[COMP:api/connector-registry] loadConnectorRegistry', () => {
     expect(registry.length).toBe(OFFICIAL_CONNECTORS.length)
   })
 
-  it('falls back to official-only and stays quiet when sidanclaw-tools is absent (ENOENT)', () => {
+  it('falls back to official-only and stays quiet when brian-tools is absent (ENOENT)', () => {
     const warn = vi.spyOn(console, 'warn')
     mockReaddir.mockImplementationOnce(() => {
       const err = new Error('no such file') as NodeJS.ErrnoException

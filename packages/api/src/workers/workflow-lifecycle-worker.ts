@@ -12,7 +12,7 @@
  * guard, never throws past the catch) with the `skill-review-worker`'s
  * enablement double-gate: constructed with `enabled` from
  * `WORKFLOW_LIFECYCLE_ENABLED` (default false — ships dark) and started
- * only where `runWorkers` is true (the `sidanclaw-api-workers` service).
+ * only where `runWorkers` is true (the `brian-api-workers` service).
  *
  * Spec: docs/architecture/features/workflow-lifecycle.md.
  * Component tag: [COMP:workers/workflow-lifecycle-worker]

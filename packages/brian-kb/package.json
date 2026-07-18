@@ -1,5 +1,5 @@
 {
-  "name": "@use-brian/sidanclaw-kb",
+  "name": "@use-brian/brian-kb",
   "version": "0.1.0",
   "description": "Parser, wikilink resolver, and lint checks for Use Brian knowledge bases. Shared between the API sync worker and the public CLI.",
   "type": "module",
@@ -32,7 +32,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/use-brian/use-brian",
-    "directory": "packages/sidanclaw-kb"
+    "directory": "packages/brian-kb"
   },
   "devDependencies": {
     "@types/node": "^20.19.39",

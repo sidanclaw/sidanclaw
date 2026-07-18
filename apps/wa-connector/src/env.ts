@@ -4,7 +4,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(8080),
   WA_CONNECTOR_SECRET: z.string().min(1, 'WA_CONNECTOR_SECRET is required'),
   USEBRIAN_API_URL: z.string().url('USEBRIAN_API_URL must be a valid URL'),
-  GCS_BUCKET_NAME: z.string().default('sidanclaw-wa-creds'),
+  GCS_BUCKET_NAME: z.string().default('brian-wa-creds'),
   // BYON ingest channels persist Baileys creds to Postgres (table
   // `wa_auth_state`) instead of GCS. Optional: when unset, the Postgres pool is
   // null and a BYON connect 503s. Not `.url()` — Cloud SQL uses a socket form.
