@@ -1,6 +1,6 @@
 /**
  * discord-connector — holds Discord Gateway WebSocket connections and relays
- * inbound MESSAGE_CREATE events to sidanclaw-api over HTTP.
+ * inbound MESSAGE_CREATE events to brian-api over HTTP.
  *
  * Inbound-only: outbound sends go API → Discord REST directly (Discord REST is
  * plain HTTPS), so this service has no /send route — only lifecycle control

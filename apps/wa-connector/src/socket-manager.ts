@@ -325,7 +325,7 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
     }
   }
 
-  // ── Forward inbound to sidanclaw-api ──
+  // ── Forward inbound to brian-api ──
 
   async function forwardToApi(message: WhatsAppIncomingMessage) {
     try {

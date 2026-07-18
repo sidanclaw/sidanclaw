@@ -1,6 +1,6 @@
 // [COMP:files/file-ingest-worker] — the file-ingest drain loop
 // (large-content-artifacts §Phase 2.2), started in the open boot beside the
-// embedding worker and registered on sidanclaw-api-workers.
+// embedding worker and registered on brian-api-workers.
 //
 // Same start()/stop() + re-entry-guard contract as the recording-process worker.
 // Each tick drains the file_ingest_jobs queue back-to-back at concurrency 1

@@ -4446,7 +4446,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Pipeline B (when the platform passed an episode-ingestor port; OSS
   // without one runs store-only) → stamp source_episode_id + indexing status.
   // Same single-service model as every worker: runs only where runWorkers is
-  // set (prod: sidanclaw-api-workers).
+  // set (prod: brian-api-workers).
   const fileIngestWorker = filesApi
     ? createFileIngestWorker({
         claim: claimNextFileIngestJob,
