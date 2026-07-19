@@ -24,7 +24,7 @@ import { isLocalDevEnv } from './dev-auth.js'
  *      cloud (`K_SERVICE`/`NODE_ENV=production`) or in the hosted edition.
  *
  * The owner's display name is local config, not user-editable server state: the
- * launcher prompts once, persists it to `~/.sidanclaw/config.json`, and passes
+ * launcher prompts once, persists it to `~/.usebrian/config.json`, and passes
  * it here via `USEBRIAN_OWNER_NAME`. `findOrCreateUser` re-applies it every
  * boot (idempotent against stable config), so the oss account UI shows it
  * read-only. Spec: docs/architecture/platform/auth.md → "Local owner session".
@@ -53,7 +53,7 @@ const OWNER_DEFAULT_NAME = 'You'
 
 export type LocalSessionDeps = {
   jwtSecret: string | undefined
-  /** From `USEBRIAN_OWNER_NAME` (launcher → ~/.sidanclaw/config.json). */
+  /** From `USEBRIAN_OWNER_NAME` (launcher → ~/.usebrian/config.json). */
   ownerName?: string
   /** Injectable for unit tests; defaults to the real DB-backed upsert. */
   createUser?: typeof findOrCreateUser

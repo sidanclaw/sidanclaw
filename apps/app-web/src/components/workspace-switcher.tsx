@@ -38,6 +38,7 @@ import { useRouter } from "next/navigation";
 import { docPagePath } from "@/lib/doc-page-url";
 import { routeProgress } from "@/lib/route-progress";
 import { useT } from "@/lib/i18n/client";
+import { desktopBridge } from "@/lib/desktop-auth-source";
 import { format } from "@/lib/i18n/format";
 import { authFetch } from "@/lib/auth-fetch";
 import { primaryAuthUrl, webAppUrl } from "@/lib/primary-auth";
@@ -54,7 +55,11 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { useWorkspaceContext } from "@/lib/workspace-context";
+import {
+  useWorkspaceContext,
+  WORKSPACE_RENAMED_EVENT,
+  type WorkspaceRenamedDetail,
+} from "@/lib/workspace-context";
 import {
   SettingsModal,
   type SettingsSection,
@@ -160,6 +165,26 @@ export function WorkspaceSwitcher() {
     return () => window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
   }, []);
 
+  // Keep the lazily-cached workspace list in sync with a settings-modal
+  // rename (the trigger label itself reads `ctx.name`, which the provider
+  // updates from the same event) — without this the popover rows show the
+  // old name until a full reload.
+  useEffect(() => {
+    function onRenamed(e: Event) {
+      const detail = (e as CustomEvent<WorkspaceRenamedDetail>).detail;
+      if (!detail?.workspaceId || !detail.name) return;
+      setWorkspaces((prev) =>
+        prev
+          ? prev.map((w) =>
+              w.id === detail.workspaceId ? { ...w, name: detail.name } : w,
+            )
+          : prev,
+      );
+    }
+    window.addEventListener(WORKSPACE_RENAMED_EVENT, onRenamed);
+    return () => window.removeEventListener(WORKSPACE_RENAMED_EVENT, onRenamed);
+  }, []);
+
   // Re-read the account directory each time the popover opens so it reflects
   // accounts added/switched in another tab (or on the web app) since the last
   // render. Also clears any transient switch state.
@@ -210,7 +235,7 @@ export function WorkspaceSwitcher() {
     // outcome: on success the shell reloads the window; on failure we surface the
     // message inline and clear the spinner. Same shell-takes-precedence pattern
     // as `desktopSignOut()`.
-    const switchViaShell = window.sidanclawDesktop?.switchAccount;
+    const switchViaShell = desktopBridge()?.switchAccount;
     if (typeof switchViaShell === "function") {
       void switchViaShell(accountId).then((res) => {
         if (!res.ok) {
@@ -268,7 +293,7 @@ export function WorkspaceSwitcher() {
   function handleAddAccount() {
     setOpen(false);
     const addViaShell =
-      typeof window !== "undefined" ? window.sidanclawDesktop?.addAccount : undefined;
+      desktopBridge()?.addAccount;
     if (typeof addViaShell === "function") {
       addViaShell();
       return;

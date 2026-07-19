@@ -47,13 +47,13 @@ record. You stay on the decisions. It handles the rest.
 ```bash
 git clone https://github.com/use-brian/use-brian.git
 cd use-brian
-export GEMINI_API_KEY=...   # or let the launcher prompt you; persisted under ~/.sidanclaw/
+export GEMINI_API_KEY=...   # or let the launcher prompt you; persisted under ~/.usebrian/
 pnpm install
 pnpm dev                    # api + canvas + web + Discord/WhatsApp bridges; opens your browser
 ```
 
 That is it. There is no step three. The store defaults to an embedded PGLite
-database under `~/.sidanclaw/`; point `DATABASE_URL` at a local Postgres if you
+database under `~/.usebrian/`; point `DATABASE_URL` at a local Postgres if you
 prefer a container. Self-host overrides live in [`.env.example`](./.env.example).
 
 ### Your data stays yours
@@ -105,7 +105,7 @@ event without you. You set the policy per tool in the app.
 
 That one Gemini key is the floor, not the ceiling. Each key below is optional, and
 each is a service you choose to talk to, so nothing turns on by itself. Drop them
-into `.env` or `~/.sidanclaw/`.
+into `.env` or `~/.usebrian/`.
 
 | Capability | Key(s) to set | What you get |
 |---|---|---|
@@ -119,7 +119,7 @@ into `.env` or `~/.sidanclaw/`.
 | Fathom connector | `FATHOM_CLIENT_ID` / `FATHOM_CLIENT_SECRET` | Fathom via your own OAuth app |
 | GitHub connector | Personal Access Token (entered in the UI) | GitHub, no env key needed |
 
-Connector client id / secret can also live in `~/.sidanclaw/connectors.config.json`.
+Connector client id / secret can also live in `~/.usebrian/connectors.config.json`.
 Every key is documented in [`.env.example`](./.env.example).
 
 ## What's in the box

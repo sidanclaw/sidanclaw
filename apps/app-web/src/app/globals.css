@@ -1910,7 +1910,7 @@ html[data-vt-back="true"]::view-transition-new(root) {
    The shell loads app-web inside a frameless `titleBarStyle: "hiddenInset"`
    BrowserWindow, so the macOS traffic-light buttons float over the top-left of
    our own content and no part of the window is draggable. `is-canvas-desktop`
-   is added to <html> when `window.sidanclawDesktop` exists (doc-shell.tsx
+   is added to <html> when `window.usebrianDesktop` (or legacy `window.sidanclawDesktop`) exists (doc-shell.tsx
    effect, plus the layout.tsx before-paint script for prod no-flash), so none
    of this touches the browser build. Two things only the shell needs:
 

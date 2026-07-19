@@ -38,7 +38,7 @@
  * `client_secret` of an `oauth`-typed blob.
  *
  * Google / Notion / Fathom additionally need their OAuth *app* credentials: the
- * server-side secret via `~/.sidanclaw/connectors.config.json` (or `*_CLIENT_*`
+ * server-side secret via `~/.usebrian/connectors.config.json` (or `*_CLIENT_*`
  * env) for the callback's token exchange, and the public client id via
  * `NEXT_PUBLIC_*_CLIENT_ID` for app-web's client-side authorize redirect. GitHub
  * is PAT-only and needs neither.
