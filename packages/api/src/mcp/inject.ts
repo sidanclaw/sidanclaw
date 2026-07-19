@@ -323,7 +323,7 @@ export async function injectMcpTools(params: {
   /**
    * The acting user's resolved identity for this turn (server-side, from the
    * authenticated session — never model output). When set, connectors that
-   * opted in (`config.sendActorIdentity`) receive `X-Sidanclaw-Actor-*` headers
+   * opted in (`config.sendActorIdentity`) receive `X-UseBrian-Actor-*` (+ legacy `X-Sidanclaw-Actor-*`) headers
    * at highest precedence. The call site resolves it cheaply (web = email;
    * channels = the webhook's native id + email). See
    * `docs/architecture/engine/tool-hooks.md`.
@@ -427,9 +427,9 @@ export async function injectMcpTools(params: {
     updatedAt: Date | null
     /** Static operational headers from `config.preflightHeaders` (validated at merge). */
     preflightHeaders: Record<string, string>
-    /** Opt-in: send the acting user's `X-Sidanclaw-Actor-*` identity to this connector. */
+    /** Opt-in: send the acting user's `X-UseBrian-Actor-*` identity to this connector. */
     sendActorIdentity: boolean
-    /** Opt-in: send the acting user's `X-Sidanclaw-Media-Token` capability to this connector. */
+    /** Opt-in: send the acting user's `X-UseBrian-Media-Token` capability to this connector. */
     sendMediaToken: boolean
   }> = connectors
     .filter((c) => c.connected && c.url)
@@ -521,7 +521,13 @@ export async function injectMcpTools(params: {
   // capability (possession fetches the user's latest recording), so it only
   // attaches to connectors the user explicitly granted media access.
   const mediaTokenHeader =
-    actorIdentity?.mediaToken ? { 'X-Sidanclaw-Media-Token': actorIdentity.mediaToken } : null
+    actorIdentity?.mediaToken
+      ? {
+          // Dual-emit during the rebrand transition (canonical + legacy).
+          'X-UseBrian-Media-Token': actorIdentity.mediaToken,
+          'X-Sidanclaw-Media-Token': actorIdentity.mediaToken,
+        }
+      : null
   active.forEach((c, i) => {
     // Layer the connector's static preflight headers (config) over its auth
     // headers (credentials) — preflight wins on a name clash, both validated

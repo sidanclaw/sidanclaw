@@ -7,7 +7,7 @@
  * app loads from a `file://` / `app://` origin where those cookies don't apply,
  * so it must hold the JWT pair itself — encrypted at rest via the OS keychain
  * (`safeStorage`) and handed to the renderer through the preload token bridge
- * (`window.sidanclawDesktop.getAccessToken` …), which activates the dormant
+ * (`window.usebrianDesktop.getAccessToken` …), which activates the dormant
  * `desktopAuthSource` in app-web (`lib/desktop-auth-source.ts`).
  *
  * Everything here is **pure / IO-injectable** so it unit-tests with no Electron,

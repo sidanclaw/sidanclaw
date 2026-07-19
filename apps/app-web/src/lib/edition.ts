@@ -12,15 +12,15 @@
  * OSS launcher (`scripts/launch.mjs`) sets `NEXT_PUBLIC_USEBRIAN_EDITION=oss`
  * to switch app-web into single-player mode.
  */
-type SidanclawEdition = "oss" | "hosted";
+type UsebrianEdition = "oss" | "hosted";
 
-function sidanclawEdition(): SidanclawEdition {
+function usebrianEdition(): UsebrianEdition {
   return process.env.NEXT_PUBLIC_USEBRIAN_EDITION === "oss" ? "oss" : "hosted";
 }
 
 /** True in the open single-player edition (no billing, no teammates). */
 export function isOssEdition(): boolean {
-  return sidanclawEdition() === "oss";
+  return usebrianEdition() === "oss";
 }
 
 /** True in the hosted multi-tenant edition (the default). */

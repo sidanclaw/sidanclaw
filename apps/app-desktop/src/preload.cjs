@@ -68,4 +68,10 @@ if (process.argv.includes("--usebrian-bundled")) {
   };
 }
 
+// Dual-expose during the rebrand transition: `usebrianDesktop` is canonical;
+// `sidanclawDesktop` keeps pre-rebrand app-web builds (which read only the
+// legacy name) working against this shell. app-web reads via its
+// `desktopBridge()` accessor (canonical first). Drop the legacy expose only
+// when no deployed app-web still reads it.
+contextBridge.exposeInMainWorld("usebrianDesktop", bridge);
 contextBridge.exposeInMainWorld("sidanclawDesktop", bridge);

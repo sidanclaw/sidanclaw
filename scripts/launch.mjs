@@ -4,7 +4,7 @@
  *
  * `pnpm start` — the whole single-player product on ONE GEMINI_API_KEY:
  *   1. load/prompt GEMINI_API_KEY + generate JWT_SECRET, persisted under
- *      ~/.sidanclaw/config.json (nothing else is required).
+ *      ~/.usebrian/config.json (nothing else is required; a legacy ~/.sidanclaw/ dir is auto-migrated).
  *   2. build the workspace packages (turbo-cached; the apps run from source via
  *      tsx / next dev).
  *   3. start the embedded PGLite brain server (pg-wire socket on :54329) and wait
@@ -21,7 +21,7 @@
  */
 import { spawn } from 'node:child_process'
 import { connect } from 'node:net'
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
 import { homedir, platform, arch, userInfo } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,7 +30,21 @@ import { createRequire } from 'node:module'
 import { createInterface } from 'node:readline/promises'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const CONFIG_DIR = join(homedir(), '.sidanclaw')
+const CONFIG_DIR = join(homedir(), '.usebrian')
+const LEGACY_CONFIG_DIR = join(homedir(), '.sidanclaw')
+// Rebrand auto-migration: pre-rebrand installs keep their config, brain data,
+// and connector files under ~/.sidanclaw/. Move the whole dir to ~/.usebrian/
+// once (atomic same-filesystem rename; nothing else is running this early in
+// boot). If BOTH exist, ~/.usebrian wins and the legacy dir is left untouched
+// for the user to inspect — merging blind could clobber a newer config.
+try {
+  if (!existsSync(CONFIG_DIR) && existsSync(LEGACY_CONFIG_DIR)) {
+    renameSync(LEGACY_CONFIG_DIR, CONFIG_DIR)
+    console.log(`[launch] migrated ${LEGACY_CONFIG_DIR} -> ${CONFIG_DIR}`)
+  }
+} catch (err) {
+  console.warn(`[launch] could not migrate ${LEGACY_CONFIG_DIR} -> ${CONFIG_DIR}:`, err?.message ?? err)
+}
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const BRAIN_DIR = join(CONFIG_DIR, 'brain')
 

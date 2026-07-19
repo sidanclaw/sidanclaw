@@ -748,17 +748,20 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   }, []);
 
   // Desktop shell chrome: tag <html> when running inside the Electron desktop
-  // app (apps/app-desktop), whose preload exposes `window.sidanclawDesktop`.
+  // app (apps/app-desktop), whose preload exposes `window.usebrianDesktop` (+ legacy `window.sidanclawDesktop`).
   // The `is-canvas-desktop` class gates the desktop-only chrome in globals.css —
   // a draggable title-bar strip that clears the macOS traffic lights and
   // non-selectable app chrome. layout.tsx also stamps this before paint (for the
   // production no-flash path); doing it here too makes it robust to that script
   // being absent (e.g. a stale dev root layout) and survives hydration. No-op in
-  // a normal browser, where `window.sidanclawDesktop` is undefined.
+  // a normal browser, where neither desktop bridge global is defined.
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const desktop = (window as unknown as { sidanclawDesktop?: { platform?: string } })
-      .sidanclawDesktop;
+    const w = window as unknown as {
+      usebrianDesktop?: { platform?: string };
+      sidanclawDesktop?: { platform?: string };
+    };
+    const desktop = w.usebrianDesktop ?? w.sidanclawDesktop;
     if (!desktop) return;
     document.documentElement.classList.add("is-canvas-desktop");
     // Windows keeps a standard OS frame (no macOS traffic lights), so zero the

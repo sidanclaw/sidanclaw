@@ -65,8 +65,22 @@ interface DesktopBridge {
 
 declare global {
   interface Window {
+    /** Canonical bridge name (desktop shells ≥ the 2026-07 rebrand dual-expose). */
+    usebrianDesktop?: DesktopBridge;
+    /** Legacy bridge name — the only one pre-rebrand shells expose. */
     sidanclawDesktop?: DesktopBridge;
   }
+}
+
+/**
+ * Resolve the desktop preload bridge under either name. Old shells in the
+ * wild expose only `sidanclawDesktop`; rebranded shells expose both. Every
+ * app-web read goes through this accessor; drop the legacy fallback only
+ * once pre-rebrand desktop installs are gone.
+ */
+export function desktopBridge(): DesktopBridge | undefined {
+  if (typeof window === "undefined") return undefined;
+  return window.usebrianDesktop ?? window.sidanclawDesktop;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
@@ -79,7 +93,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 export function isDesktopAuth(): boolean {
   return (
     typeof window !== "undefined" &&
-    typeof window.sidanclawDesktop?.getAccessToken === "function"
+    typeof desktopBridge()?.getAccessToken === "function"
   );
 }
 
@@ -101,7 +115,7 @@ export function isDesktopAuth(): boolean {
  */
 export function desktopSignOut(): boolean {
   const signOut =
-    typeof window !== "undefined" ? window.sidanclawDesktop?.signOut : undefined;
+    desktopBridge()?.signOut;
   if (typeof signOut !== "function") return false;
   signOut();
   return true;
@@ -156,11 +170,11 @@ export interface AuthSource {
  */
 export const desktopAuthSource: AuthSource = {
   getAccessToken() {
-    return window.sidanclawDesktop?.getAccessToken?.() ?? null;
+    return desktopBridge()?.getAccessToken?.() ?? null;
   },
 
   async refresh(): Promise<RefreshOutcome> {
-    const bridge = window.sidanclawDesktop;
+    const bridge = desktopBridge();
     const refreshToken = bridge?.getRefreshToken?.();
     if (!refreshToken) {
       bridge?.clear?.();
@@ -197,6 +211,6 @@ export const desktopAuthSource: AuthSource = {
   },
 
   redirectToLogin() {
-    window.sidanclawDesktop?.signIn?.();
+    desktopBridge()?.signIn?.();
   },
 };

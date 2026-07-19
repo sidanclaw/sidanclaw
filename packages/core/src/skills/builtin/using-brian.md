@@ -1,5 +1,5 @@
 ---
-name: using-sidanclaw
+name: using-brian
 description: Ground-truth guide to what Use Brian can and cannot do (workflows, triggers, brain, pages, channels, connectors). ALWAYS activate before answering whether Use Brian supports something.
 license: MIT
 compatibility: Designed for Use Brian

@@ -69,14 +69,14 @@ export const metadata: Metadata = {
 };
 
 // Tag <html> before first paint when we're running inside the Electron desktop
-// shell (apps/app-desktop), whose preload exposes `window.sidanclawDesktop`
+// shell (apps/app-desktop), whose preload exposes `window.usebrianDesktop` (+ legacy `window.sidanclawDesktop`)
 // BEFORE any page script runs. The `is-canvas-desktop` class gates desktop-only
 // chrome in globals.css (a draggable title-bar strip that clears the macOS
 // traffic lights + non-selectable app chrome) and is a no-op in the browser.
 // On Windows (`platform === "win32"`) the window keeps a standard OS frame with
 // no traffic lights, so `is-canvas-desktop-win` zeroes the title-bar inset.
 // Same run-before-paint, no-flash shape as THEME_PREPAINT_SCRIPT; no user input.
-const DESKTOP_SHELL_PREPAINT_SCRIPT = `(()=>{try{var d=window.sidanclawDesktop;if(!d)return;var c=document.documentElement.classList;c.add("is-canvas-desktop");if(d.platform==="win32")c.add("is-canvas-desktop-win");}catch(e){}})();`;
+const DESKTOP_SHELL_PREPAINT_SCRIPT = `(()=>{try{var d=window.usebrianDesktop||window.sidanclawDesktop;if(!d)return;var c=document.documentElement.classList;c.add("is-canvas-desktop");if(d.platform==="win32")c.add("is-canvas-desktop-win");}catch(e){}})();`;
 
 // iOS Safari zooms the page when a form control with a computed font-size
 // under 16px receives focus, and the zoom persists after blur — the app then
