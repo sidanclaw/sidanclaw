@@ -164,6 +164,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     status: 'active',
     chatTierKey: 'standard',
     recordAlias: true,
+    fallbackAlias: 'claude-haiku-4-5', // same class (standard-pro), L2
     rates: FLASH3_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,
@@ -181,6 +182,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // 'pro' = bare tier key recorded defensively; 'gemini-3-flash-preview' =
     // the resolved provider id actually recorded; 'gemini-flash' = legacy alias.
     idAliases: ['pro', 'gemini-3-flash-preview', 'gemini-flash'],
+    fallbackAlias: 'claude-haiku-4-5', // same class (standard-pro), L2
     rates: FLASH3_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,

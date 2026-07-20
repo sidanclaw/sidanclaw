@@ -31,7 +31,8 @@ import type http from 'node:http'
 import express, { type Express } from 'express'
 import { createTelegramApi } from '@use-brian/channels'
 import {
-  createGeminiProvider, createAnthropicProvider, wrapProvider, wrapFallback,
+  createGeminiProvider, createAnthropicProvider, createOpenAICompatProvider, createRoutingProvider,
+  DASHSCOPE_INTL_BASE_URL, DASHSCOPE_INTL_LABEL, wrapProvider,
   createBaseTools, LAYER_1_SYSTEM_PROMPT,
   createWorkerManager, createWorkerTools,
   createSchedulingTools, createPollWorker,
@@ -443,6 +444,11 @@ export interface OpenApiEnv {
   // Optional outage-only Claude fallback.
   FALLBACK_PROVIDER_ENABLED?: boolean
   ANTHROPIC_API_KEY?: string
+  // Optional OpenAI-compatible endpoint key (DashScope international — the
+  // wave-1 Qwen/DeepSeek models). Absent ⇒ those models are absent from
+  // routing and every menu (model-registry plan L12); the base URL is a
+  // constant in the provider module, never an env var.
+  DASHSCOPE_API_KEY?: string
   // Optional connector / channel config (closed-secret gated; open passes none).
   GOOGLE_CLIENT_ID?: string
   CHANNEL_CREDENTIAL_KEY?: string
@@ -1039,32 +1045,48 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const analytics = new AnalyticsLogger(analyticsStore)
 
   // ── LLM provider stack ──
-  const geminiProvider = wrapProvider(createGeminiProvider(env.GEMINI_API_KEY))
-  const provider: LLMProvider = (() => {
-    if (!env.FALLBACK_PROVIDER_ENABLED) return geminiProvider
-    if (!env.ANTHROPIC_API_KEY) {
-      console.warn('[provider] FALLBACK_PROVIDER_ENABLED=true but ANTHROPIC_API_KEY is empty — running bare Gemini.')
-      return geminiProvider
+  //
+  // Registry-routed (docs/architecture/platform/model-registry.md): one
+  // wrapped instance per configured provider key; the routing provider
+  // dispatches per request on the model's registry row. A missing key means
+  // that provider's models are simply absent (plan L12) — the ONLY env
+  // gates here are the provider API keys (+ the pre-existing
+  // FALLBACK_PROVIDER_ENABLED toggle for the Claude outage fallback).
+  // Same-class fallback (registry `fallbackAlias`, plan L2) replaces the
+  // old whole-provider wrapFallback: standard-pro Gemini models fall back
+  // to Claude Haiku; Max/Research/background rows have no same-class
+  // fallback and now surface outages instead of silently swapping class.
+  const providerInstances: Record<string, LLMProvider> = {
+    gemini: wrapProvider(createGeminiProvider(env.GEMINI_API_KEY)),
+  }
+  if (env.FALLBACK_PROVIDER_ENABLED) {
+    if (env.ANTHROPIC_API_KEY) {
+      providerInstances['anthropic'] = wrapProvider(createAnthropicProvider({ apiKey: env.ANTHROPIC_API_KEY }))
+    } else {
+      console.warn('[provider] FALLBACK_PROVIDER_ENABLED=true but ANTHROPIC_API_KEY is empty — running without the Claude fallback.')
     }
-    const anthropicProvider = wrapProvider(createAnthropicProvider({ apiKey: env.ANTHROPIC_API_KEY }))
-    return wrapFallback(geminiProvider, anthropicProvider, {
-      fallbackModel: 'claude-haiku-4-5',
-      analytics: {
-        onFallback({ primaryModel, fallbackModel, errorKind, errorStatus }) {
-          analytics.logEvent({
-            userId: 'system',
-            eventName: 'llm_provider_fallback',
-            metadata: {
-              primary_model: sanitizeAnalytics(primaryModel),
-              fallback_model: sanitizeAnalytics(fallbackModel),
-              error_kind: sanitizeAnalytics(errorKind),
-              error_status: errorStatus ?? undefined,
-            },
-          })
-        },
+  }
+  if (env.DASHSCOPE_API_KEY) {
+    providerInstances[`openai-compat:${DASHSCOPE_INTL_LABEL}`] = wrapProvider(
+      createOpenAICompatProvider({ apiKey: env.DASHSCOPE_API_KEY, baseURL: DASHSCOPE_INTL_BASE_URL, label: DASHSCOPE_INTL_LABEL }),
+    )
+  }
+  const provider: LLMProvider = createRoutingProvider(providerInstances, {
+    analytics: {
+      onFallback({ primaryModel, fallbackModel, errorKind, errorStatus }) {
+        analytics.logEvent({
+          userId: 'system',
+          eventName: 'llm_provider_fallback',
+          metadata: {
+            primary_model: sanitizeAnalytics(primaryModel),
+            fallback_model: sanitizeAnalytics(fallbackModel),
+            error_kind: sanitizeAnalytics(errorKind),
+            error_status: errorStatus ?? undefined,
+          },
+        })
       },
-    })
-  })()
+    },
+  })
 
   const jobStore = createDbJobStore()
   const sessionResumeStore = createDbSessionResumeStore()
