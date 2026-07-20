@@ -1,4 +1,28 @@
 export type { MediaAttachment } from './types.js'
+// The transcript wire format lives in @use-brian/shared, not here: app-web must
+// be able to PARSE what the server WROTE (to make [H:MM:SS] citations
+// clickable), and app-web deliberately does not depend on core — core is the
+// server engine. `shared` is the client-safe surface both sides can hold.
+// Re-exported so server consumers keep importing it from core.
+export {
+  formatStamp,
+  parseStamp,
+  scanStamps,
+  formatTranscriptLine,
+  formatTranscript,
+  STAMP_RE,
+  UNKNOWN_SPEAKER,
+  type StampMatch,
+  type TranscriptLineSource,
+} from '@use-brian/shared'
+// Citations are the same story: the writer resolves them, the browser reads them.
+export {
+  buildCitationIndex,
+  extractCitations,
+  type CitationIndex,
+  type CitationSegment,
+  type FieldCitation,
+} from '@use-brian/shared'
 export { transcribeAudio, type TranscribeOptions, type TranscribeResult } from './transcribe.js'
 export { transcribeFirstAudio, type PreflightOptions } from './preflight.js'
 export {

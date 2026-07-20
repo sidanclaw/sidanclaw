@@ -118,3 +118,143 @@ export async function processRecording(
   if (!res.ok) throw await asError(res, "Transcription failed");
   return res.json();
 }
+
+// ── The read surface ────────────────────────────────────────────────
+//
+// Until these routes existed the recordings router was write-only: a recording
+// could be uploaded and transcribed but never listed, and the audio was never
+// handed back to the browser at all — a player had no possible `src`.
+
+export type RecordingKind = "memo" | "meeting";
+export type RecordingStatus =
+  | "awaiting_upload"
+  | "queued"
+  | "processing"
+  | "processed"
+  | "failed";
+
+export type RecordingSummary = {
+  recordingId: string;
+  title: string | null;
+  fileName: string | null;
+  kind: RecordingKind;
+  status: RecordingStatus;
+  mime: string;
+  durationMs: number | null;
+  bytes: number | null;
+  occurredAt: string;
+  truncated: boolean;
+  lastError: string | null;
+  hasTranscript: boolean;
+  transcriptFileId: string | null;
+  participants: Array<{ speaker: string; name?: string; contactId?: string; email?: string }>;
+};
+
+export type TranscriptSegment = {
+  segment_index: number;
+  start_ms: number;
+  end_ms: number;
+  speaker: string | null;
+  segment_text: string;
+};
+
+/**
+ * The workspace's recordings, newest first — the panel's read.
+ *
+ * Server-filtered rather than fetch-all-and-filter-in-React: `status` and `q`
+ * ride the store's indexed predicates, and a workspace with hundreds of
+ * hour-long meetings should not ship them all to the browser to hide most.
+ */
+export async function listRecordings(
+  workspaceId: string,
+  filters: { kind?: RecordingKind; status?: RecordingStatus; q?: string; limit?: number } = {},
+): Promise<RecordingSummary[]> {
+  const params = new URLSearchParams({ workspaceId });
+  if (filters.kind) params.set("kind", filters.kind);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.q?.trim()) params.set("q", filters.q.trim());
+  if (filters.limit) params.set("limit", String(filters.limit));
+  const res = await authFetch(`${API_URL}/api/recordings?${params.toString()}`);
+  if (!res.ok) throw await asError(res, "Could not load recordings");
+  const body = (await res.json()) as { recordings: RecordingSummary[] };
+  return body.recordings;
+}
+
+export async function getRecording(recordingId: string): Promise<RecordingSummary> {
+  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}`);
+  if (!res.ok) throw await asError(res, "Could not load the recording");
+  return (await res.json()) as RecordingSummary;
+}
+
+/**
+ * Mint a playback URL. It points straight at GCS (which honors Range, so the
+ * browser seeks against storage rather than through our API) and is a
+ * time-limited bearer token — `expiresAt` is why the player refreshes
+ * proactively instead of discovering expiry as a playback failure.
+ */
+export async function getRecordingMediaUrl(
+  recordingId: string,
+): Promise<{ url: string; expiresAt: string; mime: string; durationMs: number | null }> {
+  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/media-url`);
+  if (!res.ok) throw await asError(res, "Could not load the audio");
+  return (await res.json()) as {
+    url: string;
+    expiresAt: string;
+    mime: string;
+    durationMs: number | null;
+  };
+}
+
+/** One page of transcript. The server bounds the window regardless of `toIndex`. */
+export async function getRecordingTranscript(
+  recordingId: string,
+  fromIndex = 0,
+): Promise<{ segments: TranscriptSegment[]; hasMore: boolean; toIndex: number }> {
+  const res = await authFetch(
+    `${API_URL}/api/recordings/${recordingId}/transcript?fromIndex=${fromIndex}`,
+  );
+  if (!res.ok) throw await asError(res, "Could not load the transcript");
+  return (await res.json()) as {
+    segments: TranscriptSegment[];
+    hasMore: boolean;
+    toIndex: number;
+  };
+}
+
+/** Task lifecycle status, mirroring the brain's `kind:'tasks'` rows. */
+type RecordingTaskStatus =
+  | "todo"
+  | "in_progress"
+  | "blocked"
+  | "done"
+  | "archived";
+
+/**
+ * An action item captured from a recording. `sourceStartMs` is the moment it
+ * was committed to (migration 334) - the rail turns it into a seek link.
+ * `assigneeId` is a `workspace_members` row id, not a user id, so the caller
+ * resolves it against the roster.
+ */
+export type RecordingTask = {
+  id: string;
+  title: string;
+  status: RecordingTaskStatus;
+  assigneeId: string | null;
+  sourceStartMs: number | null;
+  /**
+   * False until a human confirms the model heard this right. Synthesis writes
+   * every captured task unverified, and the brain inbox excludes extracted
+   * rows, so this rail is the only place they are ever reviewed.
+   */
+  verified: boolean;
+};
+
+/** The action items captured from one recording, oldest moment first. */
+export async function listRecordingTasks(
+  recordingId: string,
+): Promise<RecordingTask[]> {
+  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/tasks`);
+  if (!res.ok) throw await asError(res, "Could not load the action items");
+  const body = (await res.json()) as { tasks: RecordingTask[] };
+  return body.tasks;
+}

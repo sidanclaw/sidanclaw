@@ -465,6 +465,21 @@ export type ViewMetadata = {
    */
   nameOrigin: NameOrigin;
   description: string | null;
+  /**
+   * Stable identity for a machine-authored page, and the ONLY link from a page
+   * back to what produced it. A recording brief carries
+   * `recording-synthesis:<recordingId>` — which is how the doc shell knows to
+   * mount a player and make this page's `[H:MM:SS]` citations seekable. Null
+   * for a hand-authored page.
+   */
+  anchorKey: string | null;
+  /**
+   * A recording MANUALLY linked to this page (migration 339). The doc shell
+   * resolves the `anchorKey` recording first and falls back to this, so a
+   * hand-authored page can surface an existing recording's player, transcript,
+   * and action items. Null when unlinked.
+   */
+  linkedRecordingId: string | null;
   entity: ViewEntity;
   viewType: ViewType;
   state: ViewState;
@@ -985,6 +1000,25 @@ export async function setViewFullWidth(
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ fullWidth }),
+  });
+  return json<ViewMetadata>(res);
+}
+
+/**
+ * Link an existing recording to this page, or pass `null` to unlink (migration
+ * 339). Maps to `PATCH /saved-views/:id` with `{ linkedRecordingId }`. The
+ * server rejects a recording outside the page's workspace (or one the caller
+ * cannot see). Returns the updated metadata, so the caller reads back the
+ * committed link rather than assuming its optimistic value stuck.
+ */
+export async function setPageLinkedRecording(
+  viewId: string,
+  recordingId: string | null,
+): Promise<ViewMetadata> {
+  const res = await authFetch(`${API_URL}/api/saved-views/${viewId}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ linkedRecordingId: recordingId }),
   });
   return json<ViewMetadata>(res);
 }

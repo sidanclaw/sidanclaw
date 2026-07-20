@@ -45,6 +45,7 @@ import { shouldReconnectToTurn } from "@/components/doc/comment-reconnect";
 import { CommentQuoteReply } from "@/components/doc/comment-quote-reply";
 import { composeQuotedBody, quoteForRow } from "@/components/doc/comment-quote";
 import { useFileAttachments } from "@/lib/use-file-attachments";
+import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
 import { useFileDrop } from "@/lib/use-file-drop";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -200,6 +201,7 @@ export function CommentThreadBody({
   const t = useT().comments;
   const tAttach = useT().attachments;
   const tChat = useT().chat;
+  const tRec = useT().recordings;
   const composerRef = React.useRef<HTMLTextAreaElement>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
   // Whether the thread is parked at its newest message. While pinned, fresh
@@ -210,7 +212,30 @@ export function CommentThreadBody({
   // or sends a reply.
   const pinnedRef = React.useRef(scrollToEnd ?? false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const att = useFileAttachments(() => thread.sessionId);
+  // Recordings attached to THIS reply, queued but not yet sent. A
+  // recording-sized audio/video dropped in chat routes to the recording
+  // pipeline (its own cost confirm + async transcribe) rather than the inline
+  // file_cache path; the turn references it here so the assistant acknowledges
+  // + links instead of pretending to read it. See recordings.md → "Chat entry".
+  const rec = useRecordingUpload(workspaceId, assistantId);
+  const [pendingRecordings, setPendingRecordings] = React.useState<
+    { recordingId: string; title: string }[]
+  >([]);
+  const att = useFileAttachments(() => thread.sessionId, {
+    onRouteMedia: (files) => {
+      void (async () => {
+        for (const file of files) {
+          const res = await rec.run(file);
+          if (res) {
+            setPendingRecordings((prev) => [
+              ...prev,
+              { recordingId: res.recordingId, title: file.name },
+            ]);
+          }
+        }
+      })();
+    },
+  });
   const drop = useFileDrop((files) => void att.upload(files));
   // Model tier + research toggle for the reply turn — shared with the floating
   // chat and the page-comments band via <ComposerControls>.
@@ -470,9 +495,14 @@ export function CommentThreadBody({
       !override && quotedReply ? composeQuotedBody(quotedReply, body) : body;
     const fileIds = override ? override.fileIds : att.fileIds();
     const hasFiles = fileIds.length > 0;
+    // Recordings queued for this reply (not on the seed/override path — those
+    // carry no composer state). A recording-only reply is valid: the assistant
+    // acknowledges and links even with no typed body.
+    const attachedRecordingIds = override ? [] : pendingRecordings.map((r) => r.recordingId);
+    const hasRecordings = attachedRecordingIds.length > 0;
     const model = override ? override.model : controls.model;
     const researchMode = override ? override.researchMode : controls.researchMode;
-    if ((!body && !hasFiles) || busy || att.uploading) return;
+    if ((!body && !hasFiles && !hasRecordings) || busy || att.uploading) return;
     // A reconnected turn is streaming into the bubble (a refresh mid-reply) —
     // block a manual send so the composer can't double-drive it. The seed
     // override path runs before any reconnect, so it's exempt.
@@ -496,6 +526,7 @@ export function CommentThreadBody({
       setMentionIds([]);
       setQuotedReply(null);
       att.clear();
+      setPendingRecordings([]);
     }
     // Show the sent comment immediately (replaced by the persisted row on
     // refetch). Without this the user's own message doesn't appear until the
@@ -553,6 +584,7 @@ export function CommentThreadBody({
           ...(model ? { model } : {}),
           ...(researchMode ? { mode: "research" as const } : {}),
           ...(hasFiles ? { fileIds } : {}),
+          ...(hasRecordings ? { attachedRecordingIds } : {}),
         }),
       });
       if (!res.ok || !res.body) throw new Error("stream failed");
@@ -888,6 +920,19 @@ export function CommentThreadBody({
           />
           {aiReply ? (
             <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
+          ) : null}
+          {pendingRecordings.length > 0 ? (
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {pendingRecordings.map((r) => (
+                <span
+                  key={r.recordingId}
+                  className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground"
+                >
+                  <span aria-hidden>◉</span>
+                  {tRec.chatQueuedChip.replace("{name}", r.title)}
+                </span>
+              ))}
+            </div>
           ) : null}
           <div className="mt-1 flex items-center gap-1.5">
             {aiReply ? (

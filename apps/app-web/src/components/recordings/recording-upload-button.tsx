@@ -110,6 +110,8 @@ export function RecordingUploadButton({
           if (f) {
             // Raw picker selection (id / ingest-only / unset) — seeds the
             // confirm dialog's picker; the in-dialog choice is what submits.
+            // The starter offer lives in the dialog too (it owns the roster),
+            // so this surface no longer decides whether to make it.
             void run(f, blueprint);
           }
           e.target.value = "";

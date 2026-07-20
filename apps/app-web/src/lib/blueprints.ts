@@ -16,8 +16,17 @@
  * [COMP:web/blueprints-library]
  */
 
-import type { CustomPageTemplateSummary, ExtractionSpec } from "@use-brian/doc-model";
-import { blocksToExtractionSpec } from "@use-brian/doc-model";
+import type {
+  CustomPageTemplateSummary,
+  CustomTemplateCreateInput,
+  ExtractionSpec,
+  StarterBlueprint,
+} from "@use-brian/doc-model";
+import {
+  blocksToExtractionSpec,
+  starterExtractionSpec,
+  withFreshBlockIds,
+} from "@use-brian/doc-model";
 import type { Block } from "@/lib/api/views";
 import { newBlockId } from "@/lib/api/views";
 import type { SearchableSelectItem } from "@/components/ui/searchable-select";
@@ -89,6 +98,15 @@ export function buildBlueprintPickerItems(
 export const RECORDING_INGEST_ONLY = "__ingest_only__";
 /** Sentinel for "not yet chosen" — the placeholder state when no default is set. */
 export const RECORDING_UNSET = "";
+/**
+ * Sentinel for "install the meeting starter, then use it". Offered ONLY when
+ * the workspace has no blueprints to pick: without it the picker's only option
+ * is ingest-only, so the recording lands with no brief page — no citations, no
+ * player, the very gap the starter exists to close. It is NOT a blueprint id;
+ * `recordingBlueprintToSlug` rejects it so a caller that forgets to install
+ * first submits nothing rather than a bogus id.
+ */
+export const RECORDING_INSTALL_STARTER = "__install_starter__";
 
 /**
  * The picker's initial selection given the workspace default. A non-null
@@ -121,17 +139,65 @@ export function seedRecordingBlueprint(
 
 /**
  * Map a picker selection to the `blueprintSlug` submitted to `/process`. A real
- * blueprint id submits verbatim; both the explicit `RECORDING_INGEST_ONLY` pick
- * and the `RECORDING_UNSET` placeholder submit `undefined` (Pipeline B only —
- * omit the slug).
+ * blueprint id submits verbatim; the explicit `RECORDING_INGEST_ONLY` pick, the
+ * `RECORDING_UNSET` placeholder, and an uninstalled `RECORDING_INSTALL_STARTER`
+ * all submit `undefined` (Pipeline B only — omit the slug).
+ *
+ * `RECORDING_INSTALL_STARTER` maps to `undefined` because it is a sentinel, not
+ * an id: the caller must install the starter and submit the REAL id it gets
+ * back. Mapping it to undefined means a caller that skips that step degrades to
+ * ingest-only instead of submitting `__install_starter__` as a blueprint id.
  */
 export function recordingBlueprintToSlug(
   selection: string,
 ): string | undefined {
-  if (selection === RECORDING_INGEST_ONLY || selection === RECORDING_UNSET) {
+  if (
+    selection === RECORDING_INGEST_ONLY ||
+    selection === RECORDING_UNSET ||
+    selection === RECORDING_INSTALL_STARTER
+  ) {
     return undefined;
   }
   return selection;
+}
+
+// ── Starter blueprints: install-on-intent ────────────────────────────────
+//
+// A workspace with zero blueprints cannot synthesize anything: the picker has
+// only "ingest only", so a recording lands as brain rows with no brief page —
+// hence no citations and no player. Offering the starter at the upload confirm
+// is the one moment the user has demonstrated intent; auto-seeding it at
+// workspace creation is how you get 400 identical dead templates nobody edits.
+
+/** True when the workspace has nothing the synthesis engine could fill. */
+export function hasNoBlueprints(templates: CustomPageTemplateSummary[]): boolean {
+  return filterBlueprints(templates).length === 0;
+}
+
+/**
+ * The create payload that installs a starter — an ordinary template create, so
+ * the result is a normal workspace-owned row that can be edited, renamed, or
+ * deleted like any other. Nothing marks it as "the starter" afterwards.
+ *
+ * `name`/`description` come from the caller's dictionary rather than the
+ * catalog: the row's name is what the team reads in the picker forever, so it
+ * must be in their language. Fresh block ids because the catalog's are stable
+ * constants — installing twice must not mint colliding ids.
+ */
+export function starterInstallInput(
+  starter: StarterBlueprint,
+  copy: { name: string; description: string },
+  genId: () => string = newBlockId,
+): CustomTemplateCreateInput {
+  return {
+    name: copy.name,
+    description: copy.description,
+    category: "meeting",
+    blocks: withFreshBlockIds(starter.blocks as never, genId) as never,
+    // The whole point: `extraction != null` is what makes the row a BLUEPRINT
+    // rather than a plain skeleton, and it is derived, never hand-written.
+    extraction: starterExtractionSpec(starter),
+  };
 }
 
 /**

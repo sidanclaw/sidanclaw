@@ -298,6 +298,26 @@ export type SavedView = {
    * `null` to fall back to a derived glyph in the UI.
    */
   icon: string | null
+  /**
+   * Stable cross-run identity for a machine-authored page (the partial unique
+   * index on `(workspace_id, anchor_key)`), so a re-run converges on the same
+   * page instead of littering drafts.
+   *
+   * It is also the ONLY link from a page back to what produced it. A recording
+   * brief carries `recording-synthesis:<recordingId>`, which is how the doc
+   * shell knows to mount a player and make the page's `[H:MM:SS]` citations
+   * seekable. Null for a hand-authored page.
+   */
+  anchorKey: string | null
+  /**
+   * A recording MANUALLY linked to this page (migration 339). Distinct from
+   * `anchorKey`: that carries a machine-authored synthesis identity a second
+   * page cannot borrow, while this is a user pointing an arbitrary page at an
+   * existing recording to surface its player, transcript, and action items.
+   * The doc shell resolves the `anchorKey` recording first and falls back to
+   * this, so a real synthesis brief always wins. Null when unlinked.
+   */
+  linkedRecordingId: string | null
   entity: ViewEntity
   viewType: ViewType
   /** Legacy single-binding source of truth — used by pre-Notion-redesign rows. */
@@ -422,6 +442,12 @@ export type SavedViewUpdateFields = {
   /** Page-level clearance (migration 212). Omit to leave unchanged. Callers
    *  must validate the new value is ≤ the setter's own clearance. */
   clearance?: 'public' | 'internal' | 'confidential'
+  /**
+   * Link a recording to this page, or `null` to unlink (migration 339). The
+   * route validates the recording is in this page's workspace and the caller
+   * can see it. Omit to leave unchanged.
+   */
+  linkedRecordingId?: string | null
   binding?: BindingConfig
   /**
    * Per-page "Sync to brain" toggle (migration 001_doc_brain_sync). When true,

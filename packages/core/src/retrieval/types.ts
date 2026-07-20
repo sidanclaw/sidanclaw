@@ -196,6 +196,32 @@ export type FileSegmentSearchRow = SearchResultRow & {
   valid_from: string
 }
 
+/**
+ * A recording transcript chunk surfaced by UNSCOPED search (`transcript_segments`,
+ * migration 280). The transcript twin of `FileSegmentSearchRow`, and hard-capped
+ * per recording in the fused page the same way.
+ *
+ * The distinguishing field is `start_ms`: unlike a file chunk (keyed on char
+ * offsets), a transcript chunk knows WHEN it was said, so the model can cite the
+ * moment — "around 47:12, Priya said ..." — and that citation is what the UI
+ * turns into a seek link. `recording_id` + `segment_index` hand off to the
+ * per-recording `searchRecording` tool for precision extraction. See
+ * `packages/api/src/db/retrieval-store.ts` → `searchTranscriptSegmentsScope`.
+ */
+export type TranscriptSegmentSearchRow = SearchResultRow & {
+  primitive: 'transcript_segment'
+  recording_id: string
+  recording_name: string | null
+  segment_index: number
+  /** Milliseconds from the start of the recording — the citable moment. */
+  start_ms: number
+  speaker: string | null
+  snippet: string
+  tags: string[]
+  sensitivity: string
+  valid_from: string
+}
+
 // ── Neural search process trace (audit) ─────────────────────────────
 
 /**

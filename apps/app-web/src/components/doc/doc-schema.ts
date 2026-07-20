@@ -31,6 +31,7 @@ import { ListNormalizer } from "./list-normalizer";
 import { BlockAreaSelect } from "./block-area-select";
 import { DocMediaPaste } from "./doc-media-paste";
 import { SmartArrows } from "./smart-arrows";
+import { timecodeDecoration } from "./timecode-decoration";
 
 /** Node names the editor owns via the mention extensions, not the base list. */
 const MENTION_NODE_NAMES = new Set(["personMention", "pageMention"]);
@@ -40,7 +41,15 @@ const MENTION_NODE_NAMES = new Set(["personMention", "pageMention"]);
  *   `/api/doc-files` endpoint. Omitted by the node-only unit-test editors —
  *   the paste extension then no-ops, leaving normal text/HTML paste untouched.
  */
-export function browserDocExtensions(opts?: { workspaceId?: string }): AnyExtension[] {
+export function browserDocExtensions(opts?: {
+  workspaceId?: string;
+  /**
+   * Turns the model's literal `[H:MM:SS]` citation prose into seek links on a
+   * recording brief. Omitted → citations stay plain text, which is correct for
+   * every page that has no recording.
+   */
+  timecodes?: { onSeek?: (ms: number) => void; hrefBase?: string };
+}): AnyExtension[] {
   const mapped = docExtensions()
     .filter((ext) => !MENTION_NODE_NAMES.has(ext.name))
     .map((ext) => {
@@ -119,5 +128,9 @@ export function browserDocExtensions(opts?: { workspaceId?: string }): AnyExtens
     // Notion-style smart arrows: typing `->`/`<-` becomes `→`/`←`. Pure text
     // input rule — no node/mark schema change, so Yjs parity holds.
     SmartArrows,
+    // `[H:MM:SS]` citations in a recording brief become seek links. A view-only
+    // DECORATION — contributes no nodes or marks, so Yjs parity holds and no
+    // lockstep doc-sync deploy is needed. Inert without `timecodes`.
+    timecodeDecoration(opts?.timecodes ?? {}),
   ];
 }

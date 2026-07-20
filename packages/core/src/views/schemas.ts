@@ -208,6 +208,9 @@ export const savedViewUpdateInputSchema = z.object({
   /** Page-level clearance (migration 212). The route rejects a value above
    *  the setter's own workspace clearance. */
   clearance: z.enum(['public', 'internal', 'confidential']).optional(),
+  /** Link an existing recording to this page, `null` to unlink (migration 339).
+   *  The route checks the recording is in this page's workspace. */
+  linkedRecordingId: z.string().uuid().nullable().optional(),
   binding: bindingConfigSchema.optional(),
   /** Per-page "Sync to brain" toggle (migration 001_doc_brain_sync). */
   brainSyncEnabled: z.boolean().optional(),
