@@ -138,6 +138,8 @@ import { localSessionRoutes, isOssEdition } from './routes/local-session.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
 import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
+import { menuForClass } from '@use-brian/shared/model-registry'
+import { createMeteredProfileStore } from './db/metered-profile-store.js'
 import { createSessionResumeReplay } from './routes/session-resume-replay.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
@@ -301,6 +303,7 @@ import { createApprovalDeliveryDispatcher } from './workflow/approval-deliveries
 import { workflowApprovalsRoutes } from './routes/workflow-approvals.js'
 import { approvalsRoutes } from './routes/approvals.js'
 import { workflowsRoutes } from './routes/workflows.js'
+import { modelMenuRoutes } from './routes/model-menu.js'
 import { pageActionsRoutes } from './routes/page-actions.js'
 import { workflowWebhookRoutes } from './routes/workflow-webhooks.js'
 import { createWorkflowChannelDelivery } from './workflow/channel-delivery.js'
@@ -565,6 +568,17 @@ export interface OpenApiPorts {
    * Pipeline B wiring; default absent — OSS ingest is uncharged.
    */
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
+  /**
+   * Metered model lane billing (model-registry.md L8/L15) — the closed
+   * `5 + ceil(cost/$0.020)` estimate / spend-cap / charge seams. Default
+   * absent: the OSS build serves metered-class picks unbilled (self-host
+   * pays its own provider bill) and the UI hides credit figures.
+   */
+  meteredBilling?: {
+    estimateMeteredTurn: (modelAlias: string, toolRounds: number) => { modelAlias: string; toolRounds: number; minCredits: number; maxCredits: number } | null
+    checkMeteredSpendCap: (workspaceId: string) => Promise<{ allowed: boolean; usedCredits: number; capCredits: number }>
+    chargeMeteredSurcharge: (params: { workspaceId: string; requestId: string; modelAlias: string; profileId?: string | null; toolRounds?: number | null; modelCostUsd: number; chargedByUserId?: string | null }) => Promise<{ charged: boolean; credits: number }>
+  }
 
   // ── Feed/distribution host hooks — open default: inert ──
   injectExtraTools?: InjectExtraTools
@@ -1071,6 +1085,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       createOpenAICompatProvider({ apiKey: env.DASHSCOPE_API_KEY, baseURL: DASHSCOPE_INTL_BASE_URL, label: DASHSCOPE_INTL_LABEL }),
     )
   }
+  // Selection-surface derivations (model-registry.md L10/L12): which
+  // provider keys exist decides which models exist — menus and the chat
+  // route's metered gate both consume these, so a keyless model is absent
+  // everywhere at once.
+  const configuredProviders: ReadonlySet<string> = new Set(Object.keys(providerInstances))
+  const meteredModelsAvailable: ReadonlySet<string> = new Set(
+    menuForClass('metered', configuredProviders).map((r) => r.alias),
+  )
   const provider: LLMProvider = createRoutingProvider(providerInstances, {
     analytics: {
       onFallback({ primaryModel, fallbackModel, errorKind, errorStatus }) {
@@ -1221,6 +1243,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const { createConnectorGrantStore } = await import('./db/connector-grant-store.js')
   const connectorGrantStore = createConnectorGrantStore()
   const workspaceStore = createWorkspaceStore({ connectorGrantStore, channelRouteStore })
+  const meteredProfileStore = createMeteredProfileStore()
 
   // ── KB sync-credential resolver ──
   // Resolves the GitHub PAT a synced knowledge source operates through, by
@@ -3137,6 +3160,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     provider,
     artifactPromoter,
     checkCreditBudget: ports.checkCreditBudget,
+    meteredProfileStore,
+    meteredModelsAvailable,
+    estimateMeteredTurn: ports.meteredBilling?.estimateMeteredTurn,
+    checkMeteredSpendCap: ports.meteredBilling?.checkMeteredSpendCap,
+    chargeMeteredSurcharge: ports.meteredBilling?.chargeMeteredSurcharge,
     publishSessionEvent,
     isPlaceholderTitle: ports.isPlaceholderTitle,
     getTitleChannelPrefix: ports.getTitleChannelPrefix,
@@ -3641,6 +3669,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       assessClarity: goalClarityAssessor,
     }),
   )
+
+  // Model selection surfaces (model-registry.md L10): per-class menus,
+  // metered profiles CRUD, pre-flight estimates. Authed; membership-gated
+  // per workspace inside the router.
+  app.use('/api', requireAuth(env.JWT_SECRET), modelMenuRoutes({
+    workspaceStore,
+    meteredProfileStore,
+    configuredProviders,
+    estimateMeteredTurn: ports.meteredBilling?.estimateMeteredTurn,
+  }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), workflowsRoutes({
     workflowStore,

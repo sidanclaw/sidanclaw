@@ -140,6 +140,7 @@ import {
   isBrowserToolName,
 } from "@/components/chrome/computer-live-chip";
 import { authFetch } from "@/lib/auth-fetch";
+import { fetchModelMenu, fetchMeteredEstimate } from "@/lib/api/models";
 import { publishBuildActivity } from "@/lib/build-activity";
 import {
   appendReasoning,
@@ -563,6 +564,18 @@ export function FloatingChat({
   // Research mode — ON adds `mode:'research'` to the next send (coordinator +
   // max-tier + higher turn ceiling, gated by the workspace's free quota).
   const [researchMode, setResearchMode] = useState(false);
+  // Metered model selection (model-registry.md L8/L10/L15). Set ONLY through
+  // the estimate→confirm flow in handleMeteredSelect — `meteredAccepted` on
+  // the send body asserts the user saw the estimate at this budget. Research
+  // mode wins over a metered pick (mirrors the server's precedence).
+  const [metered, setMetered] = useState<{
+    key: string;
+    alias: string;
+    profileId: string | null;
+    toolRounds: number;
+    label: string;
+  } | null>(null);
+  const [modelMenu, setModelMenu] = useState<import("@/lib/api/models").ModelMenu | null>(null);
   // Deferred research (surface seeds only): the first turn sends standard (a
   // cheap clarifying round-trip), then research arms once the reply lands —
   // the brain "Research my company" nudge semantics. Checked in onDone.
@@ -806,6 +819,83 @@ export function FloatingChat({
   }, [workspaceId]);
 
   // Snap an over-tier selection down once the plan resolves.
+  // Metered menu — per-class models + saved profiles for this workspace
+  // (absent models never listed: the server derives from configured provider
+  // keys, L12). Fetched once per workspace; failure just hides the group.
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+    void fetchModelMenu(workspaceId)
+      .then((menu) => { if (!cancelled) setModelMenu(menu); })
+      .catch(() => { if (!cancelled) setModelMenu(null); });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  // Metered options: saved profiles first (named budgets), then the raw
+  // models at their default 100-round budget.
+  const meteredOptions = useMemo(() => {
+    if (!modelMenu) return [];
+    const models = modelMenu.classes["metered"] ?? [];
+    const opts: Array<{ key: string; label: string; sublabel: string }> = [];
+    for (const prof of modelMenu.profiles) {
+      opts.push({
+        key: `p:${prof.id}`,
+        label: `${prof.modelAlias} / ${prof.name}`,
+        sublabel: t.meteredProfileSub.replace("{rounds}", String(prof.toolRounds)),
+      });
+    }
+    for (const m of models) {
+      opts.push({ key: `m:${m.alias}`, label: m.alias, sublabel: t.meteredModelSub });
+    }
+    return opts;
+  }, [modelMenu, t]);
+
+  // Pre-flight invariant (L8): estimate at the CHOSEN budget → confirm →
+  // only then arm the selection. The send body then carries
+  // `meteredAccepted: true`; the server re-enforces regardless.
+  const handleMeteredSelect = useCallback(
+    (key: string | null) => {
+      if (!key) { setMetered(null); return; }
+      if (!workspaceId || !modelMenu) return;
+      let alias: string; let profileId: string | null = null; let toolRounds = 100; let label: string;
+      if (key.startsWith("p:")) {
+        const prof = modelMenu.profiles.find((x) => x.id === key.slice(2));
+        if (!prof) return;
+        alias = prof.modelAlias; profileId = prof.id; toolRounds = prof.toolRounds;
+        label = `${prof.modelAlias} / ${prof.name}`;
+      } else {
+        alias = key.slice(2); label = alias;
+      }
+      void (async () => {
+        let description = t.meteredConfirmNoBilling.replace("{model}", label).replace("{rounds}", String(toolRounds));
+        if (modelMenu.meteredBillingAvailable) {
+          try {
+            const est = await fetchMeteredEstimate(workspaceId, alias, toolRounds);
+            if (est) {
+              description = t.meteredConfirmBody
+                .replace("{model}", label)
+                .replace("{rounds}", String(est.toolRounds))
+                .replace("{min}", String(est.minCredits))
+                .replace("{max}", String(est.maxCredits));
+            }
+          } catch {
+            // Estimate unavailable → confirm still shows the budget.
+          }
+        }
+        const ok = await confirmDialog({
+          title: t.meteredConfirmTitle,
+          description,
+          confirmLabel: t.meteredConfirmCta,
+        });
+        if (ok) {
+          setResearchMode(false);
+          setMetered({ key, alias, profileId, toolRounds, label });
+        }
+      })();
+    },
+    [workspaceId, modelMenu, t],
+  );
+
   useEffect(() => {
     if (workspacePlan === "free" && model !== "standard") setModel("standard");
     else if (workspacePlan === "pro" && model === "max") setModel("pro");
@@ -1281,8 +1371,21 @@ export function FloatingChat({
           ...(turnFileIds.length > 0 ? { fileIds: turnFileIds } : {}),
           sessionId: sessionIdRef.current ?? undefined,
           // The landing's picker overrides the chat's current tier for the
-          // build turn; otherwise the chat's own selection is used.
-          model: override?.model ?? model,
+          // build turn; otherwise the chat's own selection is used. An armed
+          // metered pick (confirmed at selection time) wins over the tier —
+          // unless this turn runs research mode, which forces its own model.
+          model:
+            metered && !override?.model && !(override?.researchMode ?? researchMode)
+              ? metered.alias
+              : override?.model ?? model,
+          ...(metered && !override?.model && !(override?.researchMode ?? researchMode)
+            ? {
+                meteredAccepted: true,
+                ...(metered.profileId
+                  ? { meteredProfileId: metered.profileId }
+                  : { meteredToolRounds: metered.toolRounds }),
+              }
+            : {}),
           // Deep-research mode → coordinator + max-tier + higher ceiling,
           // gated server-side by the workspace's free-research quota.
           ...((override?.researchMode ?? researchMode) ? { mode: "research" as const } : {}),
@@ -2080,7 +2183,7 @@ export function FloatingChat({
       // Indicate to the caller (e.g. seed effect) that a stream actually started.
       return true;
     },
-    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, att],
+    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, att],
   );
 
   // ── Chat-seed: apply a prompt handed in from another surface ───────────
@@ -2807,10 +2910,17 @@ export function FloatingChat({
             onModelChange={setModel}
             plan={workspacePlan}
             researchMode={researchMode}
-            onResearchModeChange={setResearchMode}
+            onResearchModeChange={(next) => {
+              // Research forces its own model — arming it clears a metered pick.
+              if (next) setMetered(null);
+              setResearchMode(next);
+            }}
             researchQuota={researchQuota}
             researchExhausted={researchExhausted}
             showResearch
+            meteredOptions={meteredOptions}
+            meteredSelectedKey={metered?.key ?? null}
+            onMeteredSelect={handleMeteredSelect}
             className="mt-2"
           />
         </div>

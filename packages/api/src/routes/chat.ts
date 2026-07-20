@@ -29,6 +29,7 @@ import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@use-brian/core'
 
 import { resolveModel, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
+import { registryRow } from '@use-brian/shared/model-registry'
 import { buildPendingContext } from '../inter-assistant/pending-context.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag } from '@use-brian/shared'
@@ -233,6 +234,26 @@ type WebChatOptions = {
    * See docs/architecture/engine/askquestion-suspend-resume.md.
    */
   workerRunsStore?: import('@use-brian/core').WorkerRunsStore
+  /**
+   * Metered model lane (docs/architecture/platform/model-registry.md → the
+   * L8/L15 lane). All optional — the OPEN build serves metered-class picks
+   * without billing (self-host pays its own provider bill); hosted injects
+   * the closed billing seams:
+   *  - `meteredProfileStore`: workspace-saved profiles (migration 343).
+   *  - `meteredModelsAvailable`: aliases whose provider key is configured at
+   *    boot — a keyless model is absent, never erroring (L12).
+   *  - `estimateMeteredTurn`: cheap pre-flight estimate at a tool-round
+   *    budget; returned on `metered_confirm_required` rejections.
+   *  - `checkMeteredSpendCap`: per-workspace per-period ceiling (L8 guard
+   *    rail); fails closed.
+   *  - `chargeMeteredSurcharge`: the `5 + ceil(cost/$0.020)` debit, charged
+   *    on turn completion at actual measured cost, idempotent per turn.
+   */
+  meteredProfileStore?: import('../db/metered-profile-store.js').MeteredProfileStore
+  meteredModelsAvailable?: ReadonlySet<string>
+  estimateMeteredTurn?: (modelAlias: string, toolRounds: number) => { modelAlias: string; toolRounds: number; minCredits: number; maxCredits: number } | null
+  checkMeteredSpendCap?: (workspaceId: string) => Promise<{ allowed: boolean; usedCredits: number; capCredits: number }>
+  chargeMeteredSurcharge?: (params: { workspaceId: string; requestId: string; modelAlias: string; profileId?: string | null; toolRounds?: number | null; modelCostUsd: number; chargedByUserId?: string | null }) => Promise<{ charged: boolean; credits: number }>
   knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
   /**
    * KB repo write-back port (assistant direct edits). Chat is an
@@ -1197,10 +1218,15 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingDeckId: requestedViewingDeckId } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingDeckId: requestedViewingDeckId, meteredProfileId, meteredToolRounds, meteredAccepted } = req.body as {
       message?: string
       sessionId?: string
       model?: string
+      /** Metered lane (model = a metered registry alias): saved-profile pick,
+       * ad-hoc rounds (10-200), and the client's confirm acknowledgement. */
+      meteredProfileId?: string
+      meteredToolRounds?: number
+      meteredAccepted?: boolean
       fileIds?: string[]
       /**
        * Recordings the user attached in THIS turn (recording-to-brain, chat
@@ -3503,9 +3529,81 @@ export function chatRoutes(options: WebChatOptions): Router {
       //
       // Budget downgrade still applies — a workspace that has exhausted its
       // weekly $ cap still gets standard regardless of mode.
-      const model = researchMode && budgetStatus !== 'downgraded'
-        ? resolveModel('research', 'max_5x', budgetStatus)
-        : resolveModel(requestedModel, userPlan, budgetStatus)
+      // ── Metered model lane (model-registry.md L8/L10/L15) ──────────
+      //
+      // A metered-class registry alias in `model` bypasses the tier resolver:
+      // it serves at the profile's tool-round budget and bills through the
+      // surcharge ledger on completion. Gates, in order: provider key present
+      // (L12), not at the credit cap, spend cap (L8), explicit confirm
+      // acknowledgement, vision capability (L7 — a vision turn on a
+      // text-only pick silently serves via the tier default instead).
+      // Research mode wins over a metered pick (it forces its own model).
+      let meteredTurn: { alias: string; profileId: string | null; toolRounds: number; thinking: boolean | null } | null = null
+      if (requestedModel && !researchMode) {
+        const meteredRow = registryRow(requestedModel)
+        if (meteredRow?.class === 'metered' && meteredRow.status === 'active') {
+          if (options.meteredModelsAvailable && !options.meteredModelsAvailable.has(meteredRow.alias)) {
+            res.status(400).json({ error: 'model_unavailable', message: 'This model is not available on this deployment.' })
+            return
+          }
+          if (budgetStatus !== 'ok') {
+            res.status(402).json({ error: 'metered_at_cap', message: 'Metered models need available credits. Add an extra usage pack or upgrade the plan.' })
+            return
+          }
+          if (assistant.workspaceId && options.checkMeteredSpendCap) {
+            const cap = await options.checkMeteredSpendCap(assistant.workspaceId)
+            if (!cap.allowed) {
+              res.status(402).json({ error: 'metered_spend_cap_reached', usedCredits: cap.usedCredits, capCredits: cap.capCredits })
+              return
+            }
+          }
+          // Resolve the budget: saved profile wins (validated against this
+          // workspace + this model), else the ad-hoc rounds, else 100/100.
+          let profileId: string | null = null
+          let toolRounds = 100
+          let thinking: boolean | null = null
+          if (meteredProfileId && options.meteredProfileStore && assistant.workspaceId) {
+            const profile = await options.meteredProfileStore.get(assistant.workspaceId, meteredProfileId)
+            if (!profile || profile.modelAlias !== meteredRow.alias) {
+              res.status(400).json({ error: 'metered_profile_invalid' })
+              return
+            }
+            profileId = profile.id
+            toolRounds = profile.toolRounds
+            thinking = profile.thinking
+          } else if (typeof meteredToolRounds === 'number') {
+            toolRounds = Math.min(200, Math.max(10, Math.round(meteredToolRounds)))
+          }
+          if (meteredAccepted !== true) {
+            // Pre-flight invariant: estimate at the CHOSEN budget → confirm →
+            // run. The client shows the estimate in a confirm dialog and
+            // resends with meteredAccepted.
+            res.status(400).json({
+              error: 'metered_confirm_required',
+              estimate: options.estimateMeteredTurn?.(meteredRow.alias, toolRounds) ?? null,
+            })
+            return
+          }
+          const hasImageInput = userContentBlocks.some((b) => b.type === 'image')
+          if (hasImageInput && !meteredRow.capabilities.vision) {
+            // L7 vision gate: silently serve this turn via the tier default.
+            meteredTurn = null
+          } else {
+            meteredTurn = { alias: meteredRow.alias, profileId, toolRounds, thinking }
+            // Metered turns always run the platform routing provider — a
+            // workspace BYO Gemini key cannot serve a DashScope model, and
+            // the meter (not the BYO $0 convention) is the honest billing.
+            turnProvider = options.provider
+            usedByoKey = false
+          }
+        }
+      }
+
+      const model = meteredTurn
+        ? meteredTurn.alias
+        : researchMode && budgetStatus !== 'downgraded'
+          ? resolveModel('research', 'max_5x', budgetStatus)
+          : resolveModel(requestedModel, userPlan, budgetStatus)
 
       // Reset worker manager — prevents stale workers from prior requests blocking Phase 4b
       options.workerManager?.reset()
@@ -4394,7 +4492,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           //     for partial gaps or (b) move to Phase 4 synthesis.
           //   - If we hit the wave cap, force final synthesis with a
           //     "we tried N waves" explanation so the loop doesn't spin.
-          ...(chatTierBudget({ model, researchMode }) ?? {}),
+          // Metered turns run the PROFILE's tool-round budget (L15) — the
+          // user confirmed the estimate at exactly this depth.
+          ...(meteredTurn
+            ? { maxTurns: meteredTurn.toolRounds, maxToolCalls: meteredTurn.toolRounds }
+            : chatTierBudget({ model, researchMode }) ?? {}),
           // Execution-plan completeness gate: when the session has an active
           // plan with open steps, a tool-less turn keeps working them instead
           // of stalling half-done; budget exhaustion fires one model-generated
@@ -4796,6 +4898,41 @@ export function chatRoutes(options: WebChatOptions): Router {
                   metadata: { error_type: sanitize((err as Error)?.name ?? 'unknown') },
                 })
               })
+
+              // Metered lane debit (L8): 5 + ceil(cost/$0.020), charged on
+              // COMPLETION at actual measured cost, idempotent on the stored
+              // user message id (a stream retry can't double-charge). A
+              // failed turn never reaches here, so it charges nothing.
+              if (meteredTurn && assistant.workspaceId && options.chargeMeteredSurcharge) {
+                const chargedMetered = meteredTurn
+                options.chargeMeteredSurcharge({
+                  workspaceId: assistant.workspaceId,
+                  requestId: storedUserMsg.id,
+                  modelAlias: chargedMetered.alias,
+                  profileId: chargedMetered.profileId,
+                  toolRounds: chargedMetered.toolRounds,
+                  modelCostUsd: cost,
+                  chargedByUserId: user.id,
+                }).then(({ credits }) => {
+                  options.analytics?.logEvent({
+                    userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                    eventName: 'metered_turn_charged', channelType: 'web',
+                    metadata: {
+                      model: sanitize(chargedMetered.alias),
+                      tool_rounds: chargedMetered.toolRounds,
+                      credits,
+                      cost_usd_micro: Math.round(cost * 1_000_000),
+                    },
+                  })
+                }).catch((err) => {
+                  console.error('[chat] metered surcharge failed:', err)
+                  options.analytics?.logEvent({
+                    userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                    eventName: 'metered_charge_error', channelType: 'web',
+                    metadata: { error_type: sanitize((err as Error)?.name ?? 'unknown') },
+                  })
+                })
+              }
 
               options.analytics?.logEvent({
                 userId: user.id, assistantId: assistant.id, sessionId: session.id,

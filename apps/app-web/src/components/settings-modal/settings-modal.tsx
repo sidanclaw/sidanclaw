@@ -33,6 +33,7 @@ import { PrivacySection } from "./sections/privacy-section";
 import { BillingSection } from "./sections/billing-section";
 import { UsageSection } from "./sections/usage-section";
 import { BrowserProfilesSection } from "./sections/browser-profiles-section";
+import { ModelsSection } from "./sections/models-section";
 import { DomainsSection } from "./sections/domains-section";
 import {
   WorkspaceGeneralSection,
@@ -51,6 +52,7 @@ export type SettingsSection =
   | "ws-domains"
   | "ws-plan"
   | "ws-usage"
+  | "ws-models"
   | "ws-browser-profiles";
 
 // Cross-component request to open the settings modal at a given section. The
@@ -97,6 +99,9 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-domains",
   "ws-plan",
   "ws-usage",
+  // Metered model profiles (model-registry.md L15). Hosted-only: the lane
+  // bills credits; the OSS list below omits it.
+  "ws-models",
   // Computer-use Profile-Management (hosted-only: profiles + the vault are
   // closed platform halves, so the OSS list below omits it).
   "ws-browser-profiles",
@@ -203,6 +208,7 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
                 "ws-domains": t.chrome.settingsModal.workspace.domains,
                 "ws-plan": t.chrome.settingsModal.workspace.plan,
                 "ws-usage": t.chrome.settingsModal.workspace.usage,
+                "ws-models": t.chrome.settingsModal.workspace.models,
                 "ws-browser-profiles": t.chrome.settingsModal.workspace.browserProfiles,
               }}
             />
@@ -346,6 +352,10 @@ function SectionBody({
       // allowance + reset date for the active workspace. OSS has no billing;
       // defensive upgrade pitch (the nav hides this section in OSS).
       return isOssEdition() ? <HostedUpgradeSection /> : <UsageSection />;
+    case "ws-models":
+      // Metered model profiles (model-registry.md L15). The lane is a
+      // hosted billing construct; OSS nav hides the section, this is defensive.
+      return isOssEdition() ? <HostedUpgradeSection /> : <ModelsSection />;
     case "ws-browser-profiles":
       // Computer-use Profile-Management (computer-use.md §7, R2-4). Profiles
       // + the vault are closed platform halves; OSS nav hides the section,
