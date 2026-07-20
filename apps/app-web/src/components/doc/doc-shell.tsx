@@ -70,6 +70,7 @@ import {
   deleteView,
   setViewClearance,
   setViewFullWidth,
+  setPageLinkedRecording,
   listCustomPageTemplates,
   getCustomPageTemplate,
   deleteCustomPageTemplate,
@@ -88,6 +89,7 @@ import { PageTitle } from "./page-title";
 import { CollabPageEditor } from "./collab-page-editor";
 import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
 import { RecordingChrome } from "@/components/recordings/recording-chrome";
+import { RecordingLinkControl } from "@/components/recordings/recording-link-control";
 import { recordingIdFromAnchorKey } from "@/lib/recordings/anchor";
 import { commentGutterWidth } from "./comment-rail";
 import { useCollabProvider } from "@/lib/collab/use-collab-provider";
@@ -1391,26 +1393,55 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                     </div>
                   )}
                   <RecordingPlayerProvider
-                    // A recording brief's anchor key is
-                    // `recording-synthesis:<recordingId>` — the only link from
-                    // the page back to the recording it was written from. Null
-                    // on every other page, so the provider is inert and the
-                    // page's `[H:MM:SS]` text stays plain prose.
-                    recordingId={recordingIdFromAnchorKey(pageView?.anchorKey)}
+                    // Two ways a page gets a recording: a synthesis brief's
+                    // `anchor_key` (`recording-synthesis:<id>`), or a MANUAL
+                    // link a user set (`linkedRecordingId`, migration 339). The
+                    // anchor-derived one wins — a real brief's recording is its
+                    // identity, not a choice. Null on a page with neither, so
+                    // the provider is inert and `[H:MM:SS]` text stays prose.
+                    recordingId={
+                      recordingIdFromAnchorKey(pageView?.anchorKey) ??
+                      pageView?.linkedRecordingId ??
+                      null
+                    }
                   >
                   {/* The recording surface: player + transcript + action items,
                       as CHROME above the doc (never blocks — a block is content
-                      the user can delete, orphaning the page's citations). Only
-                      on a recording-anchored page; every other page renders the
-                      editor alone. See recordings.md → "The brief page IS the
-                      recording surface". */}
-                  {recordingIdFromAnchorKey(pageView?.anchorKey) && workspaceId ? (
-                    <RecordingChrome
-                      recordingId={recordingIdFromAnchorKey(pageView?.anchorKey) as string}
-                      workspaceId={workspaceId}
-                      title={pageView?.name ?? ""}
-                    />
-                  ) : null}
+                      the user can delete, orphaning the page's citations). See
+                      recordings.md → "The brief page IS the recording surface".
+                      When the page has NO recording, offer to link one. */}
+                  {workspaceId && pageView
+                    ? (() => {
+                        const anchorRec = recordingIdFromAnchorKey(pageView.anchorKey);
+                        const recId = anchorRec ?? pageView.linkedRecordingId;
+                        if (!recId) {
+                          return (
+                            <RecordingLinkControl
+                              viewId={pageView.id}
+                              workspaceId={workspaceId}
+                              onLinked={(meta) => setActiveView(meta)}
+                            />
+                          );
+                        }
+                        return (
+                          <RecordingChrome
+                            recordingId={recId}
+                            workspaceId={workspaceId}
+                            title={pageView.name ?? ""}
+                            // Unlink only a MANUAL link — an anchor-derived
+                            // recording is the brief's identity, nothing to
+                            // re-link it to.
+                            {...(anchorRec
+                              ? {}
+                              : {
+                                  onUnlink: () => {
+                                    void setPageLinkedRecording(pageView.id, null).then(setActiveView);
+                                  },
+                                })}
+                          />
+                        );
+                      })()
+                    : null}
                   <CollabPageEditor
                     collab={collab}
                     canEdit

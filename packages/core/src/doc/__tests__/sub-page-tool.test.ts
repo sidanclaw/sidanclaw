@@ -84,6 +84,7 @@ function makeSavedView(over: Partial<SavedView>): SavedView {
     name: 'Untitled',
     nameOrigin: 'placeholder',
     anchorKey: null,
+    linkedRecordingId: null,
     fullWidth: false,
     clearance: 'internal',
     description: null,

@@ -87,8 +87,11 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
      *   NOT the submitted slug. It seeds the dialog picker; the user's final
      *   in-dialog choice is what submits. Omit when the surface has no picker
      *   (chat dock, landing) — the seed falls to the workspace default.
+     * @returns The queued recording (`recordingId`) on success, or `null` if the
+     *   user cancelled the cost confirm or the upload failed. The chat dock reads
+     *   this to reference the recording in its turn; state-only callers ignore it.
      */
-    async (file: File, blueprintSelection?: string) => {
+    async (file: File, blueprintSelection?: string): Promise<RecordingQueued | null> => {
       setResult(null);
       setMessage("");
       try {
@@ -141,7 +144,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         });
         if (!ok) {
           setStatus("idle");
-          return;
+          return null;
         }
 
         setStatus("processing");
@@ -159,6 +162,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         // Claiming "transcribed and filed" here was the 2026-07-10 honesty
         // bug: the message showed before (or instead of) the actual work.
         setMessage(t.recordings.queued);
+        return res;
       } catch (e) {
         setStatus("error");
         const code = e instanceof RecordingApiError ? e.code : undefined;
@@ -169,6 +173,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
               ? t.recordings.cannotReadDuration
               : t.recordings.failed,
         );
+        return null;
       }
     },
     [workspaceId, assistantId, t, installStarter],

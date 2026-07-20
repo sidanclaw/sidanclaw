@@ -171,14 +171,30 @@ export type PartitionedUpload = {
 };
 
 /**
+ * Audio at or above this routes to the recording pipeline (a real recording),
+ * not the inline voice-note path — when the host wired `onRouteMedia`. It is a
+ * "is this a meeting or a quick note" size proxy: compressed speech is roughly
+ * 0.5-1 MB/min, so ~5 MB is several minutes in, well past a "remind me to call
+ * the bank" voice note. A short note stays inline (transcribe-and-discard is
+ * exactly right for it, and spawning a brief page + surcharge for 10 seconds
+ * would be absurd). Server-side ffprobe still measures the true duration for
+ * billing — this size check only decides routing, so a rough proxy is fine.
+ */
+export const RECORDING_AUDIO_MIN_BYTES = 5 * 1024 * 1024;
+
+/**
  * Split a picked/dropped/pasted batch into the three upload lanes. Pure so it
  * unit-tests without a DOM (same stance as the reconciliation helpers above).
  *
- * - `video/*` → `media` when `canRouteMedia` (a host wired `onRouteMedia`);
- *   otherwise `rejected` as `video_unsupported` (the cache route's mime
- *   allowlist excludes video, so it could never attach here anyway).
- * - non-video over `maxBytes` → `rejected` as `too_large`.
- * - everything else → `attach` (the unchanged POST path).
+ * - `video/*`, and `audio/*` at or over `RECORDING_AUDIO_MIN_BYTES`, → `media`
+ *   when `canRouteMedia` (a host wired `onRouteMedia`). This lane bypasses
+ *   `maxBytes`: the recording flow uploads DIRECT to GCS, so a meeting far past
+ *   the 20 MB cache cap is exactly what it exists for.
+ * - `video/*` with no `canRouteMedia` → `rejected` as `video_unsupported` (the
+ *   cache route's mime allowlist excludes video anyway).
+ * - a short `audio/*` note, and everything else, under `maxBytes` → `attach`
+ *   (the unchanged inline POST path).
+ * - anything else over `maxBytes` → `rejected` as `too_large`.
  */
 export function partitionUpload(
   files: readonly File[],
@@ -189,7 +205,9 @@ export function partitionUpload(
   const rejected: PartitionedUpload["rejected"] = [];
   for (const file of files) {
     const isVideo = file.type.startsWith("video/");
-    if (isVideo && opts.canRouteMedia) {
+    const isRecordingAudio =
+      file.type.startsWith("audio/") && file.size >= RECORDING_AUDIO_MIN_BYTES;
+    if ((isVideo || isRecordingAudio) && opts.canRouteMedia) {
       media.push(file);
     } else if (isVideo) {
       rejected.push({ file, reason: "video_unsupported" });
@@ -233,9 +251,10 @@ export function imageFilesFromClipboard(
  * @param opts.maxBytes Reject non-video files over this size before POSTing
  *   (default {@link MAX_ATTACHMENT_BYTES}). Guards against the opaque Cloud Run
  *   413 / multer 500.
- * @param opts.onRouteMedia When set, `video/*` files are diverted here (e.g. the
- *   recordings transcription pipeline) instead of the cache upload, and no chip
- *   is staged for them. When absent, video is rejected as unsupported-here.
+ * @param opts.onRouteMedia When set, `video/*` and recording-sized `audio/*`
+ *   files are diverted here (the recordings pipeline) instead of the cache
+ *   upload, and no chip is staged for them. When absent, video is rejected as
+ *   unsupported-here and audio always takes the inline path.
  */
 export function useFileAttachments(
   getSessionId?: () => string | undefined,

@@ -17,6 +17,7 @@ import {
   previewUrlsToRevokeOnDetach,
   readyAttachments,
   readyFileIds,
+  RECORDING_AUDIO_MIN_BYTES,
   type Attachment,
 } from "../use-file-attachments";
 
@@ -231,5 +232,37 @@ describe("[COMP:app-web/file-attachments] upload partition guard", () => {
     expect(r.media).toEqual([mp4]);
     expect(r.rejected).toEqual([{ file: big, reason: "too_large" }]);
     expect(r.attach).toEqual([ok]);
+  });
+
+  // Recording-to-brain, chat entry: a recording-sized audio routes to the
+  // recording pipeline; a short voice note stays inline. Uses the real
+  // threshold constant so the test can't drift from it.
+  const REC_MIN = RECORDING_AUDIO_MIN_BYTES;
+
+  it("routes recording-sized audio to media when the host can route", () => {
+    const meeting = sizedFile("audio/mp4", 30 * 1024 * 1024, "call.m4a");
+    const r = partitionUpload([meeting], { maxBytes: MAX, canRouteMedia: true });
+    // Bypasses the 20 MB cap — the recording flow uploads direct to GCS, which
+    // is the whole reason a meeting can go through chat at all.
+    expect(r.media).toEqual([meeting]);
+    expect(r.attach).toEqual([]);
+    expect(r.rejected).toEqual([]);
+  });
+
+  it("keeps a short voice note on the inline attach path", () => {
+    const note = sizedFile("audio/webm", REC_MIN - 1, "note.webm");
+    const r = partitionUpload([note], { maxBytes: MAX, canRouteMedia: true });
+    // A 10-second "remind me" should not spawn a brief page + surcharge.
+    expect(r.attach).toEqual([note]);
+    expect(r.media).toEqual([]);
+  });
+
+  it("does not route audio when the host wired no recording pipeline", () => {
+    // Without onRouteMedia, a recording-sized audio under the cap still attaches
+    // (inline) rather than vanishing — the composer just has no recording path.
+    const meeting = sizedFile("audio/mp4", REC_MIN + 1, "call.m4a");
+    const r = partitionUpload([meeting], { maxBytes: MAX, canRouteMedia: false });
+    expect(r.attach).toEqual([meeting]);
+    expect(r.media).toEqual([]);
   });
 });

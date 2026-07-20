@@ -12,6 +12,14 @@ vi.mock('../../db/client.js', () => ({
   getPool: vi.fn(),
 }))
 
+// Linking a recording (migration 339) validates it via getRecording under the
+// caller's RLS — so a recording the user cannot see returns null and the link
+// is rejected. Mocked so the route test can drive both branches.
+const getRecording = vi.fn()
+vi.mock('../../db/recordings-store.js', () => ({
+  getRecording: (...a: unknown[]) => getRecording(...a),
+}))
+
 import { viewsRoutes } from '../views.js'
 import type { CrmStore, SavedView, SavedViewStore, SoftDeleteRepository, TaskStore, WorkflowRunStore } from '@sidanclaw/core'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
@@ -520,6 +528,7 @@ describe('[COMP:api/views-routes] saved-views CRUD', () => {
       createdBy: USER_ID,
       nameOrigin: 'placeholder',
     anchorKey: null,
+    linkedRecordingId: null,
       fullWidth: false,
       clearance: 'internal',
       name: 'Open Tasks',
@@ -565,6 +574,7 @@ describe('[COMP:api/views-routes] saved-views CRUD', () => {
       createdBy: USER_ID,
       nameOrigin: 'placeholder',
     anchorKey: null,
+    linkedRecordingId: null,
       fullWidth: false,
       clearance: 'internal',
       name: 'Open Tasks',
@@ -610,6 +620,7 @@ describe('[COMP:api/views-routes] saved-views icon', () => {
       createdBy: USER_ID,
       nameOrigin: 'placeholder',
     anchorKey: null,
+    linkedRecordingId: null,
       fullWidth: false,
       clearance: 'internal',
       name: 'Open Tasks',
@@ -648,6 +659,7 @@ describe('[COMP:api/views-routes] saved-views icon', () => {
       createdBy: USER_ID,
       nameOrigin: 'placeholder',
     anchorKey: null,
+    linkedRecordingId: null,
       fullWidth: false,
       clearance: 'internal',
       name: 'Open Tasks',
@@ -684,6 +696,81 @@ describe('[COMP:api/views-routes] saved-views icon', () => {
       .patch('/api/saved-views/sv-icon')
       .send({ icon: 'x'.repeat(17) })
     expect(res.status).toBe(400)
+    expect(stores.savedViewStore.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/views-routes] link a recording (migration 339)', () => {
+  const REC_ID = '00000000-0000-0000-0000-0000000000aa'
+  function view(over: Partial<SavedView> = {}): SavedView {
+    return {
+      id: 'pg-1', workspaceId: WORKSPACE_ID, createdBy: USER_ID, name: 'Notes',
+      nameOrigin: 'user', description: null, icon: null, anchorKey: null,
+      linkedRecordingId: null, fullWidth: false, clearance: 'internal',
+      entity: 'tasks', viewType: 'table', binding: { entity: 'tasks', viewType: 'table' },
+      page: { blocks: [] }, state: 'saved', originPrompt: null, brainSyncEnabled: false,
+      brainLastIngestHash: null, brainLastIngestAt: null, createdEventPending: false,
+      autoPruneAt: null, createdAt: new Date(), updatedAt: new Date(),
+      nestParentId: null, position: 0, teamspaceId: null, ...over,
+    } as SavedView
+  }
+
+  it('links a recording in the page workspace and echoes it back', async () => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    stores.savedViewStore.getById.mockResolvedValue(view())
+    getRecording.mockResolvedValue({ id: REC_ID, workspaceId: WORKSPACE_ID })
+    stores.savedViewStore.update.mockResolvedValue(view({ linkedRecordingId: REC_ID }))
+
+    const res = await request(app).patch('/api/saved-views/pg-1').send({ linkedRecordingId: REC_ID })
+    expect(res.status).toBe(200)
+    expect(getRecording).toHaveBeenCalledWith(USER_ID, REC_ID)
+    expect(stores.savedViewStore.update).toHaveBeenCalledWith(
+      USER_ID, 'pg-1', expect.objectContaining({ linkedRecordingId: REC_ID }),
+    )
+    // The whitelist must forward it, or the doc shell never sees the link.
+    expect(res.body.linkedRecordingId).toBe(REC_ID)
+  })
+
+  it('rejects a recording in a DIFFERENT workspace and never writes the link', async () => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    stores.savedViewStore.getById.mockResolvedValue(view())
+    // The recording is visible to the user but belongs elsewhere — a page must
+    // not point its viewers at a recording they open into another workspace.
+    getRecording.mockResolvedValue({ id: REC_ID, workspaceId: 'other-workspace' })
+
+    const res = await request(app).patch('/api/saved-views/pg-1').send({ linkedRecordingId: REC_ID })
+    expect(res.status).toBe(400)
+    expect(stores.savedViewStore.update).not.toHaveBeenCalled()
+  })
+
+  it('rejects a recording the caller cannot see (getRecording null)', async () => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    stores.savedViewStore.getById.mockResolvedValue(view())
+    getRecording.mockResolvedValue(null) // RLS miss — not a member of its workspace
+
+    const res = await request(app).patch('/api/saved-views/pg-1').send({ linkedRecordingId: REC_ID })
+    expect(res.status).toBe(400)
+    expect(stores.savedViewStore.update).not.toHaveBeenCalled()
+  })
+
+  it('unlinks (null) without a recording lookup', async () => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    stores.savedViewStore.update.mockResolvedValue(view({ linkedRecordingId: null }))
+
+    const res = await request(app).patch('/api/saved-views/pg-1').send({ linkedRecordingId: null })
+    expect(res.status).toBe(200)
+    // Unlink has nothing to validate — skip the (potentially RLS-heavy) fetch.
+    expect(getRecording).not.toHaveBeenCalled()
+    expect(stores.savedViewStore.update).toHaveBeenCalledWith(
+      USER_ID, 'pg-1', expect.objectContaining({ linkedRecordingId: null }),
+    )
+  })
+
+  it('rejects a non-uuid recording id at the schema before any lookup', async () => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    const res = await request(app).patch('/api/saved-views/pg-1').send({ linkedRecordingId: 'not-a-uuid' })
+    expect(res.status).toBe(400)
+    expect(getRecording).not.toHaveBeenCalled()
     expect(stores.savedViewStore.update).not.toHaveBeenCalled()
   })
 })
@@ -1185,6 +1272,7 @@ function savedViewFixture(overrides: Partial<SavedView> = {}): SavedView {
     name: 'Untitled — draft',
     nameOrigin: 'placeholder',
     anchorKey: null,
+    linkedRecordingId: null,
     fullWidth: false,
     clearance: 'internal',
     description: null,
@@ -1518,6 +1606,7 @@ function placeholderPageStore(text: string) {
       title: 'Untitled',
       nameOrigin: 'placeholder',
     anchorKey: null,
+    linkedRecordingId: null,
       fullWidth: false,
     }),
     applyPatch: vi.fn(),

@@ -111,10 +111,18 @@ export function RecordingChrome({
   recordingId,
   workspaceId,
   title,
+  onUnlink,
 }: {
   recordingId: string;
   workspaceId: string;
   title: string;
+  /**
+   * Present only when the recording is MANUALLY linked (migration 339), absent
+   * when it is anchor-derived. A synthesis brief's recording is derived from
+   * the page's identity and must not be unlinkable — there would be nothing to
+   * re-link it to — so the doc shell passes this only for a manual link.
+   */
+  onUnlink?: () => void;
 }) {
   const t = useT();
   const [showTranscript, setShowTranscript] = useState(false);
@@ -130,12 +138,23 @@ export function RecordingChrome({
       <section>
         <div className="mb-1.5 flex items-baseline justify-between gap-2">
           <h2 className="text-sm font-medium">{t.recordings.actionItemsTitle}</h2>
-          <Link
-            href={`/w/${workspaceId}/recordings/${recordingId}`}
-            className="shrink-0 text-xs text-muted-foreground hover:underline"
-          >
-            {t.recordings.chromeOpenRecording}
-          </Link>
+          <span className="flex shrink-0 items-center gap-3">
+            {onUnlink ? (
+              <button
+                type="button"
+                onClick={onUnlink}
+                className="text-xs text-muted-foreground hover:underline"
+              >
+                {t.recordings.linkUnlink}
+              </button>
+            ) : null}
+            <Link
+              href={`/w/${workspaceId}/recordings/${recordingId}`}
+              className="text-xs text-muted-foreground hover:underline"
+            >
+              {t.recordings.chromeOpenRecording}
+            </Link>
+          </span>
         </div>
         <ActionItemsRail recordingId={recordingId} workspaceId={workspaceId} />
       </section>

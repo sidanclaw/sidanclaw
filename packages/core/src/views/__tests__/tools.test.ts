@@ -80,6 +80,7 @@ function makeSavedView(overrides: Partial<SavedView> & Pick<SavedView, 'name' | 
     createdBy: USER_ID,
     nameOrigin: 'placeholder',
     anchorKey: null,
+    linkedRecordingId: null,
     fullWidth: false,
     clearance: 'internal',
     description: null,

@@ -82,6 +82,7 @@ import {
   customTemplateUpdateInputSchema,
   extractionSpecToBlocks,
 } from '@sidanclaw/core'
+import { getRecording } from '../db/recordings-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
@@ -323,6 +324,13 @@ function viewMetadata(view: SavedView) {
     // whitelist just never forwarded it. See recordings.md → "The brief page
     // IS the recording surface".
     anchorKey: view.anchorKey ?? null,
+    // A manually-linked recording (migration 339). The doc client resolves the
+    // anchorKey recording first and falls back to this, so a hand-authored page
+    // can surface an existing recording's player/transcript/action items. Same
+    // whitelist lesson as `anchorKey`: the store projects it, but this response
+    // is hand-maintained, so a field the client relies on must be listed here
+    // or it silently never crosses the wire.
+    linkedRecordingId: view.linkedRecordingId ?? null,
     page: view.page,
     createdAt: view.createdAt.toISOString(),
     updatedAt: view.updatedAt.toISOString(),
@@ -642,6 +650,21 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       const membership = await getWorkspaceMembershipWithClearanceSystem(userId, view.workspaceId)
       if (!membership || !canRead(membership.clearance, parsed.data.clearance)) {
         return res.status(403).json({ error: 'Cannot set a page above your own clearance' })
+      }
+    }
+
+    // Linking a recording (migration 339): the FK only proves the id is a real
+    // recording, not that it belongs to THIS page's workspace or that the
+    // caller can see it. `getRecording` runs under the caller's RLS, so a
+    // recording in a workspace they are not a member of returns null — reject
+    // it rather than let a page point at a recording its viewers can't open.
+    // `null` (unlink) skips the check.
+    if (parsed.data.linkedRecordingId != null) {
+      const view = await opts.savedViewStore.getById(userId, req.params.id)
+      if (!view) return notFound(res, 'Saved view not found')
+      const rec = await getRecording(userId, parsed.data.linkedRecordingId)
+      if (!rec || rec.workspaceId !== view.workspaceId) {
+        return res.status(400).json({ error: 'That recording is not in this page’s workspace' })
       }
     }
 

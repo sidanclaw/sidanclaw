@@ -5213,6 +5213,14 @@ export const en = {
     actionItemsConfirm: "Confirm",
     actionItemsDismiss: "Dismiss",
     citationCardClose: "Close",
+    linkTitle: "Link a recording",
+    linkPlaceholder: "Choose a recording",
+    linkLoading: "Loading recordings...",
+    linkSearchPlaceholder: "Search recordings",
+    linkCancel: "Cancel",
+    linkUnlink: "Unlink",
+    chatQueuedChip: "Recording queued: {name}",
+    linkError: "We could not load your recordings.",
   },
   // Workspace recording brief default (migration 291) — the settings subsection
   // that sets the blueprint every recording auto-uses when none is picked.
