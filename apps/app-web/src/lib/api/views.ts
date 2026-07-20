@@ -465,6 +465,21 @@ export type ViewMetadata = {
    */
   nameOrigin: NameOrigin;
   description: string | null;
+  /**
+   * Stable identity for a machine-authored page, and the ONLY link from a page
+   * back to what produced it. A recording brief carries
+   * `recording-synthesis:<recordingId>` — which is how the doc shell knows to
+   * mount a player and make this page's `[H:MM:SS]` citations seekable. Null
+   * for a hand-authored page.
+   */
+  anchorKey: string | null;
+  /**
+   * A recording MANUALLY linked to this page (migration 339). The doc shell
+   * resolves the `anchorKey` recording first and falls back to this, so a
+   * hand-authored page can surface an existing recording's player, transcript,
+   * and action items. Null when unlinked.
+   */
+  linkedRecordingId: string | null;
   entity: ViewEntity;
   viewType: ViewType;
   state: ViewState;
@@ -785,10 +800,13 @@ export async function unpublishPage(viewId: string): Promise<void> {
 export type PageDomain = {
   id: string;
   workspaceId: string;
-  pageId: string;
+  /** The domain's default page (serves at `/`); null = connected, unbound. */
+  pageId: string | null;
   hostname: string;
   status: "pending_dns" | "live" | "error";
-  provider: "manual" | "vercel";
+  provider: "manual" | "vercel" | "platform";
+  /** Bare label ("grape209") for platform-subdomain rows; null for BYO. */
+  subdomainLabel: string | null;
   verificationError: string | null;
   lastCheckedAt: string | null;
   createdBy: string;
@@ -798,33 +816,54 @@ export type PageDomain = {
 
 export type DnsInstruction = { type: "CNAME" | "A" | "TXT"; name: string; value: string };
 
-/** This page's position under a domain-fronted root (the slug editor context). */
-export type PageSiteContext = {
+/** One connected workspace domain as seen from a page (the Publish tab's
+ *  domain select): the page's alias on it + default/servable state. */
+export type SiteDomainRow = {
   domainId: string;
   hostname: string;
   status: PageDomain["status"];
-  rootPageId: string;
-  isRoot: boolean;
+  provider: PageDomain["provider"];
+  hasDefault: boolean;
+  isDefault: boolean;
+  servable: boolean;
   slug: string | null;
   suggestedSlug: string | null;
 };
 
-export type SiteState = { domains: PageDomain[]; sites: PageSiteContext[] };
+export type SiteState = { domains: SiteDomainRow[] };
 
-/** Publish-tab site state: domains attached to this page + slug context. */
+/** Publish-tab state: every connected workspace domain from this page's
+ *  perspective. Connecting/claiming lives in Settings → Domains. */
 export async function getSiteState(viewId: string): Promise<SiteState> {
   const res = await authFetch(`${API_URL}/api/views/${viewId}/site`);
   return json<SiteState>(res);
 }
 
-/** Attach a custom hostname to this published page. Throws the server's
- *  error `code` (not_published / hostname_taken / invalid_hostname /
- *  domain_limit) so the dialog can map it to copy. */
-export async function addPageDomain(
-  viewId: string,
+// ── Workspace domain lifecycle (Settings → Domains) ───────────
+// custom-domains.md + platform-subdomains.md, workspace-first: connect/claim
+// here (no page needed), then assign a default page; the Publish tab only
+// selects among these + edits the alias.
+
+export type WorkspaceDomainRow = PageDomain & { pageName: string | null };
+
+/** Settings → Domains: every domain in the workspace (platform row first). */
+export async function listWorkspaceDomains(workspaceId: string): Promise<{
+  domains: WorkspaceDomainRow[];
+  subdomainApex: string | null;
+  subdomainIsFirstParty: boolean;
+}> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/domains`);
+  return json(res);
+}
+
+/** Connect a customer hostname to the workspace (unbound — assign a default
+ *  page after). Throws the server's error `code` (hostname_taken /
+ *  invalid_hostname / blocked_hostname / domain_limit). */
+export async function connectWorkspaceDomain(
+  workspaceId: string,
   hostname: string,
 ): Promise<{ domain: PageDomain; instructions: DnsInstruction[] }> {
-  const res = await authFetch(`${API_URL}/api/views/${viewId}/domains`, {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/domains`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ hostname }),
@@ -833,21 +872,108 @@ export async function addPageDomain(
   return json(res);
 }
 
-export async function checkPageDomain(
-  viewId: string,
+export async function checkWorkspaceDomain(
+  workspaceId: string,
   domainId: string,
 ): Promise<{ domain: PageDomain; live: boolean; instructions: DnsInstruction[] }> {
-  const res = await authFetch(`${API_URL}/api/views/${viewId}/domains/${domainId}/check`, {
-    method: "POST",
-  });
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${workspaceId}/domains/${domainId}/check`,
+    { method: "POST" },
+  );
   return json(res);
 }
 
-export async function removePageDomain(viewId: string, domainId: string): Promise<void> {
-  const res = await authFetch(`${API_URL}/api/views/${viewId}/domains/${domainId}`, {
+export async function removeWorkspaceDomain(
+  workspaceId: string,
+  domainId: string,
+): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/domains/${domainId}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
+/** Set/clear what serves at `/` on a domain. */
+export async function setDomainDefaultPage(
+  workspaceId: string,
+  domainId: string,
+  pageId: string | null,
+): Promise<{ domain: PageDomain }> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${workspaceId}/domains/${domainId}/default-page`,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pageId }),
+    },
+  );
+  if (!res.ok) throw new Error(await errorCode(res));
+  return json(res);
+}
+
+export type WorkspaceSubdomain = {
+  domainId: string;
+  hostname: string;
+  label: string | null;
+  defaultPageId: string | null;
+  status: PageDomain["status"];
+};
+
+/** A fresh random `<fruit><3 digits>` default label (collision-checked). */
+export async function getSubdomainSuggestion(
+  workspaceId: string,
+): Promise<{ label: string; apex: string; hostname: string }> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/subdomain-suggestion`);
+  if (!res.ok) throw new Error(await errorCode(res));
+  return json(res);
+}
+
+export async function checkSubdomainAvailability(
+  workspaceId: string,
+  label: string,
+): Promise<{ valid: boolean; reserved: boolean; available: boolean; apex: string; hostname: string }> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${workspaceId}/subdomain-availability?label=${encodeURIComponent(label)}`,
+  );
+  if (!res.ok) throw new Error(await errorCode(res));
+  return json(res);
+}
+
+/** Claim the workspace's subdomain, unbound. Throws the server's error code
+ *  (reserved_label / hostname_taken / workspace_has_subdomain / invalid_label). */
+export async function claimSubdomain(
+  workspaceId: string,
+  label: string,
+): Promise<{ subdomain: WorkspaceSubdomain }> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/subdomain`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ label }),
+  });
+  if (!res.ok) throw new Error(await errorCode(res));
+  return json(res);
+}
+
+/** Rename (or Reset with a random label). Hard-swap: the old hostname stops
+ *  serving; aliases + default page ride along on the domain row. */
+export async function renameSubdomain(
+  workspaceId: string,
+  label: string,
+): Promise<{ subdomain: WorkspaceSubdomain }> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/subdomain`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ label }),
+  });
+  if (!res.ok) throw new Error(await errorCode(res));
+  return json(res);
+}
+
+export async function releaseSubdomain(workspaceId: string): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/subdomain`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await errorCode(res));
 }
 
 /** Set/replace this page's slug on a domain (old slug 301s to the new one). */
@@ -985,6 +1111,25 @@ export async function setViewFullWidth(
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ fullWidth }),
+  });
+  return json<ViewMetadata>(res);
+}
+
+/**
+ * Link an existing recording to this page, or pass `null` to unlink (migration
+ * 339). Maps to `PATCH /saved-views/:id` with `{ linkedRecordingId }`. The
+ * server rejects a recording outside the page's workspace (or one the caller
+ * cannot see). Returns the updated metadata, so the caller reads back the
+ * committed link rather than assuming its optimistic value stuck.
+ */
+export async function setPageLinkedRecording(
+  viewId: string,
+  recordingId: string | null,
+): Promise<ViewMetadata> {
+  const res = await authFetch(`${API_URL}/api/saved-views/${viewId}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ linkedRecordingId: recordingId }),
   });
   return json<ViewMetadata>(res);
 }

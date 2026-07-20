@@ -78,6 +78,107 @@ export function hostMatchesEntry(hostname: string, entry: string): boolean {
 }
 
 /**
+ * Common multi-part public-suffix second levels (`example.co.uk`,
+ * `example.com.au`). Not a bundled public-suffix list — just a guard so the
+ * apex-derivation below never turns a registrable domain sitting directly under
+ * one of these into a block on the whole suffix (`.co.uk`). Extend via config,
+ * never a product hostname.
+ */
+const PUBLIC_SUFFIX_SECOND_LEVELS = new Set([
+  'co', 'com', 'org', 'net', 'gov', 'edu', 'ac', 'or', 'ne', 'go', 'gr',
+]);
+
+/**
+ * Derive `.apex` suffix-block entries from a deployment's own origin hosts, so
+ * a subdomain of the product's OWN domain (which rides the product's wildcard
+ * DNS) can never be attached as a "bring your own" custom domain. Such a host
+ * resolves for free via the wildcard yet the edge 404s it, so without this it
+ * would falsely verify as live — and it isn't a customer domain anyway.
+ *
+ * An origin with < 3 labels yields nothing: its exact host is already blocked,
+ * and stripping a label off a 2-label apex would produce a bare TLD. A parent
+ * that looks like a known public suffix (`co.uk`) is skipped so self-hosts on
+ * multi-part TLDs don't block their whole registrar namespace. First-party
+ * publishing under the product apex therefore needs an explicit operator
+ * allowlist or a separate apex — see custom-domains.md.
+ */
+export function deriveOwnApexBlocks(originHosts: readonly string[]): string[] {
+  const out = new Set<string>();
+  for (const raw of originHosts) {
+    const host = raw.trim().toLowerCase().replace(/\.$/, '');
+    const labels = host.split('.').filter(Boolean);
+    if (labels.length < 3) continue;
+    const parent = labels.slice(1);
+    if (parent.length === 2 && PUBLIC_SUFFIX_SECOND_LEVELS.has(parent[0])) continue;
+    out.add('.' + parent.join('.'));
+  }
+  return [...out];
+}
+
+// ── Platform-issued subdomain labels (<label>.<apex>) ────────────
+// A platform subdomain (docs/architecture/features/platform-subdomains.md) is a
+// governed workspace label under the product's own apex, served by the wildcard.
+// Its LABEL (the leftmost part, `acme`) is validated/suggested here; the API
+// composes `${label}.${apex}` and stores it as a page_domains row.
+
+/** Generic reserved subdomain labels — never product hostnames (those derive
+ *  from configured origins in `deriveReservedSubdomainLabels`). */
+const RESERVED_SUBDOMAIN_LABELS: readonly string[] = [
+  'www', 'app', 'api', 'admin', 'mail', 'smtp', 'imap', 'ftp', 'ns', 'ns1',
+  'ns2', 'assets', 'static', 'cdn', 'status', 'blog', 'docs', 'help', 'support',
+  'dashboard', 'auth', 'login', 'account', 'billing', 'internal', 'staging',
+];
+
+/** A valid DNS label: lowercase, 1-63 chars, alphanumeric with interior
+ *  hyphens, no leading/trailing hyphen. (`HOSTNAME_LABEL` already caps at 63.) */
+export function isValidSubdomainLabel(label: string): boolean {
+  return HOSTNAME_LABEL.test(label);
+}
+
+/** Reserved labels a workspace may not claim: the generic set above + the
+ *  leftmost label of each of the deployment's own origin hosts (so `app`,
+ *  `api`, `admin` from the configured URLs stay unclaimable) + operator extras
+ *  (`PLATFORM_SUBDOMAIN_RESERVED`). No product hostnames hardcoded. */
+export function deriveReservedSubdomainLabels(
+  originHosts: readonly string[] = [],
+  extra: readonly string[] = [],
+): string[] {
+  const out = new Set<string>(RESERVED_SUBDOMAIN_LABELS);
+  for (const raw of originHosts) {
+    const first = raw.trim().toLowerCase().split('.').filter(Boolean)[0];
+    if (first) out.add(first);
+  }
+  for (const e of extra) {
+    const v = e.trim().toLowerCase();
+    if (v) out.add(v);
+  }
+  return [...out];
+}
+
+/** The default-subdomain word pool: short, friendly, unambiguous fruit names
+ *  (lowercase ascii — valid DNS label prefixes). */
+const SUBDOMAIN_FRUITS: readonly string[] = [
+  'apple', 'apricot', 'avocado', 'banana', 'blackberry', 'blueberry',
+  'cherry', 'coconut', 'cranberry', 'date', 'dragonfruit', 'durian',
+  'fig', 'grape', 'guava', 'kiwi', 'kumquat', 'lemon', 'lime', 'lychee',
+  'mango', 'melon', 'nectarine', 'olive', 'orange', 'papaya', 'peach',
+  'pear', 'persimmon', 'pineapple', 'plum', 'pomelo', 'raspberry',
+  'starfruit', 'strawberry', 'tangerine', 'watermelon',
+];
+
+/**
+ * Generate a default workspace-subdomain label: `<fruit><3 digits>` —
+ * `grape209`, `watermelon102`. The digits (100-999) keep collisions rare;
+ * the API layer still availability-checks and re-rolls on a clash. `rng`
+ * is injectable for tests (defaults to Math.random).
+ */
+export function generateSubdomainLabel(rng: () => number = Math.random): string {
+  const fruit = SUBDOMAIN_FRUITS[Math.floor(rng() * SUBDOMAIN_FRUITS.length)];
+  const digits = 100 + Math.floor(rng() * 900);
+  return `${fruit}${digits}`;
+}
+
+/**
  * Normalize user input ("https://Docs.Acme.com/path" → "docs.acme.com").
  * Returns null when the input is not a usable public hostname. IDN input is
  * punycoded via the WHATWG URL parser (browser- and Node-consistent).

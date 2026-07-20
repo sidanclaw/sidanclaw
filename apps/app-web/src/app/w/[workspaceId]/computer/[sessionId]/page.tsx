@@ -4,12 +4,21 @@
  * Take-Over live view — `/w/[workspaceId]/computer/[sessionId]`.
  *
  * The web half of §4.8: a live look at the cloud sandbox browser for one
- * chat session's computer task. Frames arrive over the live stream (SSE
- * straight from the sandbox bridge - sub-second, damage-driven) with the old
- * ~1 fps poll as automatic fallback; clicks and keys forward into the page
- * (scaled to the real viewport), the password never leaves the sandbox page.
- * "I signed in" captures the session to the vault so future tasks skip the
- * login; closing/stopping ends the task (close-to-stop). Channel tasks
+ * chat session's computer task. Transport ladder, best-first:
+ *
+ *   1. Duplex WebSocket straight to the sandbox bridge (binary JPEG frames
+ *      down, JSON input up — sub-second, damage-driven, hover relay).
+ *   2. SSE frames + per-event POST input against the same bridge (older
+ *      backend or a WS-hostile network).
+ *   3. The ~1 fps API frame poll + API input relay (bridge unreachable) —
+ *      shown as "Delayed view", with periodic re-mint attempts to climb
+ *      back up the ladder.
+ *
+ * Clicks and keys forward into the page scaled to the real viewport (the
+ * password never leaves the sandbox page); the first wheel tick of a scroll
+ * relays immediately; a click shows a local ripple so the ocean round-trip
+ * reads as feedback, not deadness. "I signed in" captures the session into a
+ * profile; closing/stopping ends the task (close-to-stop). Channel tasks
  * (Telegram/Slack) deep-link here when they hit a login wall.
  *
  * `?flow=login&site=<site>` marks a Profile-Management "Sign in to a site"
@@ -25,7 +34,12 @@ import { use as usePromise, useCallback, useEffect, useRef, useState } from "rea
 import { useRouter } from "next/navigation";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
-import { LOCAL_ONLY_KEYS, mapClickToFrame } from "@/lib/computer-takeover";
+import {
+  LOCAL_ONLY_KEYS,
+  createWheelForwarder,
+  mapClickToFrame,
+  normalizeNavigateUrl,
+} from "@/lib/computer-takeover";
 import {
   SearchableSelect,
   type SearchableSelectItem,
@@ -46,7 +60,11 @@ import {
 } from "@/lib/api/computer";
 
 const FRAME_INTERVAL_MS = 1_200;
-const WHEEL_FLUSH_MS = 160;
+const MOVE_THROTTLE_MS = 50;
+const REMINT_INTERVAL_MS = 20_000;
+const REMINT_MAX_ATTEMPTS = 3;
+
+type StreamMode = "connecting" | "ws" | "sse" | "poll";
 
 export default function ComputerTakeoverPage(props: {
   params: Promise<{ workspaceId: string; sessionId: string }>;
@@ -66,9 +84,9 @@ export default function ComputerTakeoverPage(props: {
   const [task, setTask] = useState<ComputerTask | null | "loading">("loading");
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
   const [stalled, setStalled] = useState(false);
-  // Live stream session: "minting" until the mint answers; null = polled
-  // fallback (backend without streaming, or the stream died twice).
-  const [stream, setStream] = useState<TakeoverStreamSession | null | "minting">("minting");
+  const [stream, setStream] = useState<TakeoverStreamSession | null>(null);
+  const [mode, setMode] = useState<StreamMode>("connecting");
+  const [ripple, setRipple] = useState<{ x: number; y: number; id: number } | null>(null);
   const [site, setSite] = useState("");
   const [capturing, setCapturing] = useState(false);
   const [captureStatus, setCaptureStatus] = useState<
@@ -77,8 +95,15 @@ export default function ComputerTakeoverPage(props: {
   // Profile the session saves into when the task started identity-less (R2-4).
   const [profileItems, setProfileItems] = useState<SearchableSelectItem[]>([]);
   const [profileId, setProfileId] = useState<string>("");
+  // The take-over toolbar's address bar (§5). Local until submitted — never
+  // forwarded as keystrokes, only as a `navigate` goto.
+  const [address, setAddress] = useState("");
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const frameBoxRef = useRef<HTMLDivElement | null>(null);
   const naturalSize = useRef<{ w: number; h: number } | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const streamRef = useRef<TakeoverStreamSession | null>(null);
+  streamRef.current = stream;
 
   // Arrival = the Take-Over begins: resolve the task and resume the paused
   // sandbox (§4.8 pauses it during the wait, not during the takeover).
@@ -99,27 +124,89 @@ export default function ComputerTakeoverPage(props: {
   }, [sessionId, loginFlow.site]);
 
   // Mint the live stream once the task is resolved. Any failure lands on
-  // null - the polled fallback below takes over, nothing breaks.
+  // the polled fallback below - nothing breaks.
   useEffect(() => {
     if (!task || task === "loading") return;
     let cancelled = false;
     void mintComputerStreamSession(sessionId)
       .then((info) => {
-        if (!cancelled) setStream(info);
+        if (cancelled) return;
+        setStream(info);
+        setMode(info ? (info.wsUrl ? "ws" : "sse") : "poll");
       })
       .catch(() => {
-        if (!cancelled) setStream(null);
+        if (!cancelled) setMode("poll");
       });
     return () => {
       cancelled = true;
     };
   }, [task, sessionId]);
 
-  // Live stream: SSE straight from the sandbox bridge. Frames are JSON with
-  // a base64 JPEG in `data`; the stream is damage-driven, so a static page
-  // sending nothing is normal, and only transport errors count as stalls.
+  // Rung 1 - duplex WebSocket: binary JPEG frames in, input out on the same
+  // socket. Frames render via short-lived object URLs (no base64 inflation).
+  const blobUrls = useRef<string[]>([]);
   useEffect(() => {
-    if (!task || task === "loading" || !stream || stream === "minting") return;
+    if (!task || task === "loading" || mode !== "ws" || !stream?.wsUrl) return;
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let failures = 0;
+    const connect = () => {
+      if (cancelled) return;
+      ws = new WebSocket(stream.wsUrl as string);
+      ws.binaryType = "blob";
+      ws.onopen = () => {
+        failures = 0;
+        wsRef.current = ws;
+      };
+      ws.onmessage = (ev) => {
+        if (!(ev.data instanceof Blob)) return;
+        setStalled(false);
+        const url = URL.createObjectURL(ev.data);
+        blobUrls.current.push(url);
+        // Keep one frame of slack so the <img> currently decoding is never
+        // revoked out from under it.
+        while (blobUrls.current.length > 2) URL.revokeObjectURL(blobUrls.current.shift() as string);
+        setFrameSrc(url);
+      };
+      const drop = () => {
+        if (wsRef.current === ws) wsRef.current = null;
+        if (cancelled) return;
+        setStalled(true);
+        failures += 1;
+        // Two straight connection failures means the socket path is out
+        // (proxy, extension, network) - drop one rung to SSE.
+        if (failures >= 2) setMode("sse");
+        else retryTimer = setTimeout(connect, 1_000);
+      };
+      ws.onclose = drop;
+      ws.onerror = () => ws?.close();
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      wsRef.current = null;
+      try {
+        ws?.close();
+      } catch {
+        /* already closed */
+      }
+    };
+  }, [task, mode, stream]);
+  useEffect(
+    () => () => {
+      for (const url of blobUrls.current) URL.revokeObjectURL(url);
+      blobUrls.current = [];
+    },
+    [],
+  );
+
+  // Rung 2 - SSE from the bridge. Frames are JSON with a base64 JPEG in
+  // `data`; the stream is damage-driven, so a static page sending nothing is
+  // normal, and only transport errors count as stalls.
+  useEffect(() => {
+    if (!task || task === "loading" || mode !== "sse" || !stream) return;
     let errors = 0;
     const es = new EventSource(stream.framesUrl);
     const onFrame = (ev: MessageEvent) => {
@@ -137,21 +224,22 @@ export default function ComputerTakeoverPage(props: {
       errors += 1;
       setStalled(true);
       // EventSource retries by itself; two straight failures means the
-      // bridge is gone - drop to the polled fallback for this visit.
+      // bridge is gone - drop to the polled fallback.
       if (errors >= 2) {
         es.close();
         setStream(null);
+        setMode("poll");
       }
     };
     return () => {
       es.removeEventListener("frame", onFrame);
       es.close();
     };
-  }, [task, sessionId, stream]);
+  }, [task, sessionId, mode, stream]);
 
-  // Frame poll loop - the fallback path (stream === null only).
+  // Rung 3 - the API frame poll (bridge unreachable).
   useEffect(() => {
-    if (!task || task === "loading" || stream !== null) return;
+    if (!task || task === "loading" || mode !== "poll") return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = async () => {
@@ -170,21 +258,50 @@ export default function ComputerTakeoverPage(props: {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [task, sessionId, stream]);
+  }, [task, sessionId, mode]);
 
-  // One input door: direct to the sandbox bridge when streaming, else the
-  // API's per-event route.
-  const streamRef = useRef<TakeoverStreamSession | null>(null);
-  streamRef.current = stream === "minting" ? null : stream;
+  // While polled, periodically try to climb back up the ladder - a bridge
+  // that was mid-restart (or a flaky hop) should not demote the whole visit.
+  useEffect(() => {
+    if (!task || task === "loading" || mode !== "poll") return;
+    let cancelled = false;
+    let attempts = 0;
+    const timer = setInterval(() => {
+      if (cancelled || attempts >= REMINT_MAX_ATTEMPTS) return;
+      attempts += 1;
+      void mintComputerStreamSession(sessionId)
+        .then((info) => {
+          if (cancelled || !info) return;
+          setStream(info);
+          setMode(info.wsUrl ? "ws" : "sse");
+        })
+        .catch(() => {});
+    }, REMINT_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [task, sessionId, mode]);
+
+  // One input door, best transport first: the duplex socket, the bridge's
+  // POST route, then the API relay. `move` is socket-only by design.
   const forwardInput = useCallback(
     (event: TakeoverInput) => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(event));
+        return;
+      }
+      if (event.kind === "move") return;
+      const apiEvent: TakeoverInput =
+        event.kind === "click" ? { kind: "click", x: event.x, y: event.y } : event;
       const live = streamRef.current;
       if (live) {
         void sendStreamInput(live.inputUrl, event).then((ok) => {
-          if (!ok) void sendComputerInput(sessionId, event);
+          if (!ok) void sendComputerInput(sessionId, apiEvent);
         });
       } else {
-        void sendComputerInput(sessionId, event);
+        void sendComputerInput(sessionId, apiEvent);
       }
     },
     [sessionId],
@@ -197,9 +314,59 @@ export default function ComputerTakeoverPage(props: {
       if (!img || !natural) return;
       const point = mapClickToFrame(img.getBoundingClientRect(), natural, e.clientX, e.clientY);
       if (!point) return; // letterbox bar — nothing under it in the frame
-      forwardInput({ kind: "click", x: point.x, y: point.y });
+      const box = frameBoxRef.current?.getBoundingClientRect();
+      if (box) {
+        setRipple({ x: e.clientX - box.left, y: e.clientY - box.top, id: Date.now() });
+      }
+      forwardInput({
+        kind: "click",
+        x: point.x,
+        y: point.y,
+        frameW: natural.w,
+        frameH: natural.h,
+      });
     },
     [forwardInput],
+  );
+  useEffect(() => {
+    if (!ripple) return;
+    const timer = setTimeout(() => setRipple(null), 450);
+    return () => clearTimeout(timer);
+  }, [ripple]);
+
+  // Hover relay (socket-only): dropdown menus and hover states stay alive
+  // under the viewer's cursor. Throttled, latest-position-wins.
+  const moveLast = useRef(0);
+  const moveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const forwardMove = useCallback(
+    (e: React.MouseEvent<HTMLImageElement>) => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const img = imgRef.current;
+      const natural = naturalSize.current;
+      if (!img || !natural) return;
+      const point = mapClickToFrame(img.getBoundingClientRect(), natural, e.clientX, e.clientY);
+      if (!point) return;
+      const send = () => {
+        moveLast.current = Date.now();
+        forwardInput({ kind: "move", x: point.x, y: point.y, frameW: natural.w, frameH: natural.h });
+      };
+      if (Date.now() - moveLast.current >= MOVE_THROTTLE_MS) {
+        send();
+      } else if (!moveTimer.current) {
+        moveTimer.current = setTimeout(() => {
+          moveTimer.current = null;
+          send();
+        }, MOVE_THROTTLE_MS);
+      }
+    },
+    [forwardInput],
+  );
+  useEffect(
+    () => () => {
+      if (moveTimer.current) clearTimeout(moveTimer.current);
+    },
+    [],
   );
 
   const forwardKey = useCallback(
@@ -213,29 +380,38 @@ export default function ComputerTakeoverPage(props: {
     [forwardInput],
   );
 
-  // Wheel forwarding, accumulated: one relayed scroll per flush window keeps
-  // a fling from turning into dozens of round-trips.
-  const wheelDelta = useRef(0);
-  const wheelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Wheel forwarding: leading-edge dispatch (the page starts moving on the
+  // first tick), then one relayed scroll per flush window.
+  const wheel = useRef<ReturnType<typeof createWheelForwarder> | null>(null);
   const forwardWheel = useCallback(
     (e: React.WheelEvent<HTMLDivElement>) => {
-      wheelDelta.current += e.deltaY;
-      if (wheelTimer.current) return;
-      wheelTimer.current = setTimeout(() => {
-        const deltaY = Math.round(wheelDelta.current);
-        wheelDelta.current = 0;
-        wheelTimer.current = null;
-        if (deltaY !== 0) forwardInput({ kind: "scroll", deltaY });
-      }, WHEEL_FLUSH_MS);
+      if (!wheel.current) {
+        wheel.current = createWheelForwarder((deltaY) => forwardInput({ kind: "scroll", deltaY }));
+      }
+      wheel.current.add(e.deltaY);
     },
     [forwardInput],
   );
   useEffect(
     () => () => {
-      if (wheelTimer.current) clearTimeout(wheelTimer.current);
+      wheel.current?.dispose();
+      wheel.current = null;
     },
     [],
   );
+
+  // Browser-chrome navigation from the toolbar (§5): back/forward/reload need
+  // no payload; the address bar normalizes to an http(s) url first (a bad
+  // scheme is dropped here and re-rejected at the seam).
+  const forwardNavigate = useCallback(
+    (action: "back" | "forward" | "reload") => forwardInput({ kind: "navigate", action }),
+    [forwardInput],
+  );
+  const onNavigateTo = useCallback(() => {
+    const url = normalizeNavigateUrl(address);
+    if (!url) return;
+    forwardInput({ kind: "navigate", action: "goto", url });
+  }, [address, forwardInput]);
 
   // An identity-less task needs a profile to save into (409 profile_required)
   // — offer the workspace's profiles to pick from.
@@ -305,7 +481,20 @@ export default function ComputerTakeoverPage(props: {
     <div className="flex h-full flex-col gap-3 p-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-base font-semibold">{t.computer.liveViewTitle}</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-base font-semibold">{t.computer.liveViewTitle}</h1>
+            {mode === "ws" || mode === "sse" ? (
+              <span className="flex items-center gap-1.5 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                {t.computer.streamLive}
+              </span>
+            ) : mode === "poll" ? (
+              <span className="flex items-center gap-1.5 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                {t.computer.streamDelayed}
+              </span>
+            ) : null}
+          </div>
           <p className="mt-0.5 max-w-xl text-xs text-muted-foreground">{t.computer.liveViewSubtitle}</p>
         </div>
         <button
@@ -317,7 +506,101 @@ export default function ComputerTakeoverPage(props: {
         </button>
       </div>
 
+      {/* Browser chrome (§5) — back/forward/reload + address bar. Kept OUTSIDE
+          the frame box so typing an address never forwards as page keystrokes. */}
+      <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/20 p-1.5">
+        <button
+          type="button"
+          aria-label={t.computer.navBack}
+          title={t.computer.navBack}
+          onClick={() => forwardNavigate("back")}
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M13 8H3m0 0l4-4M3 8l4 4" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          aria-label={t.computer.navForward}
+          title={t.computer.navForward}
+          onClick={() => forwardNavigate("forward")}
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M3 8h10m0 0l-4-4m4 4l-4 4" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          aria-label={t.computer.navReload}
+          title={t.computer.navReload}
+          onClick={() => forwardNavigate("reload")}
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3h-3" />
+          </svg>
+        </button>
+        <form
+          className="flex flex-1 items-center gap-2 pl-1"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onNavigateTo();
+          }}
+        >
+          <input
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+            placeholder={t.computer.addressPlaceholder}
+            aria-label={t.computer.addressBarLabel}
+            inputMode="url"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+          />
+          <button
+            type="submit"
+            className="shrink-0 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent"
+          >
+            {t.computer.navGo}
+          </button>
+        </form>
+      </div>
+
       <div
+        ref={frameBoxRef}
         role="application"
         aria-label={t.computer.liveViewTitle}
         tabIndex={0}
@@ -332,6 +615,7 @@ export default function ComputerTakeoverPage(props: {
             src={frameSrc}
             alt=""
             draggable={false}
+            decoding="async"
             onLoad={(e) => {
               naturalSize.current = {
                 w: e.currentTarget.naturalWidth,
@@ -339,6 +623,7 @@ export default function ComputerTakeoverPage(props: {
               };
             }}
             onClick={forwardClick}
+            onMouseMove={forwardMove}
             className="h-full w-full cursor-pointer select-none object-contain"
           />
         ) : (
@@ -346,6 +631,13 @@ export default function ComputerTakeoverPage(props: {
             {t.computer.connecting}
           </div>
         )}
+        {ripple ? (
+          <span
+            key={ripple.id}
+            className="pointer-events-none absolute h-5 w-5 animate-ping rounded-full border-2 border-primary/70"
+            style={{ left: ripple.x - 10, top: ripple.y - 10 }}
+          />
+        ) : null}
         {stalled ? (
           <div className="absolute inset-x-0 bottom-0 bg-background/80 px-3 py-1.5 text-center text-xs text-muted-foreground">
             {t.computer.frameStalled}

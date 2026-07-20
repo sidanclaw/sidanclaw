@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  deriveOwnApexBlocks,
+  deriveReservedSubdomainLabels,
+  generateSubdomainLabel,
   isValidPageSlug,
+  isValidSubdomainLabel,
   normalizeHostname,
   PAGE_SLUG_MAX_LENGTH,
   RESERVED_PAGE_SLUGS,
@@ -98,6 +102,97 @@ describe('[COMP:doc/page-slug-helpers] Page slug + hostname helpers', () => {
       expect(normalizeHostname('notexample.io', { block })).toBe('notexample.io');
       // no blocklist -> any well-shaped public hostname is accepted
       expect(normalizeHostname('app.example.com')).toBe('app.example.com');
+    });
+  });
+
+  describe('deriveOwnApexBlocks', () => {
+    it('derives a `.apex` suffix from a 3-label origin host', () => {
+      expect(deriveOwnApexBlocks(['app.usebrian.ai', 'api.usebrian.ai'])).toEqual([
+        '.usebrian.ai',
+      ]);
+    });
+
+    it('blocks the apex and every subdomain once derived', () => {
+      const block = deriveOwnApexBlocks(['app.usebrian.ai']);
+      // apex itself, a bare subdomain, and a deep subdomain are all blocked
+      expect(normalizeHostname('usebrian.ai', { block })).toBeNull();
+      expect(normalizeHostname('saas.usebrian.ai', { block })).toBeNull();
+      expect(normalizeHostname('deep.saas.usebrian.ai', { block })).toBeNull();
+      // a lookalike registrable domain is NOT blocked
+      expect(normalizeHostname('notusebrian.ai', { block })).toBe('notusebrian.ai');
+    });
+
+    it('yields nothing for a 2-label apex origin (no bare-TLD block)', () => {
+      expect(deriveOwnApexBlocks(['usebrian.ai'])).toEqual([]);
+    });
+
+    it('skips a parent that is a known public suffix (multi-part TLD safety)', () => {
+      // app served directly at a registrable apex under a public suffix:
+      // stripping a label would leave `co.uk`, which must never be blocked.
+      expect(deriveOwnApexBlocks(['example.co.uk'])).toEqual([]);
+      // but a real subdomain under it derives the registrable apex correctly
+      expect(deriveOwnApexBlocks(['app.example.co.uk'])).toEqual(['.example.co.uk']);
+    });
+  });
+
+  describe('isValidSubdomainLabel', () => {
+    it('accepts valid DNS labels', () => {
+      for (const l of ['acme', 'a', 'acme-hq', 'a1b2', 'x'.repeat(63)]) {
+        expect(isValidSubdomainLabel(l)).toBe(true);
+      }
+    });
+    it('rejects invalid labels', () => {
+      for (const l of [
+        '',
+        'x'.repeat(64), // too long
+        '-acme', // leading hyphen
+        'acme-', // trailing hyphen
+        'Acme', // uppercase
+        'a.b', // dot (not a single label)
+        'acme_hq', // underscore
+        'ac me', // space
+      ]) {
+        expect(isValidSubdomainLabel(l)).toBe(false);
+      }
+    });
+  });
+
+  describe('deriveReservedSubdomainLabels', () => {
+    it('always reserves the generic set', () => {
+      const r = deriveReservedSubdomainLabels();
+      expect(r).toContain('www');
+      expect(r).toContain('app');
+      expect(r).toContain('api');
+      expect(r).toContain('admin');
+    });
+    it('reserves the leftmost label of each origin host + operator extras', () => {
+      const r = deriveReservedSubdomainLabels(
+        ['app.usebrian.ai', 'bubbles.usebrian.ai'],
+        ['feed', 'Studio'],
+      );
+      expect(r).toContain('bubbles');
+      expect(r).toContain('feed');
+      expect(r).toContain('studio'); // lowercased
+    });
+  });
+
+  describe('generateSubdomainLabel', () => {
+    it('produces `<fruit><3 digits>` and always a valid DNS label', () => {
+      for (let i = 0; i < 50; i++) {
+        const label = generateSubdomainLabel();
+        expect(label).toMatch(/^[a-z]+[1-9]\d{2}$/);
+        expect(isValidSubdomainLabel(label)).toBe(true);
+      }
+    });
+    it('is deterministic under an injected rng', () => {
+      expect(generateSubdomainLabel(() => 0)).toBe('apple100');
+      expect(generateSubdomainLabel(() => 0.999999)).toBe('watermelon999');
+    });
+    it('never collides with a reserved label', () => {
+      const reserved = new Set(deriveReservedSubdomainLabels());
+      for (let i = 0; i < 50; i++) {
+        expect(reserved.has(generateSubdomainLabel())).toBe(false);
+      }
     });
   });
 });

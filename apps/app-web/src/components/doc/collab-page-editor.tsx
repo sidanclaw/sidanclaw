@@ -70,6 +70,7 @@ import {
   type AssistantIdentity,
 } from "@/lib/api/views";
 import { browserDocExtensions } from "./doc-schema";
+import { useRecordingPlayer } from "@/lib/recordings/recording-player-context";
 import { FloatingToolbar } from "./floating-toolbar";
 import { DocDragHandle } from "./drag-handle";
 import { findBlockPos, ensureBlockId } from "./block-actions";
@@ -255,6 +256,10 @@ function CollabEditorInner({
   onTemplateSeeded?: () => void;
   onContentChange?: () => void;
 }) {
+  // The recording this page was synthesized from, if any — supplied by the doc
+  // shell from the page's anchor key. Null on every other page, which is what
+  // keeps the citation decoration inert outside a brief.
+  const recordingPlayer = useRecordingPlayer();
   const t = useT().docPage;
   const ws = useWorkspaceContext();
 
@@ -653,7 +658,30 @@ function CollabEditorInner({
         },
       },
       extensions: [
-        ...browserDocExtensions({ workspaceId: ws.workspaceId }),
+        ...browserDocExtensions({
+          workspaceId: ws.workspaceId,
+          // On a recording brief, the model's literal `[H:MM:SS]` prose becomes
+          // seek links. `recordingId` is null on every other page, so the
+          // decoration stays inert and the timestamps render as plain text.
+          // `seekTo` is stable, so this does not churn the extension list.
+          ...(recordingPlayer.recordingId
+            ? {
+                timecodes: {
+                  // Clicking a citation does BOTH: move the playhead, and pop
+                  // the transcript at that line. Seeking alone was the whole
+                  // affordance before, and it is nearly invisible — the audio
+                  // jumps somewhere off-screen, and a reader who wants the
+                  // context around the claim (or whose audio will not play at
+                  // all) gets nothing to read.
+                  onSeek: (ms: number) => {
+                    recordingPlayer.seekTo(ms);
+                    recordingPlayer.showTranscriptAt(ms);
+                  },
+                  hrefBase: `/w/${ws.workspaceId}/recordings/${recordingPlayer.recordingId}`,
+                },
+              }
+            : {}),
+        }),
         ...editingExtensions,
         commentExtension,
         Collaboration.configure({ document: doc, field: FRAGMENT_FIELD }),
@@ -670,7 +698,15 @@ function CollabEditorInner({
         }),
       ],
     },
-    [doc, provider, editingExtensions, commentExtension],
+    // `recordingPlayer.recordingId` is load-bearing here: the timecode
+    // decoration is chosen when the extension list is BUILT, and the id is null
+    // on first render (it comes from the page's `anchorKey`, which arrives with
+    // the async page fetch). Without it in the deps the editor is created
+    // timecode-less and never rebuilt, so a brief's `[H:MM:SS]` citations stay
+    // plain text forever — the feature was silently dead on arrival. It flips
+    // null → id exactly once per page, so this costs one rebuild, and the Yjs
+    // doc owns the content so nothing is lost across it.
+    [doc, provider, editingExtensions, commentExtension, recordingPlayer.recordingId],
   );
 
   // Seed a template into a fresh, empty draft (the landing's "Start from a

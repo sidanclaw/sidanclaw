@@ -8,7 +8,12 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { LOCAL_ONLY_KEYS, mapClickToFrame } from "../computer-takeover";
+import {
+  LOCAL_ONLY_KEYS,
+  createWheelForwarder,
+  mapClickToFrame,
+  normalizeNavigateUrl,
+} from "../computer-takeover";
 
 describe("[COMP:app-web/sandbox-takeover] Take-Over click mapping", () => {
   it("maps 1:1 when the box matches the frame aspect", () => {
@@ -47,5 +52,59 @@ describe("[COMP:app-web/sandbox-takeover] Take-Over click mapping", () => {
     }
     expect(LOCAL_ONLY_KEYS.has("Enter")).toBe(false);
     expect(LOCAL_ONLY_KEYS.has("a")).toBe(false);
+  });
+
+  it("wheel forwarder sends the first tick immediately (leading edge), then accumulates per window", async () => {
+    const sent: number[] = [];
+    const fwd = createWheelForwarder((d) => sent.push(d), 40);
+    fwd.add(120);
+    expect(sent).toEqual([120]); // no fixed pre-delay before the page moves
+    fwd.add(30);
+    fwd.add(30);
+    expect(sent).toEqual([120]); // in-window deltas accumulate, not spam
+    await new Promise((r) => setTimeout(r, 60));
+    expect(sent).toEqual([120, 60]); // one relayed scroll per flush window
+    fwd.dispose();
+  });
+
+  it("wheel forwarder drops a window that nets to zero and resets on dispose", async () => {
+    const sent: number[] = [];
+    const fwd = createWheelForwarder((d) => sent.push(d), 40);
+    fwd.add(80);
+    fwd.add(50);
+    fwd.add(-50);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(sent).toEqual([80]); // net-zero accumulation never relays
+    fwd.dispose();
+    fwd.add(10);
+    expect(sent).toEqual([80, 10]); // post-dispose add opens a fresh gesture
+    fwd.dispose();
+  });
+});
+
+describe("[COMP:app-web/sandbox-takeover] Address-bar URL normalization", () => {
+  it("adds https:// to a bare host", () => {
+    expect(normalizeNavigateUrl("cathaypacific.com")).toBe("https://cathaypacific.com/");
+    expect(normalizeNavigateUrl("example.com/path?q=1")).toBe("https://example.com/path?q=1");
+  });
+
+  it("keeps an explicit http(s) scheme", () => {
+    expect(normalizeNavigateUrl("http://example.com")).toBe("http://example.com/");
+    expect(normalizeNavigateUrl("https://example.com/a")).toBe("https://example.com/a");
+  });
+
+  it("trims surrounding whitespace", () => {
+    expect(normalizeNavigateUrl("  example.com  ")).toBe("https://example.com/");
+  });
+
+  it("rejects a non-http(s) scheme so the toolbar never forwards it", () => {
+    expect(normalizeNavigateUrl("file:///etc/passwd")).toBeNull();
+    expect(normalizeNavigateUrl("chrome://settings")).toBeNull();
+    expect(normalizeNavigateUrl("javascript:alert(1)")).toBeNull();
+  });
+
+  it("rejects empty / whitespace-only input", () => {
+    expect(normalizeNavigateUrl("")).toBeNull();
+    expect(normalizeNavigateUrl("   ")).toBeNull();
   });
 });

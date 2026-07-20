@@ -263,6 +263,10 @@ import { createGcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
 import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
+import {
+  createChatSearchRecordingTool,
+  createListRecordingsTool,
+} from './recordings/recording-chat-tools.js'
 import { createArtifactPromoter } from './files/artifact-promote.js'
 import { createFileIngestor } from './files/ingest-file.js'
 import { createFileIngestWorker } from './files/file-ingest-worker.js'
@@ -309,6 +313,7 @@ import { createDeckStore } from './db/deck-store.js'
 import { publicShareRoutes } from './routes/public-share.js'
 import { publicSiteRoutes } from './routes/public-sites.js'
 import { createDomainProvisioner } from './domains/provisioner.js'
+import { deriveOwnApexBlocks, deriveReservedSubdomainLabels } from '@use-brian/shared/page-slugs'
 import { createEmailInboxProvider, setGlobalEmailInboxProvider } from './agentmail/provider.js'
 import { docThemesRoutes } from './routes/doc-themes.js'
 import { runIngestPage } from './doc/ingest-page-runner.js'
@@ -490,6 +495,15 @@ export interface OpenApiEnv {
   // API_URL/APP_URL/AUTHED_APP_URL); this adds policy on top. No hostname
   // policy lives in code.
   PAGE_DOMAIN_BLOCKED_HOSTS?: string
+  // Platform-issued workspace subdomains (docs/architecture/features/
+  // platform-subdomains.md). Customer subdomains → CUSTOMER_SUBDOMAIN_APEX;
+  // first-party workspaces (FIRST_PARTY_SUBDOMAIN_WORKSPACE_IDS, comma list) →
+  // PLATFORM_SUBDOMAIN_APEX. Either apex unset = that half dark.
+  // PLATFORM_SUBDOMAIN_RESERVED adds reserved labels (comma list).
+  CUSTOMER_SUBDOMAIN_APEX?: string
+  PLATFORM_SUBDOMAIN_APEX?: string
+  FIRST_PARTY_SUBDOMAIN_WORKSPACE_IDS?: string
+  PLATFORM_SUBDOMAIN_RESERVED?: string
   // AgentMail assistant-owned email (docs/architecture/integrations/agentmail.md).
   // Hosted passes the platform org key; OSS/self-host passes a BYO key. Unset
   // (open default) → the email surface is dark: inbox provisioning routes 503,
@@ -1334,6 +1348,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       'searchFileContent',
       createSearchFileContentTool({ embedder: createGeminiEmbedder(env.GEMINI_API_KEY) }),
     )
+
+    // The recording surface for chat, registered at the same seam and for the
+    // same reason: chat, the callee executor, and workflows all carry it by
+    // construction, and the actor is rebuilt from the ToolContext per call so
+    // read ceilings hold everywhere.
+    //
+    // Two axes, neither redundant: listRecordings is TEMPORAL ("Tuesday's
+    // call" — semantic search structurally cannot answer that), searchRecording
+    // is PRECISION inside one recording (what was said, by whom, and WHEN, so
+    // the model can cite the moment). Note this searchRecording takes
+    // `recordingId` as a model INPUT — unlike the synthesis-loop twin in
+    // recordings/recording-search-tool.ts, which pins it in the closure so that
+    // loop cannot pivot off the recording it was told to summarize.
+    tools.set(
+      'searchRecording',
+      createChatSearchRecordingTool({ embedder: createGeminiEmbedder(env.GEMINI_API_KEY) }),
+    )
+    tools.set('listRecordings', createListRecordingsTool())
 
     // Bug report tool — the create sink is a port; open default returns a
     // synthetic id (no persistence). The platform injects its bug-report store.
@@ -2805,6 +2837,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     onCloudLoginWall: sandboxOrchestrator
       ? async (toolCtx) => sandboxOrchestrator.pauseForTakeover(toolCtx.sessionId)
       : undefined,
+    // Proactive live-view hand-off (§5): when a cloud browse starts, push the
+    // Take-Over link to the user's channel out-of-band, before any work.
+    // Channels drop mid-turn model text and have no live chip, so the model
+    // relaying the link cannot reach them — deliverToChannel persists to the
+    // session AND pushes to telegram/slack/whatsapp (web is persist-only; the
+    // live chip covers realtime there). The tool only fires this on
+    // interactive sessions (never headless/autonomous).
+    onCloudSessionStarted: async (toolCtx, { takeoverUrl }) => {
+      await deliverToChannel({
+        assistantId: toolCtx.assistantId,
+        userId: toolCtx.userId,
+        text: `🖥️ I've opened a live browser to work on this. You can watch it live or take over (for example, to sign in) here: ${takeoverUrl}`,
+        sessionId: toolCtx.sessionId,
+        channelType: toolCtx.channelType,
+        channelId: toolCtx.channelId,
+        integrationStore: integrationStore ?? undefined,
+        defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN,
+        waConnectorUrl: env.WA_CONNECTOR_URL,
+        waConnectorSecret: env.WA_CONNECTOR_SECRET,
+      })
+    },
     resolvePolicy: resolveComputerToolPolicy,
     // Barrier 2 (§4.9): the flag alone cannot enable unattended computer-use
     // — resolveUnattendedComputerUse also requires live metering, so a
@@ -3616,10 +3669,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     pageDomainsMaxPerWorkspace: env.PAGE_DOMAINS_MAX_PER_WORKSPACE
       ? Number(env.PAGE_DOMAINS_MAX_PER_WORKSPACE)
       : undefined,
-    // Blocked hostnames = this deployment's own origins (derived, exact) +
-    // operator policy from PAGE_DOMAIN_BLOCKED_HOSTS. Nothing hardcoded.
-    pageDomainBlockedHosts: [
-      ...[env.API_URL, env.APP_URL, env.AUTHED_APP_URL]
+    // Blocked hostnames = this deployment's own origins (derived, exact) + the
+    // `.apex` suffixes derived from them (so a subdomain of our own domain,
+    // which rides the wildcard, can't be attached as a BYO domain and falsely
+    // verify) + operator policy from PAGE_DOMAIN_BLOCKED_HOSTS. Nothing hardcoded.
+    pageDomainBlockedHosts: (() => {
+      const originHosts = [env.API_URL, env.APP_URL, env.AUTHED_APP_URL]
         .map((url) => {
           if (!url) return null
           try {
@@ -3628,12 +3683,42 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             return null
           }
         })
-        .filter((h): h is string => Boolean(h)),
-      ...(env.PAGE_DOMAIN_BLOCKED_HOSTS ?? '')
+        .filter((h): h is string => Boolean(h))
+      const operator = (env.PAGE_DOMAIN_BLOCKED_HOSTS ?? '')
         .split(',')
         .map((h) => h.trim().toLowerCase())
+        .filter(Boolean)
+      return [...originHosts, ...deriveOwnApexBlocks(originHosts), ...operator]
+    })(),
+    // Platform-issued workspace subdomains (docs/architecture/features/
+    // platform-subdomains.md). Customer subdomains ride the customer apex;
+    // first-party workspaces (allowlist) ride the product apex. Either apex
+    // unset = that half dark (fail-safe).
+    customerSubdomainApex: env.CUSTOMER_SUBDOMAIN_APEX?.trim().toLowerCase() || undefined,
+    platformSubdomainApex: env.PLATFORM_SUBDOMAIN_APEX?.trim().toLowerCase() || undefined,
+    firstPartySubdomainWorkspaceIds: new Set(
+      (env.FIRST_PARTY_SUBDOMAIN_WORKSPACE_IDS ?? '')
+        .split(',')
+        .map((s) => s.trim())
         .filter(Boolean),
-    ],
+    ),
+    reservedSubdomainLabels: (() => {
+      const originHosts = [env.API_URL, env.APP_URL, env.AUTHED_APP_URL]
+        .map((url) => {
+          if (!url) return null
+          try {
+            return new URL(url).hostname.toLowerCase()
+          } catch {
+            return null
+          }
+        })
+        .filter((h): h is string => Boolean(h))
+      const extra = (env.PLATFORM_SUBDOMAIN_RESERVED ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+      return deriveReservedSubdomainLabels(originHosts, extra)
+    })(),
     workspaceGroupStore,
     analytics,
     taskStore,

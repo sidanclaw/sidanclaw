@@ -129,6 +129,26 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
       .send({ kind: 'teleport' })
     expect(bad.status).toBe(400)
 
+    // Take-over toolbar navigation (§5): reload + an http(s) goto are accepted.
+    const reload = await request(app)
+      .post('/api/computer/tasks/sess-1/input')
+      .send({ kind: 'navigate', action: 'reload' })
+    expect(reload.status).toBe(200)
+    const goto = await request(app)
+      .post('/api/computer/tasks/sess-1/input')
+      .send({ kind: 'navigate', action: 'goto', url: 'https://example.com' })
+    expect(goto.status).toBe(200)
+
+    // A goto without an http(s) url is rejected before it reaches the seam.
+    const badScheme = await request(app)
+      .post('/api/computer/tasks/sess-1/input')
+      .send({ kind: 'navigate', action: 'goto', url: 'file:///etc/passwd' })
+    expect(badScheme.status).toBe(400)
+    const noUrl = await request(app)
+      .post('/api/computer/tasks/sess-1/input')
+      .send({ kind: 'navigate', action: 'goto' })
+    expect(noUrl.status).toBe(400)
+
     const task = await orchestrator.getActiveTask('sess-1')
     const ops = provider.sandboxes.get(task!.sandboxId)?.actions.map((a) => a.op)
     expect(ops).toContain('takeoverInput')

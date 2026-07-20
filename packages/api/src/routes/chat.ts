@@ -3,6 +3,7 @@ import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, up
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels } from '../db/sessions.js'
 import { getSelfEntityId } from '../db/memories.js'
+import { getRecording } from '../db/recordings-store.js'
 import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote } from '@use-brian/core'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
@@ -1196,11 +1197,22 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingDeckId: requestedViewingDeckId } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingDeckId: requestedViewingDeckId } = req.body as {
       message?: string
       sessionId?: string
       model?: string
       fileIds?: string[]
+      /**
+       * Recordings the user attached in THIS turn (recording-to-brain, chat
+       * entry). A recording-sized audio/video dropped in chat does NOT ride as
+       * a `fileId` (that path base64s bytes into `file_cache` and transcribes
+       * inline) — it goes through the recording pipeline (signed URL → GCS →
+       * async transcribe), and its id rides here. The turn ACKNOWLEDGES + links
+       * rather than summarizing: the transcript is not ready this turn, it
+       * lands on the recording's own brief page. See recordings.md → "Chat
+       * entry to the recording pipeline".
+       */
+      attachedRecordingIds?: string[]
       truncateFromMessageId?: string
       timezone?: string
       assistantId?: string
@@ -1949,7 +1961,35 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
-      const userMessageText = attachmentContext + (message ?? '')
+      // Recordings attached in THIS turn (recording-to-brain, chat entry). Unlike
+      // a fileId, a recording is NOT content the turn can read — it transcribes
+      // async on the worker, and its notes land on its own brief page. So the
+      // turn is handed an ACKNOWLEDGE + LINK instruction, never the audio: the
+      // model confirms and shares the link rather than pretending to summarize a
+      // transcript that does not exist yet. Fetched under the user's RLS, so a
+      // recording they cannot see is silently skipped.
+      let recordingContext = ''
+      if (Array.isArray(attachedRecordingIds) && attachedRecordingIds.length > 0) {
+        const recs = await Promise.all(
+          attachedRecordingIds.map((id) => getRecording(user.id, id).catch(() => null)),
+        )
+        const lines = recs
+          .filter((r): r is NonNullable<typeof r> => r !== null)
+          .map((r) => {
+            const title = r.title ?? r.fileName ?? 'recording'
+            const url = `/w/${r.workspaceId}/recordings/${r.id}`
+            return `- "${title}" → ${url}`
+          })
+        if (lines.length > 0) {
+          recordingContext =
+            `[The user attached ${lines.length === 1 ? 'a recording' : `${lines.length} recordings`} to this message. ` +
+            `Each is transcribing in the background; its notes and action items will appear on its own page. ` +
+            `Acknowledge briefly and share the link(s) as markdown. Do NOT attempt to summarize the content — ` +
+            `the transcript is not ready yet. Recordings:\n${lines.join('\n')}]\n\n`
+        }
+      }
+
+      const userMessageText = recordingContext + attachmentContext + (message ?? '')
 
       // Add text block after image blocks so images are seen in context
       if (userMessageText) {

@@ -33,6 +33,7 @@ import { PrivacySection } from "./sections/privacy-section";
 import { BillingSection } from "./sections/billing-section";
 import { UsageSection } from "./sections/usage-section";
 import { BrowserProfilesSection } from "./sections/browser-profiles-section";
+import { DomainsSection } from "./sections/domains-section";
 import {
   WorkspaceGeneralSection,
   WorkspaceMembersSection,
@@ -47,6 +48,7 @@ export type SettingsSection =
   | "ws-general"
   | "ws-members"
   | "ws-llm-key"
+  | "ws-domains"
   | "ws-plan"
   | "ws-usage"
   | "ws-browser-profiles";
@@ -90,6 +92,9 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-general",
   "ws-members",
   "ws-llm-key",
+  // Domains (custom-domains.md + platform-subdomains.md) — the workspace-level
+  // manager for published-page hostnames. Open feature, so OSS keeps it too.
+  "ws-domains",
   "ws-plan",
   "ws-usage",
   // Computer-use Profile-Management (hosted-only: profiles + the vault are
@@ -103,6 +108,7 @@ const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-general",
   "ws-members",
   "ws-llm-key",
+  "ws-domains",
 ];
 
 export function SettingsModal({ open, initialSection = "profile", onClose }: Props) {
@@ -194,6 +200,7 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
                   ? t.chrome.settingsModal.upgrade.teammatesNav
                   : t.chrome.settingsModal.workspace.members,
                 "ws-llm-key": t.chrome.settingsModal.workspace.llmKey,
+                "ws-domains": t.chrome.settingsModal.workspace.domains,
                 "ws-plan": t.chrome.settingsModal.workspace.plan,
                 "ws-usage": t.chrome.settingsModal.workspace.usage,
                 "ws-browser-profiles": t.chrome.settingsModal.workspace.browserProfiles,
@@ -324,6 +331,10 @@ function SectionBody({
       return isOssEdition() ? <HostedUpgradeSection /> : <WorkspaceMembersSection />;
     case "ws-llm-key":
       return <WorkspaceLlmKeySection />;
+    case "ws-domains":
+      // Domains work in both editions (open feature): the workspace-level
+      // subdomain + custom-domain manager (platform-subdomains.md).
+      return <DomainsSection />;
     case "ws-plan":
       // Billing is per-workspace — the "Plan" section IS the billing
       // surface (plan tier, payment method, invoices, upgrade/cancel).

@@ -17,7 +17,12 @@ import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
 import { isAutonomousToolContext } from '../tools/capability-gate.js'
 import type { Sensitivity } from '../security/sensitivity.js'
-import { looksLikeCaptcha, looksLikeLoginWall, registrableSiteOf } from './orchestrator.js'
+import {
+  looksLikeCaptcha,
+  looksLikeConnectionBlock,
+  looksLikeLoginWall,
+  registrableSiteOf,
+} from './orchestrator.js'
 import {
   describeProfileResolution,
   resolveProfileForCall,
@@ -125,6 +130,18 @@ export type CreateComputerToolsOptions = {
    * the live view resumes it when the user arrives).
    */
   onCloudLoginWall?: (context: ToolContext) => Promise<void>
+  /**
+   * Fired ONCE per chat session the first time a CLOUD browse starts (§5):
+   * hands the user the Take-Over live-view link proactively, before the
+   * assistant does any work, so they are told where to watch at the START.
+   * Channel surfaces (Telegram/Slack/WhatsApp) have no live chip and drop
+   * mid-turn model text (`assembleDeliverableText`), so the model relaying
+   * the link cannot be relied on there — boot backs this with an out-of-band
+   * `deliverToChannel` push. `takeoverUrl` is the same session-keyed deep
+   * link `takeoverLinkFor` builds. Interactive sessions only (a headless
+   * autonomous run has no live watcher, so the tool never fires it).
+   */
+  onCloudSessionStarted?: (context: ToolContext, info: { takeoverUrl: string }) => Promise<void>
   fuse?: { maxCallsPerSession?: number; maxWallMsPerSession?: number; idleResetMs?: number }
   now?: () => number
 }
@@ -149,6 +166,11 @@ type SessionBrowseState = {
   lastCallAt: number
   /** Consecutive snapshots showing a human-verification challenge (§5). */
   captchaHits: number
+  /**
+   * The proactive live-view link has been handed to the user for this
+   * session (§5) — pushed once, on the first cloud browse, never repeated.
+   */
+  takeoverAnnounced: boolean
 }
 
 const MAX_TRACKED_SESSIONS = 500
@@ -201,6 +223,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         firstCallAt: now(),
         lastCallAt: now(),
         captchaHits: 0,
+        takeoverAnnounced: false,
       }
       sessions.set(context.sessionId, state)
       if (sessions.size > MAX_TRACKED_SESSIONS) {
@@ -356,12 +379,33 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     return { state }
   }
 
-  function backendErrorResult(err: unknown): ToolResult {
+  function backendErrorResult(err: unknown, backend?: BrowserBackendKind): ToolResult {
+    const message = err instanceof Error ? err.message : String(err)
+    const code = err instanceof BrowserBackendError ? err.code : undefined
+    // Connection-level block (§5): the site refused the connection before any
+    // page loaded, so there is NOTHING to see, watch, or take over. On the
+    // cloud backend this is almost always the anti-bot edge dropping the
+    // datacenter IP. The model must not offer a dead live-view / take-over
+    // link (the Cathay Pacific dead end, 2026-07-21) nor retry the same
+    // address — it must report the block honestly. `sanitizeDeliveryText`
+    // cannot catch this; the honesty lives in the tool result the model reads.
+    if (backend === 'cloud' && looksLikeConnectionBlock(message)) {
+      return {
+        data:
+          `ERROR: ${message}\n\n` +
+          'The site refused the connection before any page could load, so there is no page to see, watch, or take over. ' +
+          "This is commonly an anti-bot edge (for example Akamai or DataDome) rejecting the cloud browser's datacenter network address; it can also be a transient network fault. " +
+          'Do NOT offer the user a live-browser or take-over link for this, and do not retry the same address. ' +
+          'Report plainly that this site blocks automated browsing from this environment; the reliable way through a wall like this is browsing from a real browser on the user\'s own machine.',
+        isError: true,
+        meta: { ...(code ? { code } : {}), connectionBlock: true },
+      }
+    }
     if (err instanceof BrowserBackendError) {
       return { data: `ERROR: ${err.message}`, isError: true, meta: { code: err.code } }
     }
     return {
-      data: `ERROR: ${err instanceof Error ? err.message : String(err)}`,
+      data: `ERROR: ${message}`,
       isError: true,
     }
   }
@@ -526,6 +570,20 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       try {
         const res = await providerFor(backend).navigate(callCtx(context, gate.state), input.url)
         emit({ type: 'browser_action', op: 'navigate', backend, host: hostOf(res.url), ok: true }, context)
+        // Proactive live-view hand-off (§5): the moment cloud browsing starts,
+        // push the user the Take-Over link out-of-band, ONCE per session,
+        // before any browse work. Channel surfaces have no live chip and drop
+        // mid-turn model text (`assembleDeliverableText`), so relying on the
+        // model to relay the link fails there; this guarantees the user is
+        // told where to watch at the start. Interactive sessions only — a
+        // headless autonomous run has no live watcher.
+        if (backend === 'cloud' && !gate.state.takeoverAnnounced && !isAutonomousToolContext(context)) {
+          gate.state.takeoverAnnounced = true
+          const startLink = opts.takeoverLinkFor?.(context) ?? null
+          if (startLink) {
+            void opts.onCloudSessionStarted?.(context, { takeoverUrl: startLink })?.catch(() => undefined)
+          }
+        }
         // Cloud login wall → escalate to the web Take-Over live view (§4.8).
         if (backend === 'cloud' && looksLikeLoginWall(res.url)) {
           try {
@@ -554,7 +612,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           data:
             `Opened ${res.url} (${backend} browser).` +
             (liveLink
-              ? ` The user can watch this browser live and take over (e.g. to sign in) at: ${liveLink} — share that link whenever they ask to watch, sign in, or take over.`
+              ? ` The user has already been sent this live-view link to watch or take over (e.g. to sign in): ${liveLink}. Only repeat it if they ask again.`
               : '') +
             (snap ? `\n\n${snap.rendered}` : ' Take browserSnapshot to see the page.') +
             advice,
@@ -576,7 +634,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           },
           context,
         )
-        return backendErrorResult(err)
+        return backendErrorResult(err, backend)
       }
     },
   })
@@ -622,7 +680,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           },
           context,
         )
-        return backendErrorResult(err)
+        return backendErrorResult(err, backend)
       }
     },
   })
@@ -699,7 +757,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           },
           context,
         )
-        return backendErrorResult(err)
+        return backendErrorResult(err, backend)
       }
     },
   })
@@ -740,7 +798,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           },
           context,
         )
-        return backendErrorResult(err)
+        return backendErrorResult(err, backend)
       }
     },
   })
@@ -777,7 +835,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           },
           context,
         )
-        return backendErrorResult(err)
+        return backendErrorResult(err, backend)
       }
     },
   })
@@ -859,6 +917,10 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           isError: true,
         }
       }
+      // browserReadPage is cloud-only by construction (§12); the fixed backend
+      // lets backendErrorResult apply the same connection-block posture (§5) a
+      // hard edge reject gets on the interactive tools.
+      const backend: BrowserBackendKind = 'cloud'
       // Identity-less on purpose: no profile resolution, no profileId in the
       // call context — a worker read never initiates a vault injection.
       const ctx: BrowserCallContext = {
@@ -904,7 +966,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
             },
             context,
           )
-          return backendErrorResult(err)
+          return backendErrorResult(err, backend)
         }
       })
     },
@@ -934,6 +996,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           firstCallAt: now(),
           lastCallAt: now(),
           captchaHits: 0,
+          takeoverAnnounced: false,
         })
       }
     },

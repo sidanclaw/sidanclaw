@@ -1185,14 +1185,20 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   let statusMessageId: string | null = null
   let lastStatusUpdate = 0
   const STATUS_THROTTLE_MS = 1500
+  // Cap the timeline so a long browse (dozens of clicks) doesn't stack an
+  // ever-growing wall of lines — keep the most recent actions (the live one
+  // is always last) and summarize the rest into a single "+N earlier" header.
+  const MAX_TIMELINE_LINES = 5
 
   function formatToolTimeline(): string {
-    const lines: string[] = []
-    for (const t of toolTimeline) {
+    if (toolTimeline.length === 0) return 'Thinking...'
+    const lines = toolTimeline.map((t) => {
       const label = t.description ?? humanizeToolName(t.name)
-      lines.push(t.done ? `✓ ${label}` : `⏳ ${label}`)
-    }
-    return lines.join('\n') || 'Thinking...'
+      return t.done ? `✓ ${label}` : `⏳ ${label}`
+    })
+    if (lines.length <= MAX_TIMELINE_LINES) return lines.join('\n')
+    const hidden = lines.length - MAX_TIMELINE_LINES
+    return [`(+${hidden} earlier step${hidden === 1 ? '' : 's'})`, ...lines.slice(-MAX_TIMELINE_LINES)].join('\n')
   }
 
   async function updateToolStatus(): Promise<void> {

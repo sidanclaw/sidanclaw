@@ -38,6 +38,7 @@ type S3Sdk = {
   S3Client: typeof import('@aws-sdk/client-s3').S3Client
   PutObjectCommand: typeof import('@aws-sdk/client-s3').PutObjectCommand
   GetObjectCommand: typeof import('@aws-sdk/client-s3').GetObjectCommand
+  HeadObjectCommand: typeof import('@aws-sdk/client-s3').HeadObjectCommand
   DeleteObjectCommand: typeof import('@aws-sdk/client-s3').DeleteObjectCommand
   getSignedUrl: typeof import('@aws-sdk/s3-request-presigner').getSignedUrl
   Upload: typeof import('@aws-sdk/lib-storage').Upload
@@ -56,6 +57,7 @@ function loadSdk(): Promise<S3Sdk> {
         S3Client: client.S3Client,
         PutObjectCommand: client.PutObjectCommand,
         GetObjectCommand: client.GetObjectCommand,
+        HeadObjectCommand: client.HeadObjectCommand,
         DeleteObjectCommand: client.DeleteObjectCommand,
         getSignedUrl: presigner.getSignedUrl,
         Upload: libStorage.Upload,
@@ -199,6 +201,31 @@ export function createS3FilesClient({
             createdByAssistantId: custom['created-by-assistant-id'],
             mime,
           },
+        }
+      } catch (err: unknown) {
+        if (isNotFound(err)) return null
+        throw err
+      }
+    },
+
+    async statBlob(key) {
+      // HeadObject is S3's `getMetadata` — same request as GetObject minus the
+      // body, so a 500 MB recording is sized without moving a byte through
+      // this process. That is the whole reason `statBlob` exists; a BYO-S3
+      // workspace's recording must never be downloaded just to learn its size.
+      const { sdk, s3 } = await client()
+      try {
+        const out = await s3.send(new sdk.HeadObjectCommand({ Bucket: bucket, Key: key }))
+        const custom = (out.Metadata ?? {}) as Record<string, string | undefined>
+        // ContentLength is a real number here (unlike GCS's int64-as-string).
+        const size = typeof out.ContentLength === 'number' ? out.ContentLength : 0
+        return {
+          sizeBytes: Number.isFinite(size) ? size : 0,
+          mime:
+            (typeof out.ContentType === 'string' && out.ContentType) ||
+            custom.mime ||
+            'application/octet-stream',
+          updatedAt: out.LastModified ?? null,
         }
       } catch (err: unknown) {
         if (isNotFound(err)) return null

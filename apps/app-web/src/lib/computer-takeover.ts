@@ -31,6 +31,64 @@ export function mapClickToFrame(
   return { x, y };
 }
 
+/**
+ * Wheel relay pacing: the first event of a scroll gesture forwards
+ * IMMEDIATELY (leading edge - the old trailing-only accumulator added a
+ * fixed 160 ms before anything moved), then further deltas accumulate into
+ * one relayed scroll per flush window so a fling never turns into dozens of
+ * round-trips.
+ */
+export function createWheelForwarder(
+  send: (deltaY: number) => void,
+  flushMs = 160,
+): { add: (deltaY: number) => void; dispose: () => void } {
+  let acc = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const flush = () => {
+    timer = null;
+    const delta = Math.round(acc);
+    acc = 0;
+    if (delta !== 0) {
+      send(delta);
+      timer = setTimeout(flush, flushMs); // keep windows spaced while the fling lasts
+    }
+  };
+  return {
+    add(deltaY: number) {
+      if (timer === null) {
+        const lead = Math.round(deltaY);
+        if (lead !== 0) send(lead);
+        timer = setTimeout(flush, flushMs);
+      } else {
+        acc += deltaY;
+      }
+    },
+    dispose() {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      acc = 0;
+    },
+  };
+}
+
+/**
+ * Normalize an address-bar entry for a take-over `goto` (§5). A bare host gets
+ * `https://`; only http(s) survives — a `file:`/`chrome:`/`javascript:` target
+ * returns null so the toolbar never forwards it (the seam re-checks too).
+ */
+export function normalizeNavigateUrl(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const u = new URL(withScheme);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
 /** Keys that carry no input on their own — never worth a relay round-trip. */
 export const LOCAL_ONLY_KEYS = new Set([
   "Shift",

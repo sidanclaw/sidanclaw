@@ -3,6 +3,7 @@ import { createComputerTools, SEND_LIKE_LABEL_PATTERN, type ComputerToolProfiles
 import { createLocalBrowserProvider } from '../local-browser-provider.js'
 import { createInMemoryBrowserProfileStore } from '../profiles.js'
 import type { Tool, ToolContext } from '../../tools/types.js'
+import { BrowserBackendError } from '../types.js'
 import type { BrowserProvider, RelayCommandResult } from '../types.js'
 
 function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
@@ -103,6 +104,48 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     await run(tools.browserNavigate, { url: 'https://news.ycombinator.com/' })
     expect(cloud.calls).toEqual(['navigate:https://news.ycombinator.com/', 'snapshot'])
     expect(local.calls).toEqual([])
+  })
+
+  it('a cloud connection-level reject (ERR_HTTP2_PROTOCOL_ERROR) is honest and never offers take-over (§5)', async () => {
+    const cloud = fakeProvider('cloud')
+    cloud.navigate = async () => {
+      throw new BrowserBackendError(
+        'net::ERR_HTTP2_PROTOCOL_ERROR at https://www.cathaypacific.com/cx/en_US.html',
+        'backend_error',
+      )
+    }
+    let pushed = false
+    const tools = createComputerTools({
+      local: fakeProvider('local'),
+      cloud,
+      cloudAvailable: () => true,
+      takeoverLinkFor: () => 'https://app.test/w/ws-1/computer/sess-1',
+      onCloudSessionStarted: async () => {
+        pushed = true
+      },
+    })
+    const res = await run(tools.browserNavigate, { url: 'https://www.cathaypacific.com/cx/en_US.html' })
+    expect(res.isError).toBe(true)
+    expect((res.meta as { connectionBlock?: boolean } | undefined)?.connectionBlock).toBe(true)
+    // No dead take-over: the live-view link must appear nowhere in the result.
+    expect(String(res.data)).not.toContain('app.test/w/ws-1/computer')
+    expect(String(res.data)).toMatch(/do NOT offer|no page to see, watch, or take over/i)
+    // The proactive push fires only AFTER a successful navigate — a throw means
+    // the user is never handed a link to a page that never loaded.
+    expect(pushed).toBe(false)
+  })
+
+  it('an ordinary cloud backend error keeps the plain message (no false connection-block posture)', async () => {
+    const cloud = fakeProvider('cloud')
+    cloud.navigate = async () => {
+      throw new BrowserBackendError('the sandbox timed out', 'backend_error')
+    }
+    const tools = createComputerTools({ local: fakeProvider('local'), cloud, cloudAvailable: () => true })
+    const res = await run(tools.browserNavigate, { url: 'https://example.com/' })
+    expect(res.isError).toBe(true)
+    expect((res.meta as { connectionBlock?: boolean } | undefined)?.connectionBlock).toBeUndefined()
+    expect(String(res.data)).toContain('the sandbox timed out')
+    expect(String(res.data)).not.toMatch(/blocks automated browsing/i)
   })
 
   it('navigate returns the page elements inline and caches labels for the send gate', async () => {
@@ -518,6 +561,74 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       const again = await run(tools.browserSnapshot, {}, ctx)
       expect(String(again.data)).toContain('ONCE')
       expect(String(again.data)).not.toContain('STOP')
+    })
+  })
+
+  describe('proactive live-view hand-off (§5): the link is pushed once when cloud browsing starts', () => {
+    it('fires onCloudSessionStarted once on the first cloud navigate, carrying the session-keyed link, and tells the model the user already has it', async () => {
+      const announced: string[] = []
+      const tools = createComputerTools({
+        local: fakeProvider('local'),
+        cloud: fakeProvider('cloud'),
+        cloudAvailable: () => true,
+        takeoverLinkFor: () => 'https://app.test/w/ws-1/computer/sess-1',
+        onCloudSessionStarted: async (_ctx, info) => void announced.push(info.takeoverUrl),
+      })
+      const res = await run(tools.browserNavigate, { url: 'https://news.ycombinator.com/' })
+      expect(announced).toEqual(['https://app.test/w/ws-1/computer/sess-1'])
+      // The reactive tool-result text now assumes the user already has the link.
+      expect(String(res.data)).toContain('already been sent this live-view link')
+    })
+
+    it('does not push again on later navigates in the same session (once per session)', async () => {
+      const announced: string[] = []
+      const tools = createComputerTools({
+        local: fakeProvider('local'),
+        cloud: fakeProvider('cloud'),
+        cloudAvailable: () => true,
+        takeoverLinkFor: () => 'https://app.test/live',
+        onCloudSessionStarted: async (_ctx, info) => void announced.push(info.takeoverUrl),
+      })
+      const ctx = toolContext()
+      await run(tools.browserNavigate, { url: 'https://news.ycombinator.com/' }, ctx)
+      await run(tools.browserNavigate, { url: 'https://example.com/' }, ctx)
+      expect(announced).toEqual(['https://app.test/live'])
+    })
+
+    it('never pushes on the local backend (take-over is cloud-only)', async () => {
+      const announced: string[] = []
+      const tools = createComputerTools({
+        local: fakeProvider('local'),
+        cloud: fakeProvider('cloud'),
+        cloudAvailable: () => true,
+        profiles: await profilesWith([{ name: 'Personal', defaultBackend: 'local' }]),
+        takeoverLinkFor: () => 'https://app.test/live',
+        onCloudSessionStarted: async (_ctx, info) => void announced.push(info.takeoverUrl),
+      })
+      await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' })
+      expect(announced).toEqual([])
+    })
+
+    it('never pushes on an autonomous run, even when unattended browsing is allowed (no live watcher)', async () => {
+      const announced: string[] = []
+      const cloud = fakeProvider('cloud')
+      const tools = createComputerTools({
+        local: fakeProvider('local'),
+        cloud,
+        cloudAvailable: () => true,
+        unattendedEnabled: () => true,
+        getWorkspacePlan: async () => 'pro',
+        takeoverLinkFor: () => 'https://app.test/live',
+        onCloudSessionStarted: async (_ctx, info) => void announced.push(info.takeoverUrl),
+      })
+      const res = await run(
+        tools.browserNavigate,
+        { url: 'https://news.ycombinator.com/' },
+        toolContext({ channelType: 'workflow' }),
+      )
+      expect(res.isError ?? false).toBe(false) // the navigate itself is allowed
+      expect(announced).toEqual([]) // but a headless run gets no proactive push
+      expect(cloud.calls).toContain('navigate:https://news.ycombinator.com/')
     })
   })
 

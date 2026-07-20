@@ -16,9 +16,18 @@
  * didn't seeds from the workspace default (else UNSET, prompting a choice).
  * The blueprint roster + workspace default are fetched in parallel with the
  * upload so the dialog never waits on them.
+ *
+ * When the roster is EMPTY the picker also offers the meeting starter
+ * (`RECORDING_INSTALL_STARTER`): otherwise a workspace that has authored no
+ * blueprint can only pick ingest-only, and the recording lands with no brief
+ * page — no citations, no player. The starter installs on confirm, at the one
+ * moment the user has demonstrated intent, so no workspace accumulates an
+ * unowned default nobody edits. See structural-synthesis.md → "Starter
+ * blueprints".
  */
 
 import { createElement, useState, useCallback } from "react";
+import { MEETING_NOTES_STARTER } from "@use-brian/doc-model";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -28,13 +37,16 @@ import {
   RecordingApiError,
   type RecordingQueued,
 } from "@/lib/api/recordings";
-import { listCustomPageTemplates } from "@/lib/api/views";
+import { listCustomPageTemplates, createCustomPageTemplate } from "@/lib/api/views";
 import { getWorkspaceDefaultBlueprint } from "@/lib/api/workspaces";
 import {
   buildBlueprintPickerItems,
+  hasNoBlueprints,
   recordingBlueprintToSlug,
   seedRecordingBlueprint,
+  starterInstallInput,
   RECORDING_INGEST_ONLY,
+  RECORDING_INSTALL_STARTER,
 } from "@/lib/blueprints";
 import { BlueprintConfirmPicker } from "@/components/recordings/blueprint-confirm-picker";
 import type { SearchableSelectItem } from "@/components/ui/searchable-select";
@@ -47,6 +59,27 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
   const [message, setMessage] = useState<string>("");
   const [result, setResult] = useState<RecordingQueued | null>(null);
 
+  /**
+   * Install the meeting starter and return its new blueprint id, or undefined
+   * if the install failed — non-fatal by design: the user already accepted the
+   * cost, so a template-write outage must degrade to ingest-only rather than
+   * cost them the recording.
+   */
+  const installStarter = useCallback(async (): Promise<string | undefined> => {
+    try {
+      const created = await createCustomPageTemplate(
+        workspaceId,
+        starterInstallInput(MEETING_NOTES_STARTER, {
+          name: t.recordings.starterName,
+          description: t.recordings.starterDescription,
+        }),
+      );
+      return created.id;
+    } catch {
+      return undefined;
+    }
+  }, [workspaceId, t]);
+
   const run = useCallback(
     /**
      * @param blueprintSelection The calling surface's RAW picker selection
@@ -54,8 +87,11 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
      *   NOT the submitted slug. It seeds the dialog picker; the user's final
      *   in-dialog choice is what submits. Omit when the surface has no picker
      *   (chat dock, landing) — the seed falls to the workspace default.
+     * @returns The queued recording (`recordingId`) on success, or `null` if the
+     *   user cancelled the cost confirm or the upload failed. The chat dock reads
+     *   this to reference the recording in its turn; state-only callers ignore it.
      */
-    async (file: File, blueprintSelection?: string) => {
+    async (file: File, blueprintSelection?: string): Promise<RecordingQueued | null> => {
       setResult(null);
       setMessage("");
       try {
@@ -72,9 +108,16 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         // Server-authoritative duration + surcharge → confirm before any model call.
         const est = await estimateRecording(recordingId);
         const [roster, workspaceDefault] = await Promise.all([rosterPromise, defaultPromise]);
+        const rosterItems = buildBlueprintPickerItems(roster);
         const items: SearchableSelectItem[] = [
           { value: RECORDING_INGEST_ONLY, label: t.recordings.blueprintAuto },
-          ...buildBlueprintPickerItems(roster),
+          ...rosterItems,
+          // Only when the workspace has authored nothing: alongside a real
+          // roster the starter is just one more template competing with the
+          // user's own, and the gap it exists to close is not there.
+          ...(hasNoBlueprints(roster)
+            ? [{ value: RECORDING_INSTALL_STARTER, label: t.recordings.starterName }]
+            : []),
         ];
         // The user's live in-dialog selection. The picker component owns the
         // rendered state; this slot is what the hook reads after confirm.
@@ -101,17 +144,25 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         });
         if (!ok) {
           setStatus("idle");
-          return;
+          return null;
         }
 
         setStatus("processing");
-        const res = await processRecording(recordingId, recordingBlueprintToSlug(chosen));
+        // The starter is a sentinel, not an id — install it and submit the id
+        // it returns. Installing AFTER confirm ties the template write to
+        // demonstrated intent; a failed install falls through to ingest-only.
+        const slug =
+          chosen === RECORDING_INSTALL_STARTER
+            ? await installStarter()
+            : recordingBlueprintToSlug(chosen);
+        const res = await processRecording(recordingId, slug);
         setResult(res);
         setStatus("done");
         // The 202 means QUEUED — the worker transcribes in the background.
         // Claiming "transcribed and filed" here was the 2026-07-10 honesty
         // bug: the message showed before (or instead of) the actual work.
         setMessage(t.recordings.queued);
+        return res;
       } catch (e) {
         setStatus("error");
         const code = e instanceof RecordingApiError ? e.code : undefined;
@@ -122,9 +173,10 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
               ? t.recordings.cannotReadDuration
               : t.recordings.failed,
         );
+        return null;
       }
     },
-    [workspaceId, assistantId, t],
+    [workspaceId, assistantId, t, installStarter],
   );
 
   return { run, status, message, result };

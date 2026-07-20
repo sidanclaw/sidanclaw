@@ -29,11 +29,13 @@ import multer from 'multer'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import {
+  generateSubdomainLabel,
   isValidPageSlug,
+  isValidSubdomainLabel,
   normalizeHostname,
   suggestPageSlug,
 } from '@use-brian/shared/page-slugs'
-import type { PageDomainStore } from '../db/page-domain-store.js'
+import type { PageDomain, PageDomainStore } from '../db/page-domain-store.js'
 import type { DomainProvisioner } from '../domains/provisioner.js'
 import {
   AUTO_TITLE_MIN_CHARS,
@@ -82,6 +84,7 @@ import {
   customTemplateUpdateInputSchema,
   extractionSpecToBlocks,
 } from '@use-brian/core'
+import { getRecording } from '../db/recordings-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
@@ -152,6 +155,18 @@ export type ViewsRouteOptions = {
    *  Config, never code: boot derives the deployment's own origin hosts and
    *  appends `PAGE_DOMAIN_BLOCKED_HOSTS`. */
   pageDomainBlockedHosts?: string[]
+  /**
+   * Platform-issued workspace subdomains (docs/architecture/features/
+   * platform-subdomains.md). The claim/rename/release/suggest routes are live
+   * only when the relevant apex is configured. Customer workspaces ride
+   * `customerSubdomainApex`; workspaces in `firstPartySubdomainWorkspaceIds`
+   * ride `platformSubdomainApex`. `reservedSubdomainLabels` are labels no
+   * workspace may claim (derived origin-host labels + operator extras).
+   */
+  customerSubdomainApex?: string
+  platformSubdomainApex?: string
+  firstPartySubdomainWorkspaceIds?: ReadonlySet<string>
+  reservedSubdomainLabels?: string[]
   /**
    * Workspace groups (migration 252) — backs the Share-tab "Groups" + the
    * member/group pickers. Optional: when absent the group routes return 503.
@@ -314,6 +329,22 @@ function viewMetadata(view: SavedView) {
     // once via POST /views/:id/commit-created. Re-read on reload so a
     // refreshed-but-uncommitted draft re-arms instead of going stale.
     createdEventPending: view.createdEventPending ?? false,
+    // Stable cross-run identity (`saved_views.anchor_key`). The doc client
+    // needs it to know a page was SYNTHESIZED FROM something: a recording
+    // brief's key is `recording-synthesis:<recordingId>`, and that string is
+    // the page's only link back to the recording it was written from. Without
+    // it the recording chrome cannot mount and the page's `[H:MM:SS]`
+    // citations have nothing to seek — the store has always projected it, this
+    // whitelist just never forwarded it. See recordings.md → "The brief page
+    // IS the recording surface".
+    anchorKey: view.anchorKey ?? null,
+    // A manually-linked recording (migration 339). The doc client resolves the
+    // anchorKey recording first and falls back to this, so a hand-authored page
+    // can surface an existing recording's player/transcript/action items. Same
+    // whitelist lesson as `anchorKey`: the store projects it, but this response
+    // is hand-maintained, so a field the client relies on must be listed here
+    // or it silently never crosses the wire.
+    linkedRecordingId: view.linkedRecordingId ?? null,
     page: view.page,
     createdAt: view.createdAt.toISOString(),
     updatedAt: view.updatedAt.toISOString(),
@@ -636,6 +667,21 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       }
     }
 
+    // Linking a recording (migration 339): the FK only proves the id is a real
+    // recording, not that it belongs to THIS page's workspace or that the
+    // caller can see it. `getRecording` runs under the caller's RLS, so a
+    // recording in a workspace they are not a member of returns null — reject
+    // it rather than let a page point at a recording its viewers can't open.
+    // `null` (unlink) skips the check.
+    if (parsed.data.linkedRecordingId != null) {
+      const view = await opts.savedViewStore.getById(userId, req.params.id)
+      if (!view) return notFound(res, 'Saved view not found')
+      const rec = await getRecording(userId, parsed.data.linkedRecordingId)
+      if (!rec || rec.workspaceId !== view.workspaceId) {
+        return res.status(400).json({ error: 'That recording is not in this page’s workspace' })
+      }
+    }
+
     // A user-driven rename (inline title / sidebar ⋯ / breadcrumb all PATCH
     // here) freezes the title against auto-title (migration 218). Only stamp
     // when `name` is actually changing — an icon-only PATCH leaves provenance
@@ -899,28 +945,40 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     res.json({ published: false })
   })
 
-  // ── Custom domains + page slugs (migration 324) ──────────────────────
-  // docs/architecture/features/custom-domains.md. A domain fronts a
-  // PUBLISHED page's subtree; slugs are domain-scoped pretty paths.
+  // ── Custom domains + page slugs (migrations 324/340/341) ─────────────
+  // docs/architecture/features/custom-domains.md + platform-subdomains.md.
+  // Workspace-first lifecycle: domains connect/claim in Settings (unbound),
+  // a default page serves `/`, and aliased published pages are mini-roots.
 
-  // GET /views/:id/site — Publish-tab state: domains attached to THIS page,
-  // plus this page's position under any domain-fronted ancestor (the slug
-  // editor's context). `sites[0]` is the nearest.
+  // Which apex this workspace claims platform subdomains under (platform-
+  // subdomains.md): first-party workspaces ride the product apex, everyone
+  // else the cookie-isolated customer apex. Null when that apex is unset (the
+  // feature is dark, fail-safe).
+  const subdomainApexFor = (
+    workspaceId: string,
+  ): { apex: string; firstParty: boolean } | null => {
+    if (opts.firstPartySubdomainWorkspaceIds?.has(workspaceId) && opts.platformSubdomainApex) {
+      return { apex: opts.platformSubdomainApex, firstParty: true }
+    }
+    if (opts.customerSubdomainApex) return { apex: opts.customerSubdomainApex, firstParty: false }
+    return null
+  }
+
+  // GET /views/:id/site — Publish-tab state: EVERY connected workspace domain
+  // as seen from this page (workspace-first lifecycle): the page's alias on
+  // each, whether it is the default page, and whether it can serve there. The
+  // Share dialog selects among these; connecting/claiming lives in Settings.
   router.get('/views/:id/site', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return unauthorized(res)
     if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
     const view = await opts.savedViewStore.getById(userId, req.params.id)
     if (!view) return notFound(res, 'View not found')
-    const [domains, context] = await Promise.all([
-      opts.pageDomainStore.listDomainsForPage(userId, view.id),
-      opts.pageDomainStore.getSiteContext(userId, view.id),
-    ])
-    const sites = await Promise.all(
-      context.map(async ({ domain, depth, currentSlug }) => {
-        const isRoot = depth === 0
+    const context = await opts.pageDomainStore.listDomainContextForPage(userId, view.id)
+    const domains = await Promise.all(
+      context.map(async ({ domain, isDefault, currentSlug, servable }) => {
         let suggestedSlug: string | null = null
-        if (!isRoot && !currentSlug) {
+        if (!isDefault && !currentSlug) {
           const taken = new Set(await opts.pageDomainStore!.listSlugs(userId, domain.id))
           suggestedSlug = suggestPageSlug(view.name ?? '', taken)
         }
@@ -928,21 +986,31 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
           domainId: domain.id,
           hostname: domain.hostname,
           status: domain.status,
-          rootPageId: domain.pageId,
-          isRoot,
+          provider: domain.provider,
+          hasDefault: domain.pageId !== null,
+          isDefault,
+          servable,
           slug: currentSlug,
           suggestedSlug,
         }
       }),
     )
-    res.json({ domains, sites })
+    res.json({ domains })
   })
+
+  // Workspace-level domain management (Settings → Domains) is owner/admin
+  // gated — domains are workspace infrastructure, not per-page state.
+  const isWorkspaceAdmin = async (userId: string, workspaceId: string): Promise<boolean> => {
+    const membership = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+    return membership?.role === 'owner' || membership?.role === 'admin'
+  }
 
   const domainInputSchema = z.object({ hostname: z.string().min(1).max(300) })
 
-  // POST /views/:id/domains — attach a custom hostname to this (published)
-  // page. Provisions edge/TLS on the hosted path; returns DNS instructions.
-  router.post('/views/:id/domains', async (req, res) => {
+  // POST /workspaces/:workspaceId/domains — connect a customer hostname to
+  // the WORKSPACE (unbound: no page required; assign a default page after).
+  // Provisions edge/TLS on the hosted path; returns DNS instructions.
+  router.post('/workspaces/:workspaceId/domains', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return unauthorized(res)
     if (!opts.pageDomainStore || !opts.domainProvisioner) {
@@ -952,32 +1020,33 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (!parsed.success) {
       return badRequest(res, parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '))
     }
-    const view = await opts.savedViewStore.getById(userId, req.params.id)
-    if (!view) return notFound(res, 'View not found')
-    if (!(await canManageShare(userId, view))) {
-      return res.status(403).json({ error: 'Only the page owner or a workspace admin can manage domains' })
+    const workspaceId = req.params.workspaceId
+    if (!(await isWorkspaceAdmin(userId, workspaceId))) {
+      return res.status(403).json({ error: 'Only a workspace owner or admin can manage domains' })
     }
     const hostname = normalizeHostname(parsed.data.hostname, {
       block: opts.pageDomainBlockedHosts,
     })
     if (!hostname) {
+      // Well-formed but blocked (our own origin / a subdomain of our apex /
+      // operator policy) vs. genuinely malformed — distinct codes so the UI can
+      // explain a reserved host instead of "enter a valid hostname".
+      if (normalizeHostname(parsed.data.hostname)) {
+        return res.status(400).json({
+          error: 'This hostname is reserved and cannot be attached as a custom domain',
+          code: 'blocked_hostname',
+        })
+      }
       return res.status(400).json({ error: 'Not a usable public hostname', code: 'invalid_hostname' })
     }
-    if (opts.pageGrantStore) {
-      const publish = await opts.pageGrantStore.getPublishState(userId, view.id)
-      if (!publish.published) {
-        return res.status(409).json({ error: 'Publish the page before attaching a domain', code: 'not_published' })
-      }
-    }
     const cap = opts.pageDomainsMaxPerWorkspace ?? 5
-    const count = await opts.pageDomainStore.countDomainsForWorkspace(userId, view.workspaceId)
+    const count = await opts.pageDomainStore.countDomainsForWorkspace(userId, workspaceId)
     if (count >= cap) {
       return res.status(409).json({ error: `Workspace domain limit reached (${cap})`, code: 'domain_limit' })
     }
     const created = await opts.pageDomainStore.createDomain({
       userId,
-      workspaceId: view.workspaceId,
-      pageId: view.id,
+      workspaceId,
       hostname,
       provider: opts.domainProvisioner.kind,
     })
@@ -1004,16 +1073,18 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     res.status(201).json({ domain, instructions })
   })
 
-  // POST /views/:id/domains/:domainId/check — re-run DNS/ownership
-  // verification and refresh the stored status.
-  router.post('/views/:id/domains/:domainId/check', async (req, res) => {
+  // POST /workspaces/:workspaceId/domains/:domainId/check — re-run DNS /
+  // ownership verification and refresh the stored status.
+  router.post('/workspaces/:workspaceId/domains/:domainId/check', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return unauthorized(res)
     if (!opts.pageDomainStore || !opts.domainProvisioner) {
       return res.status(503).json({ error: 'Custom domains are not configured' })
     }
     const domain = await opts.pageDomainStore.getDomain(userId, req.params.domainId)
-    if (!domain || domain.pageId !== req.params.id) return notFound(res, 'Domain not found')
+    if (!domain || domain.workspaceId !== req.params.workspaceId) {
+      return notFound(res, 'Domain not found')
+    }
     const result = await opts.domainProvisioner.check(domain.hostname)
     const updated = await opts.pageDomainStore.updateDomainStatus(userId, domain.id, {
       status: result.live ? 'live' : 'pending_dns',
@@ -1022,26 +1093,57 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     res.json({ domain: updated ?? domain, live: result.live, instructions: result.instructions })
   })
 
-  // DELETE /views/:id/domains/:domainId — detach. Deprovisioning is
-  // best-effort; the row delete (cascading slugs) is the source of truth.
-  router.delete('/views/:id/domains/:domainId', async (req, res) => {
+  // DELETE /workspaces/:workspaceId/domains/:domainId — disconnect.
+  // Deprovisioning is best-effort; the row delete (cascading slugs) rules.
+  router.delete('/workspaces/:workspaceId/domains/:domainId', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return unauthorized(res)
     if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
-    const view = await opts.savedViewStore.getById(userId, req.params.id)
-    if (!view) return notFound(res, 'View not found')
-    if (!(await canManageShare(userId, view))) {
-      return res.status(403).json({ error: 'Only the page owner or a workspace admin can manage domains' })
+    if (!(await isWorkspaceAdmin(userId, req.params.workspaceId))) {
+      return res.status(403).json({ error: 'Only a workspace owner or admin can manage domains' })
     }
     const domain = await opts.pageDomainStore.getDomain(userId, req.params.domainId)
-    if (!domain || domain.pageId !== view.id) return notFound(res, 'Domain not found')
+    if (!domain || domain.workspaceId !== req.params.workspaceId) {
+      return notFound(res, 'Domain not found')
+    }
     await opts.domainProvisioner?.remove(domain.hostname).catch((err) => {
       console.warn('[views] domain deprovision failed:', err)
     })
     await opts.pageDomainStore.deleteDomain(userId, domain.id)
     opts.analytics?.logEvent({ userId, eventName: 'page_domain_removed', metadata: {} })
-    publishPageShareChange(view.id)
+    if (domain.pageId) publishPageShareChange(domain.pageId)
     res.json({ deleted: true })
+  })
+
+  // PUT /workspaces/:workspaceId/domains/:domainId/default-page — set/clear
+  // what serves at `/`. The gate still re-derives per request: an unpublished
+  // default page means the domain 404s at `/` until it is published.
+  router.put('/workspaces/:workspaceId/domains/:domainId/default-page', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
+    const parsed = z.object({ pageId: z.string().uuid().nullable() }).safeParse(req.body ?? {})
+    if (!parsed.success) return badRequest(res, 'pageId (uuid or null) is required')
+    if (!(await isWorkspaceAdmin(userId, req.params.workspaceId))) {
+      return res.status(403).json({ error: 'Only a workspace owner or admin can manage domains' })
+    }
+    const existing = await opts.pageDomainStore.getDomain(userId, req.params.domainId)
+    if (!existing || existing.workspaceId !== req.params.workspaceId) {
+      return notFound(res, 'Domain not found')
+    }
+    const result = await opts.pageDomainStore.setDefaultPage(
+      userId,
+      req.params.domainId,
+      parsed.data.pageId,
+    )
+    if (!result) return notFound(res, 'Domain not found')
+    if ('error' in result) {
+      return res.status(400).json({ error: 'That page is not in this workspace', code: result.error })
+    }
+    opts.analytics?.logEvent({ userId, eventName: 'page_domain_default_set', metadata: {} })
+    if (existing.pageId) publishPageShareChange(existing.pageId)
+    if (result.pageId) publishPageShareChange(result.pageId)
+    res.json({ domain: result })
   })
 
   const slugInputSchema = z.object({
@@ -1074,13 +1176,18 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       slug: parsed.data.slug,
     })
     if (!result.ok) {
-      const status = result.reason === 'domain_not_found' ? 404 : result.reason === 'slug_taken' ? 409 : 400
+      const status =
+        result.reason === 'domain_not_found'
+          ? 404
+          : result.reason === 'slug_taken' || result.reason === 'not_servable'
+            ? 409
+            : 400
       return res.status(status).json({ error: 'Could not set the page link', code: result.reason })
     }
     const domain = await opts.pageDomainStore.getDomain(userId, parsed.data.domainId)
     opts.analytics?.logEvent({ userId, eventName: 'page_slug_set', metadata: {} })
     publishPageShareChange(view.id)
-    if (domain) publishPageShareChange(domain.pageId)
+    if (domain?.pageId) publishPageShareChange(domain.pageId)
     res.json({ slug: result.slug, previousSlug: result.previousSlug })
   })
 
@@ -1098,6 +1205,184 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     const available = valid && (!holder || holder.pageId === req.params.id)
     const current = Boolean(holder && holder.pageId === req.params.id && holder.isCurrent)
     res.json({ valid, available, current })
+  })
+
+  // ── Platform subdomains (platform-subdomains.md) ─────────────────────
+  // A workspace claims ONE `<label>.<apex>` in Settings, UNBOUND — no page
+  // required; the default page is assigned afterwards. Governed (reserved
+  // labels, one per workspace, random fruit+digits default), served by the
+  // wildcard — status is 'live' at claim, no DNS/verification. The apex is
+  // chosen by whether the workspace is in the first-party allowlist.
+
+  const subdomainLabelSchema = z.object({ label: z.string().min(1).max(63) })
+
+  const subdomainResponse = (d: PageDomain) => ({
+    domainId: d.id,
+    hostname: d.hostname,
+    label: d.subdomainLabel,
+    defaultPageId: d.pageId,
+    status: d.status,
+  })
+
+  // GET /workspaces/:workspaceId/domains — the Settings → Domains list: every
+  // domain in the workspace (platform subdomain first) with its root page's
+  // name, plus the apex this workspace may claim under. RLS scopes the rows —
+  // a non-member simply sees an empty list.
+  router.get('/workspaces/:workspaceId/domains', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
+    const domains = await opts.pageDomainStore.listDomainsForWorkspace(userId, req.params.workspaceId)
+    const apex = subdomainApexFor(req.params.workspaceId)
+    res.json({
+      domains,
+      subdomainApex: apex?.apex ?? null,
+      subdomainIsFirstParty: apex?.firstParty ?? false,
+    })
+  })
+
+  // GET /workspaces/:workspaceId/subdomain-suggestion — a fresh random
+  // `<fruit><3 digits>` default label (grape209, watermelon102), rolled until
+  // it clears the reserved list and the global hostname registry. Backs both
+  // the pre-filled claim input and the Reset re-roll in Settings.
+  router.get('/workspaces/:workspaceId/subdomain-suggestion', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
+    const apex = subdomainApexFor(req.params.workspaceId)
+    if (!apex) {
+      return res.status(503).json({ error: 'Subdomains are not configured', code: 'subdomains_unconfigured' })
+    }
+    const reserved = new Set(opts.reservedSubdomainLabels ?? [])
+    let label = generateSubdomainLabel()
+    for (let i = 0; i < 10; i++) {
+      if (!reserved.has(label) && !(await opts.pageDomainStore.isHostnameTaken(`${label}.${apex.apex}`))) {
+        break
+      }
+      label = generateSubdomainLabel()
+    }
+    res.json({ label, apex: apex.apex, hostname: `${label}.${apex.apex}` })
+  })
+
+  // GET /workspaces/:workspaceId/subdomain-availability?label= — debounced
+  // claim/rename editor check.
+  router.get('/workspaces/:workspaceId/subdomain-availability', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
+    const apex = subdomainApexFor(req.params.workspaceId)
+    if (!apex) {
+      return res.status(503).json({ error: 'Subdomains are not configured', code: 'subdomains_unconfigured' })
+    }
+    const label = (typeof req.query.label === 'string' ? req.query.label : '').trim().toLowerCase()
+    const valid = isValidSubdomainLabel(label)
+    const reserved = valid && (opts.reservedSubdomainLabels ?? []).includes(label)
+    const hostname = `${label}.${apex.apex}`
+    // Availability is global (hostname is unique across workspaces); a hostname
+    // this workspace already holds counts as available (it's theirs).
+    const existing = await opts.pageDomainStore.getPlatformSubdomain(userId, req.params.workspaceId)
+    const taken = valid && !reserved ? await opts.pageDomainStore.isHostnameTaken(hostname) : false
+    const available = valid && !reserved && (!taken || existing?.hostname === hostname)
+    res.json({ valid, reserved, available, apex: apex.apex, hostname })
+  })
+
+  // POST /workspaces/:workspaceId/subdomain { label } — claim the workspace's
+  // subdomain, UNBOUND (no page required): assign a default page afterwards.
+  router.post('/workspaces/:workspaceId/subdomain', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
+    const parsed = subdomainLabelSchema.safeParse(req.body ?? {})
+    if (!parsed.success) return badRequest(res, 'label is required')
+    if (!(await isWorkspaceAdmin(userId, req.params.workspaceId))) {
+      return res.status(403).json({ error: 'Only a workspace owner or admin can manage subdomains' })
+    }
+    const apex = subdomainApexFor(req.params.workspaceId)
+    if (!apex) {
+      return res.status(503).json({ error: 'Subdomains are not configured', code: 'subdomains_unconfigured' })
+    }
+    const label = parsed.data.label.trim().toLowerCase()
+    if (!isValidSubdomainLabel(label)) {
+      return res.status(400).json({ error: 'Not a usable subdomain', code: 'invalid_label' })
+    }
+    if ((opts.reservedSubdomainLabels ?? []).includes(label)) {
+      return res.status(409).json({ error: 'That subdomain is reserved', code: 'reserved_label' })
+    }
+    const result = await opts.pageDomainStore.claimSubdomain({
+      userId,
+      workspaceId: req.params.workspaceId,
+      hostname: `${label}.${apex.apex}`,
+      label,
+    })
+    if ('error' in result) {
+      const msg =
+        result.error === 'workspace_has_subdomain'
+          ? 'This workspace already has a subdomain'
+          : 'That subdomain is already taken'
+      return res.status(409).json({ error: msg, code: result.error })
+    }
+    opts.analytics?.logEvent({
+      userId,
+      eventName: 'page_subdomain_claimed',
+      metadata: { firstParty: sanitize(String(apex.firstParty)) },
+    })
+    res.status(201).json({ subdomain: subdomainResponse(result) })
+  })
+
+  // PUT /workspaces/:workspaceId/subdomain { label } — rename (or Reset with
+  // a fresh random label). v1 hard-swaps the hostname; slugs and the default
+  // page ride along (they hang off the domain row, not the hostname).
+  router.put('/workspaces/:workspaceId/subdomain', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
+    const parsed = subdomainLabelSchema.safeParse(req.body ?? {})
+    if (!parsed.success) return badRequest(res, 'label is required')
+    if (!(await isWorkspaceAdmin(userId, req.params.workspaceId))) {
+      return res.status(403).json({ error: 'Only a workspace owner or admin can manage subdomains' })
+    }
+    const apex = subdomainApexFor(req.params.workspaceId)
+    if (!apex) {
+      return res.status(503).json({ error: 'Subdomains are not configured', code: 'subdomains_unconfigured' })
+    }
+    const existing = await opts.pageDomainStore.getPlatformSubdomain(userId, req.params.workspaceId)
+    if (!existing) return notFound(res, 'Subdomain not found')
+    const label = parsed.data.label.trim().toLowerCase()
+    if (!isValidSubdomainLabel(label)) {
+      return res.status(400).json({ error: 'Not a usable subdomain', code: 'invalid_label' })
+    }
+    if ((opts.reservedSubdomainLabels ?? []).includes(label)) {
+      return res.status(409).json({ error: 'That subdomain is reserved', code: 'reserved_label' })
+    }
+    const result = await opts.pageDomainStore.renameSubdomain({
+      userId,
+      domainId: existing.id,
+      hostname: `${label}.${apex.apex}`,
+      label,
+    })
+    if (!result) return notFound(res, 'Subdomain not found')
+    if ('error' in result) {
+      return res.status(409).json({ error: 'That subdomain is already taken', code: 'hostname_taken' })
+    }
+    opts.analytics?.logEvent({ userId, eventName: 'page_subdomain_renamed', metadata: {} })
+    if (existing.pageId) publishPageShareChange(existing.pageId)
+    res.json({ subdomain: subdomainResponse(result) })
+  })
+
+  // DELETE /workspaces/:workspaceId/subdomain — release (cascades slugs).
+  router.delete('/workspaces/:workspaceId/subdomain', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
+    if (!(await isWorkspaceAdmin(userId, req.params.workspaceId))) {
+      return res.status(403).json({ error: 'Only a workspace owner or admin can manage subdomains' })
+    }
+    const existing = await opts.pageDomainStore.getPlatformSubdomain(userId, req.params.workspaceId)
+    if (!existing) return notFound(res, 'Subdomain not found')
+    await opts.pageDomainStore.releaseSubdomain(userId, existing.id)
+    opts.analytics?.logEvent({ userId, eventName: 'page_subdomain_released', metadata: {} })
+    if (existing.pageId) publishPageShareChange(existing.pageId)
+    res.json({ released: true })
   })
 
   const identityGrantSchema = z.object({

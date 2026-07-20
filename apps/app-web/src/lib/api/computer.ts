@@ -37,10 +37,20 @@ export type ComputerTask = {
 
 export type TakeoverFrame = { data: string; mimeType: string };
 
+/**
+ * Take-Over input events. `frameW`/`frameH` are the pixel size of the frame
+ * the client mapped coordinates against - the stream bridge rescales to the
+ * real viewport (stream frames are size-capped, so frame px != viewport px).
+ * `move` exists only on the duplex WebSocket path: hover relay is too chatty
+ * for per-event HTTP, and the API relay route does not accept it.
+ */
 export type TakeoverInput =
-  | { kind: "click"; x: number; y: number }
+  | { kind: "click"; x: number; y: number; frameW?: number; frameH?: number }
+  | { kind: "move"; x: number; y: number; frameW?: number; frameH?: number }
   | { kind: "key"; text: string }
-  | { kind: "scroll"; deltaY: number };
+  | { kind: "scroll"; deltaY: number }
+  // Take-over toolbar: Back / Forward / Reload / address-bar navigation (§5).
+  | { kind: "navigate"; action: "back" | "forward" | "reload" | "goto"; url?: string };
 
 type VaultedSession = {
   site: string;
@@ -130,7 +140,12 @@ export async function sendComputerInput(sessionId: string, event: TakeoverInput)
   return res.ok;
 }
 
-export type TakeoverStreamSession = { framesUrl: string; inputUrl: string };
+export type TakeoverStreamSession = {
+  framesUrl: string;
+  inputUrl: string;
+  /** Duplex WebSocket (binary frames down, JSON input up). Absent from older backends. */
+  wsUrl?: string;
+};
 
 /**
  * Mint the live-stream session: the API (the auth gate) starts the in-sandbox

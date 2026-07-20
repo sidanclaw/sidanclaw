@@ -55,6 +55,8 @@ const FULL_SELECT = `
   full_width     AS "fullWidth",
   clearance,
   origin_prompt  AS "originPrompt",
+  anchor_key     AS "anchorKey",
+  linked_recording_id AS "linkedRecordingId",
   auto_prune_at  AS "autoPruneAt",
   brain_sync_enabled   AS "brainSyncEnabled",
   brain_last_ingest_hash AS "brainLastIngestHash",
@@ -98,6 +100,8 @@ type FullRow = {
   teamspaceId: string | null
   fullWidth: boolean
   clearance: 'public' | 'internal' | 'confidential'
+  anchorKey: string | null
+  linkedRecordingId: string | null
   originPrompt: string | null
   autoPruneAt: Date | null
   brainSyncEnabled: boolean
@@ -121,6 +125,7 @@ type ListRow = {
   nestParentId: string | null
   position: number
   teamspaceId: string | null
+  anchorKey: string | null
   updatedAt: Date
 }
 
@@ -133,6 +138,8 @@ function rowToFull(row: FullRow): SavedView {
     nameOrigin: row.nameOrigin,
     description: row.description,
     icon: row.icon,
+    anchorKey: row.anchorKey ?? null,
+    linkedRecordingId: row.linkedRecordingId ?? null,
     entity: row.entity,
     viewType: row.viewType,
     binding: row.binding,
@@ -387,6 +394,13 @@ export function createDbSavedViewStore(
         // next authored-content change.
         sets.push(`brain_sync_enabled = $${idx++}`)
         values.push(fields.brainSyncEnabled)
+      }
+      if (fields.linkedRecordingId !== undefined) {
+        // Manually-linked recording (migration 339). `null` unlinks. The route
+        // has already checked the recording is in this page's workspace and the
+        // caller can see it — the FK only guarantees it is a real recording.
+        sets.push(`linked_recording_id = $${idx++}`)
+        values.push(fields.linkedRecordingId)
       }
 
       if (sets.length === 0) {

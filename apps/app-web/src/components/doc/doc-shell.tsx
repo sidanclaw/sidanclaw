@@ -35,7 +35,7 @@
  * [COMP:app-web/views-shell]
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   docEntryPath,
@@ -70,6 +70,7 @@ import {
   deleteView,
   setViewClearance,
   setViewFullWidth,
+  setPageLinkedRecording,
   listCustomPageTemplates,
   getCustomPageTemplate,
   deleteCustomPageTemplate,
@@ -86,6 +87,10 @@ import { DocTopBar, type TabView } from "./doc-topbar";
 import { PageHeader } from "./page-header";
 import { PageTitle } from "./page-title";
 import { CollabPageEditor } from "./collab-page-editor";
+import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
+import { RecordingChrome } from "@/components/recordings/recording-chrome";
+import { RecordingLinkControl } from "@/components/recordings/recording-link-control";
+import { recordingIdFromAnchorKey } from "@/lib/recordings/anchor";
 import { commentGutterWidth } from "./comment-rail";
 import { useCollabProvider } from "@/lib/collab/use-collab-provider";
 import { usePublishPresenceActivity } from "@/lib/collab/use-presence";
@@ -106,6 +111,7 @@ import { templateExtractionFromBlocks } from "@/lib/blueprints";
 import { SuggestedView } from "./suggested-view";
 import { ApprovalsPanel } from "./panels/approvals-panel";
 import { AutopilotPanel } from "./panels/autopilot-panel";
+import { RecordingsPanel } from "./panels/recordings-panel";
 import { requestChatSeed, type ChatSeed } from "@/lib/chat-seed";
 import { docChatRelay } from "@/lib/doc-chat-relay";
 import { isAuthRedirectInFlight } from "@/lib/auth-fetch";
@@ -1120,6 +1126,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     const panelLabel: Record<PanelId, string> = {
       approvals: t.topbarPanelApprovals,
       goals: t.topbarPanelAutopilot,
+      recordings: t.topbarPanelRecordings,
     };
     return tabsState.tabs.map((tab) => {
       const entry = tabPageId(tab);
@@ -1152,7 +1159,14 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         nameOrigin: meta?.nameOrigin,
       };
     });
-  }, [tabsState, allRows, activeView, t.topbarPanelApprovals, t.topbarPanelAutopilot]);
+  }, [
+    tabsState,
+    allRows,
+    activeView,
+    t.topbarPanelApprovals,
+    t.topbarPanelAutopilot,
+    t.topbarPanelRecordings,
+  ]);
 
   return (
     <div
@@ -1198,13 +1212,28 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
             {topError}
           </div>
         )}
-        {/* Panel tab (Approvals / Autopilot) — takes precedence over the
-            Suggested home (a panel URL has no `[pageId]`, so `urlViewId` is
-            null and the home branch would otherwise match). The panel owns its
-            own header + scrolling; we give it a filled flex column to sit in. */}
+        {/* Panel tab (Approvals / Autopilot / Recordings) — takes precedence
+            over the Suggested home (a panel URL has no `[pageId]`, so
+            `urlViewId` is null and the home branch would otherwise match). The
+            panel owns its own header + scrolling; we give it a filled flex
+            column to sit in.
+
+            A keyed record, not a ternary: this was `panel === "approvals" ? A :
+            Autopilot`, which silently renders Autopilot for ANY panel that is
+            not approvals — a third panel would have looked wired up and shown
+            the wrong board. `Record<PanelId, …>` makes the next one a compile
+            error instead. */}
         {urlPanel ? (
           <div className="flex min-h-0 flex-1 flex-col">
-            {urlPanel === "approvals" ? <ApprovalsPanel /> : <AutopilotPanel />}
+            {
+              (
+                {
+                  approvals: <ApprovalsPanel />,
+                  goals: <AutopilotPanel />,
+                  recordings: <RecordingsPanel />,
+                } satisfies Record<PanelId, ReactNode>
+              )[urlPanel]
+            }
           </div>
         ) : null}
         {!urlPanel && !urlViewId && !activeError && (
@@ -1366,6 +1395,56 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                       <div className="h-9 w-2/3 animate-pulse rounded bg-muted md:h-10" />
                     </div>
                   )}
+                  <RecordingPlayerProvider
+                    // Two ways a page gets a recording: a synthesis brief's
+                    // `anchor_key` (`recording-synthesis:<id>`), or a MANUAL
+                    // link a user set (`linkedRecordingId`, migration 339). The
+                    // anchor-derived one wins — a real brief's recording is its
+                    // identity, not a choice. Null on a page with neither, so
+                    // the provider is inert and `[H:MM:SS]` text stays prose.
+                    recordingId={
+                      recordingIdFromAnchorKey(pageView?.anchorKey) ??
+                      pageView?.linkedRecordingId ??
+                      null
+                    }
+                  >
+                  {/* The recording surface: player + transcript + action items,
+                      as CHROME above the doc (never blocks — a block is content
+                      the user can delete, orphaning the page's citations). See
+                      recordings.md → "The brief page IS the recording surface".
+                      When the page has NO recording, offer to link one. */}
+                  {workspaceId && pageView
+                    ? (() => {
+                        const anchorRec = recordingIdFromAnchorKey(pageView.anchorKey);
+                        const recId = anchorRec ?? pageView.linkedRecordingId;
+                        if (!recId) {
+                          return (
+                            <RecordingLinkControl
+                              viewId={pageView.id}
+                              workspaceId={workspaceId}
+                              onLinked={(meta) => setActiveView(meta)}
+                            />
+                          );
+                        }
+                        return (
+                          <RecordingChrome
+                            recordingId={recId}
+                            workspaceId={workspaceId}
+                            title={pageView.name ?? ""}
+                            // Unlink only a MANUAL link — an anchor-derived
+                            // recording is the brief's identity, nothing to
+                            // re-link it to.
+                            {...(anchorRec
+                              ? {}
+                              : {
+                                  onUnlink: () => {
+                                    void setPageLinkedRecording(pageView.id, null).then(setActiveView);
+                                  },
+                                })}
+                          />
+                        );
+                      })()
+                    : null}
                   <CollabPageEditor
                     collab={collab}
                     canEdit
@@ -1385,6 +1464,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                     onTemplateSeeded={() => setSeedTemplate(null)}
                     onContentChange={handleDraftContentChange}
                   />
+                  </RecordingPlayerProvider>
                 </div>
               </div>
             )}

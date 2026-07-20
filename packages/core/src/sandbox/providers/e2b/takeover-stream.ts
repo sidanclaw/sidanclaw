@@ -1,31 +1,42 @@
 /**
  * Take-Over live stream (§5 "live stream, not a screenshot poll"): the
- * in-sandbox bridge source + the provider-side commands that enable
- * agent-browser's built-in screencast stream and launch the bridge.
+ * in-sandbox bridge source + the provider-side commands that launch it.
  *
  * Why a bridge: E2B's ingress completes WebSocket/SSE upgrades only against
  * 0.0.0.0-bound listeners (probed 2026-07-15 — the loopback-bound stream
  * server serves plain HTTP through the ingress but fails WS upgrades), and
- * agent-browser's stream server carries no auth. The bridge adds both in one
+ * Chromium's CDP endpoint carries no auth. The bridge adds both in one
  * dependency-free Node process: it is the ONLY exposed listener, it checks a
- * per-sandbox token in constant time, and the stream server + CDP stay
- * loopback-only behind it.
+ * per-sandbox token in constant time, and CDP stays loopback-only behind it.
  *
- *   browser ──SSE──▶ 0.0.0.0:49223 /frames?token=…   (JPEG frame events)
- *   browser ──POST─▶ 0.0.0.0:49223 /input?token=…    (click/key/scroll)
+ * The bridge OWNS the screencast (2026-07-21 rework): it drives
+ * `Page.startScreencast` itself over its persistent CDP connection with
+ * tuned quality/scale (agent-browser's built-in stream server exposes no
+ * knobs and emits ~135 KB full-quality frames — 4x the wire weight), acks
+ * on a delay that caps the frame rate, and pushes one full-quality
+ * `Page.captureScreenshot` after damage goes quiet so a static page reads
+ * crisp while a moving one stays cheap.
+ *
+ *   browser ══WS═══▶ 0.0.0.0:49223 /ws?token=…       (binary JPEG frames down,
+ *                        │                            JSON input up — one duplex
+ *                        │                            socket, no per-event HTTP)
+ *   browser ──SSE──▶ 0.0.0.0:49223 /frames?token=…   (older clients: JSON+b64)
+ *   browser ──POST─▶ 0.0.0.0:49223 /input?token=…    (older clients)
  *                        │
- *                        ├─ WS client → 127.0.0.1:49222 (agent-browser
- *                        │  screencast; attached only while a viewer is
- *                        │  connected — no viewer, no encoding cost)
- *                        └─ ONE persistent CDP connection (same trusted
- *                           Input.dispatch* vocabulary as takeover-input.ts,
- *                           minus the per-event process spawn)
+ *                        └─ ONE persistent CDP connection to the loopback
+ *                           Chromium: screencast events in, trusted
+ *                           Input.dispatch* out (same vocabulary as
+ *                           takeover-input.ts plus bridge-only `move`).
+ *
+ * Coordinate contract: screencast frames are scaled to fit MAX_FRAME_* so
+ * frame pixels ≠ viewport pixels. Input events carry the `frameW` the client
+ * mapped against and the bridge rescales to viewport space; events without
+ * `frameW` (older clients) rescale against the latest frame's own width, so
+ * both client generations land clicks where the user aimed.
  *
  * [COMP:sandbox/takeover-stream] — spec: docs/architecture/engine/computer-use.md §5.
  */
 
-/** agent-browser's screencast WS server — loopback-only, never exposed. */
-export const TAKEOVER_STREAM_PORT = 49222
 /** The bridge's public listener (0.0.0.0 — the one E2B-ingress-facing port). */
 export const TAKEOVER_BRIDGE_PORT = 49223
 
@@ -36,11 +47,6 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
-/** Idempotent stream (re)pin: a fixed port the bridge can always find. */
-export function streamEnableCommand(): string {
-  return `agent-browser stream disable >/dev/null 2>&1; agent-browser stream enable --port ${TAKEOVER_STREAM_PORT}`
-}
-
 /**
  * Detached launch — every fd off the exec session so envd does not hold the
  * command open, `setsid` so the bridge survives the session. Idempotent by
@@ -49,7 +55,7 @@ export function streamEnableCommand(): string {
 export function bridgeLaunchCommand(token: string, cdpEndpoint: string): string {
   return (
     `setsid nohup node ${TAKEOVER_STREAM_BRIDGE_PATH} ` +
-    `--port ${TAKEOVER_BRIDGE_PORT} --stream ws://127.0.0.1:${TAKEOVER_STREAM_PORT} ` +
+    `--port ${TAKEOVER_BRIDGE_PORT} ` +
     `--cdp ${shellQuote(cdpEndpoint)} --token ${shellQuote(token)} ` +
     `</dev/null >>${BRIDGE_LOG_PATH} 2>&1 & echo launched`
   )
@@ -64,7 +70,9 @@ export function bridgeProbeCommand(): string {
  * The bridge source (generated file — dependency-free Node 22: global
  * WebSocket + node:http + node:crypto only, the same constraint as
  * takeover-input.ts). Input vocabulary and CDP dispatch mirror
- * takeover-input.ts — keep the two in lockstep when the event shape moves.
+ * takeover-input.ts (click/key/scroll — keep the two in lockstep when the
+ * event shape moves); `move` is bridge-only, for hover states a per-event
+ * HTTP relay could never afford.
  */
 export const TAKEOVER_STREAM_BRIDGE_MJS = `// Take-Over live-stream bridge (generated by Use Brian — do not edit).
 import http from 'node:http'
@@ -73,13 +81,20 @@ import crypto from 'node:crypto'
 const args = {}
 for (let i = 2; i < process.argv.length; i += 2) args[process.argv[i].replace(/^--/, '')] = process.argv[i + 1]
 const PORT = Number(args.port)
-const STREAM_URL = args.stream
 const CDP_ENDPOINT = args.cdp
 const TOKEN = args.token || ''
-if (!PORT || !STREAM_URL || !CDP_ENDPOINT || !TOKEN) {
-  console.error('usage: takeover-stream-bridge.mjs --port N --stream ws://… --cdp <endpoint> --token <hex>')
+if (!PORT || !CDP_ENDPOINT || !TOKEN) {
+  console.error('usage: takeover-stream-bridge.mjs --port N --cdp <endpoint> --token <hex>')
   process.exit(2)
 }
+
+// Screencast tuning: quality/scale keep a frame ~25-60 KB on the wire (vs
+// ~135 KB untuned), the delayed ack caps the producer near 10 fps, and the
+// sharp shot restores full quality once damage goes quiet.
+const SCREENCAST = { format: 'jpeg', quality: 55, maxWidth: 1280, maxHeight: 1024, everyNthFrame: 1 }
+const ACK_DELAY_MS = 90
+const IDLE_SHARP_MS = 700
+const SHARP_QUALITY = 80
 
 function tokenOk(candidate) {
   const a = crypto.createHash('sha256').update(String(candidate ?? '')).digest()
@@ -87,38 +102,42 @@ function tokenOk(candidate) {
   return crypto.timingSafeEqual(a, b)
 }
 
-// ── screencast leg: attach to agent-browser's stream only while watched ──
-const clients = new Set()
-let latestFrame = null
-let streamWs = null
-let streamWanted = false
-
-function attachStream() {
-  streamWanted = true
-  if (streamWs) return
-  const ws = new WebSocket(STREAM_URL)
-  streamWs = ws
-  ws.onmessage = (ev) => {
-    const text = typeof ev.data === 'string' ? ev.data : null
-    if (!text) return
-    const isFrame = text.includes('"data":')
-    if (isFrame) latestFrame = text
-    for (const c of clients) c.push(isFrame ? 'frame' : 'meta', text)
+/** JPEG SOF scan — frame pixel size, for the input coordinate rescale. */
+function jpegDims(buf) {
+  for (let i = 2; i + 8 < buf.length; ) {
+    if (buf[i] !== 0xff) { i++; continue }
+    const marker = buf[i + 1]
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) }
+    }
+    i += 2 + buf.readUInt16BE(i + 2)
   }
-  const drop = () => {
-    if (streamWs === ws) streamWs = null
-    if (streamWanted && clients.size > 0) setTimeout(attachStream, 500)
-  }
-  ws.onclose = drop
-  ws.onerror = drop
-}
-function detachStreamIfIdle() {
-  if (clients.size > 0) return
-  streamWanted = false
-  if (streamWs) { try { streamWs.close() } catch {} streamWs = null }
+  return null
 }
 
-// ── input leg: one persistent CDP connection, re-attached on failure ──
+// ── viewers: WS + SSE clients share one latest-frame-wins broadcast ──
+const viewers = new Set()
+let latest = null // { b64, buf, frameW, frameH, deviceW, deviceH }
+let lastFrameAt = Date.now()
+let sharpTimer = null
+
+function broadcast(frame) {
+  for (const v of viewers) v.pushFrame(frame)
+}
+function attachViewer(v) {
+  viewers.add(v)
+  void ensureScreencast()
+  if (latest) v.pushFrame(latest)
+}
+function detachViewer(v) {
+  viewers.delete(v)
+  if (viewers.size === 0 && cdp && cdp.screencasting) {
+    cdp.screencasting = false
+    cdpSend(cdp, 'Page.stopScreencast', {}, cdp.sessionId).catch(() => {})
+  }
+}
+
+// ── the one persistent CDP connection: screencast in, trusted input out ──
 const KEYS = {
   Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\\r' },
   Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
@@ -135,7 +154,7 @@ const KEYS = {
   PageDown: { key: 'PageDown', code: 'PageDown', windowsVirtualKeyCode: 34 },
 }
 
-let cdp = null // { ws, sessionId, nextId, pending }
+let cdp = null // { ws, sessionId, targetId, nextId, pending, screencasting }
 async function wsUrlFrom(raw) {
   if (raw.startsWith('ws://') || raw.startsWith('wss://')) return raw
   const res = await fetch(new URL('/json/version', raw))
@@ -153,12 +172,56 @@ function cdpSend(conn, method, params, sessionId) {
     setTimeout(() => { if (conn.pending.delete(id)) reject(new Error('cdp timeout')) }, 8000)
   })
 }
+let lastCastHash = ''
+function onScreencastFrame(conn, params) {
+  // Delayed ack = producer-side frame-rate cap; the screencast will not send
+  // the next frame until this one is acked.
+  setTimeout(() => {
+    cdpSend(conn, 'Page.screencastFrameAck', { sessionId: params.sessionId }, conn.sessionId).catch(() => {})
+  }, ACK_DELAY_MS)
+  // Unchanged pixels never broadcast and never re-arm the sharp timer:
+  // Page.captureScreenshot itself forces a compositor frame, so without this
+  // dedup an IDLE page ping-pongs screencast-frame ↔ sharp-shot forever
+  // (observed 2026-07-21: ~350 KB/s on a static page).
+  const hash = crypto.createHash('sha1').update(params.data).digest('hex')
+  if (hash === lastCastHash) { lastFrameAt = Date.now(); return }
+  lastCastHash = hash
+  const buf = Buffer.from(params.data, 'base64')
+  const dims = jpegDims(buf)
+  latest = {
+    b64: params.data,
+    buf,
+    frameW: dims ? dims.w : 0,
+    frameH: dims ? dims.h : 0,
+    deviceW: (params.metadata && params.metadata.deviceWidth) || 0,
+    deviceH: (params.metadata && params.metadata.deviceHeight) || 0,
+  }
+  lastFrameAt = Date.now()
+  broadcast(latest)
+  if (sharpTimer) clearTimeout(sharpTimer)
+  sharpTimer = setTimeout(() => void sendSharpFrame(), IDLE_SHARP_MS)
+}
+async function sendSharpFrame() {
+  if (viewers.size === 0 || !cdp) return
+  try {
+    const shot = await cdpSend(cdp, 'Page.captureScreenshot', { format: 'jpeg', quality: SHARP_QUALITY }, cdp.sessionId)
+    const buf = Buffer.from(shot.data, 'base64')
+    const dims = jpegDims(buf)
+    // Unscaled viewport shot: frame pixels ARE viewport pixels.
+    latest = { b64: shot.data, buf, frameW: dims ? dims.w : 0, frameH: dims ? dims.h : 0, deviceW: dims ? dims.w : 0, deviceH: dims ? dims.h : 0 }
+    broadcast(latest)
+  } catch { /* next damage frame recovers */ }
+}
 async function cdpConnect() {
   const ws = new WebSocket(await wsUrlFrom(CDP_ENDPOINT))
-  const conn = { ws, sessionId: null, nextId: 1, pending: new Map() }
+  const conn = { ws, sessionId: null, targetId: null, nextId: 1, pending: new Map(), screencasting: false }
   await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('cdp connect failed')) })
   ws.onmessage = (m) => {
     const data = JSON.parse(typeof m.data === 'string' ? m.data : m.data.toString())
+    if (data.method === 'Page.screencastFrame' && data.sessionId === conn.sessionId) {
+      onScreencastFrame(conn, data.params)
+      return
+    }
     if (data.id && conn.pending.has(data.id)) {
       const p = conn.pending.get(data.id)
       conn.pending.delete(data.id)
@@ -169,23 +232,81 @@ async function cdpConnect() {
   ws.onclose = () => { if (cdp === conn) cdp = null }
   ws.onerror = () => { if (cdp === conn) cdp = null }
   const { targetInfos } = await cdpSend(conn, 'Target.getTargets')
-  const pages = targetInfos.filter((t) => t.type === 'page' && !t.url.startsWith('devtools://'))
-  const target = pages[pages.length - 1]
+  const target = pickPage(targetInfos)
   if (!target) throw new Error('no page target')
   const { sessionId } = await cdpSend(conn, 'Target.attachToTarget', { targetId: target.targetId, flatten: true })
   conn.sessionId = sessionId
+  conn.targetId = target.targetId
+  await cdpSend(conn, 'Page.enable', {}, sessionId).catch(() => {})
+  // Screencast only paints for the FOREGROUND tab — an attached background
+  // target starts fine but never emits a frame (observed 2026-07-21).
+  await cdpSend(conn, 'Page.bringToFront', {}, sessionId).catch(() => {})
   return conn
 }
+
+/**
+ * The task's real page: getTargets lists newest first, and the sandbox's
+ * initial about:blank must never win over the page the task is browsing.
+ */
+function pickPage(targetInfos) {
+  const pages = targetInfos.filter((t) => t.type === 'page' && !t.url.startsWith('devtools://'))
+  return pages.find((t) => t.url !== 'about:blank') ?? pages[0] ?? null
+}
+async function ensureScreencast() {
+  if (viewers.size === 0) return
+  try {
+    if (!cdp) cdp = await cdpConnect()
+    if (!cdp.screencasting) {
+      await cdpSend(cdp, 'Page.startScreencast', SCREENCAST, cdp.sessionId)
+      cdp.screencasting = true
+    }
+  } catch { cdp = null /* watchdog retries */ }
+}
+
+// Watchdog: reconnect a dead CDP link, and re-attach after a target switch
+// (a target=_blank click moves the page to a target the attached session
+// cannot see — frames stop while the browser is fine).
+let lastTargetProbeAt = 0
+setInterval(() => {
+  if (viewers.size === 0) return
+  if (!cdp) { void ensureScreencast(); return }
+  const now = Date.now()
+  if (now - lastFrameAt > 5000 && now - lastTargetProbeAt > 5000) {
+    lastTargetProbeAt = now
+    cdpSend(cdp, 'Target.getTargets').then(({ targetInfos }) => {
+      const target = pickPage(targetInfos)
+      if (target && cdp && target.targetId !== cdp.targetId) {
+        try { cdp.ws.close() } catch {}
+        cdp = null
+        void ensureScreencast()
+      }
+    }).catch(() => { cdp = null })
+  }
+}, 2000)
+
 async function dispatchInput(event, retried) {
   try {
     if (!cdp) cdp = await cdpConnect()
     const conn = cdp
     const sid = conn.sessionId
+    // Frame pixels → viewport pixels. Clients send the frame width they
+    // mapped against; older clients omit it and the latest frame's own
+    // width applies (their frame IS the latest frame, minus a tiny race).
+    const fw = Number(event.frameW) || (latest ? latest.frameW : 0)
+    const scale = fw > 0 && latest && latest.deviceW > 0 ? latest.deviceW / fw : 1
     if (event.kind === 'click') {
-      const base = { x: event.x, y: event.y, button: 'left', clickCount: 1, pointerType: 'mouse' }
+      const base = { x: Math.round(event.x * scale), y: Math.round(event.y * scale), button: 'left', clickCount: 1, pointerType: 'mouse' }
       await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', button: 'none' }, sid)
       await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' }, sid)
       await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' }, sid)
+    } else if (event.kind === 'move') {
+      await cdpSend(conn, 'Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: Math.round(event.x * scale),
+        y: Math.round(event.y * scale),
+        button: 'none',
+        pointerType: 'mouse',
+      }, sid)
     } else if (event.kind === 'key') {
       if (typeof event.text !== 'string' || event.text.length === 0) return
       if (event.text.length === 1) {
@@ -206,12 +327,109 @@ async function dispatchInput(event, retried) {
         deltaY: event.deltaY,
         pointerType: 'mouse',
       }, sid)
+    } else if (event.kind === 'navigate') {
+      // Browser-chrome navigation (§5, lockstep with takeover-input.ts). goto
+      // only carries http(s); ends of history make back/forward a no-op.
+      if (event.action === 'reload') {
+        await cdpSend(conn, 'Page.reload', {}, sid)
+      } else if (event.action === 'goto') {
+        if (/^https?:\\/\\//i.test(event.url || '')) await cdpSend(conn, 'Page.navigate', { url: event.url }, sid)
+      } else {
+        const delta = event.action === 'back' ? -1 : 1
+        const hist = await cdpSend(conn, 'Page.getNavigationHistory', {}, sid)
+        const target = hist.entries[hist.currentIndex + delta]
+        if (target) await cdpSend(conn, 'Page.navigateToHistoryEntry', { entryId: target.id }, sid)
+      }
     }
   } catch (err) {
     cdp = null // page target may have navigated/died — re-attach once
     if (!retried) return dispatchInput(event, true)
     throw err
   }
+}
+
+// ── WebSocket server leg (dependency-free RFC 6455 subset) ──
+function wsFrame(opcode, payload) {
+  const len = payload.length
+  let header
+  if (len < 126) {
+    header = Buffer.from([0x80 | opcode, len])
+  } else if (len < 65536) {
+    header = Buffer.alloc(4)
+    header[0] = 0x80 | opcode
+    header[1] = 126
+    header.writeUInt16BE(len, 2)
+  } else {
+    header = Buffer.alloc(10)
+    header[0] = 0x80 | opcode
+    header[1] = 127
+    header.writeBigUInt64BE(BigInt(len), 2)
+  }
+  return Buffer.concat([header, payload])
+}
+
+function handleUpgrade(req, socket, head) {
+  const url = new URL(req.url, 'http://x')
+  if (url.pathname !== '/ws' || !tokenOk(url.searchParams.get('token'))) {
+    socket.write('HTTP/1.1 403 Forbidden\\r\\n\\r\\n')
+    socket.destroy()
+    return
+  }
+  const key = req.headers['sec-websocket-key']
+  if (!key) { socket.destroy(); return }
+  const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: ' + accept + '\\r\\n\\r\\n',
+  )
+  socket.setNoDelay(true)
+
+  const viewer = {
+    stale: null,
+    pushFrame(frame) {
+      // Latest-frame-wins under backpressure: never queue stale pixels.
+      if (socket.writableLength > 512 * 1024) { this.stale = frame; return }
+      socket.write(wsFrame(2, frame.buf))
+    },
+  }
+  socket.on('drain', () => { if (viewer.stale) { const f = viewer.stale; viewer.stale = null; viewer.pushFrame(f) } })
+
+  const state = { buf: head && head.length ? Buffer.from(head) : Buffer.alloc(0) }
+  const close = () => { detachViewer(viewer); try { socket.destroy() } catch {} }
+  socket.on('data', (chunk) => {
+    state.buf = Buffer.concat([state.buf, chunk])
+    while (true) {
+      const b = state.buf
+      if (b.length < 2) return
+      const fin = (b[0] & 0x80) !== 0
+      const opcode = b[0] & 0x0f
+      const masked = (b[1] & 0x80) !== 0
+      let len = b[1] & 0x7f
+      let off = 2
+      if (len === 126) { if (b.length < 4) return; len = b.readUInt16BE(2); off = 4 }
+      else if (len === 127) { if (b.length < 10) return; len = Number(b.readBigUInt64BE(2)); off = 10 }
+      const maskOff = off
+      if (masked) off += 4
+      if (len > 65536) { close(); return } // input events are small — anything else is hostile
+      if (b.length < off + len) return
+      const payload = b.subarray(off, off + len)
+      let data = payload
+      if (masked) {
+        const mask = b.subarray(maskOff, maskOff + 4)
+        data = Buffer.allocUnsafe(len)
+        for (let i = 0; i < len; i++) data[i] = payload[i] ^ mask[i & 3]
+      }
+      state.buf = b.subarray(off + len)
+      if (!fin) continue // browsers do not fragment small control messages
+      if (opcode === 8) { close(); return }
+      if (opcode === 9) { socket.write(wsFrame(10, data)); continue }
+      if (opcode === 1) {
+        try { void dispatchInput(JSON.parse(data.toString('utf8')), false).catch(() => {}) } catch {}
+      }
+    }
+  })
+  socket.on('close', close)
+  socket.on('error', close)
+  attachViewer(viewer)
 }
 
 // ── the one exposed listener ──
@@ -232,20 +450,17 @@ const server = http.createServer((req, res) => {
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     })
-    const client = {
+    const viewer = {
       stale: null,
-      push(kind, text) {
-        // Latest-frame-wins under backpressure: never queue stale pixels.
-        if (res.writableLength > 512 * 1024) { if (kind === 'frame') this.stale = text; return }
-        res.write('event: ' + kind + '\\n' + 'data: ' + text + '\\n\\n')
+      pushFrame(frame) {
+        if (res.writableLength > 512 * 1024) { this.stale = frame; return }
+        res.write('event: frame\\ndata: {"data":"' + frame.b64 + '"}\\n\\n')
       },
     }
-    res.on('drain', () => { if (client.stale) { const t = client.stale; client.stale = null; client.push('frame', t) } })
-    clients.add(client)
-    attachStream()
-    if (latestFrame) client.push('frame', latestFrame)
+    res.on('drain', () => { if (viewer.stale) { const f = viewer.stale; viewer.stale = null; viewer.pushFrame(f) } })
     const ping = setInterval(() => res.write(': ping\\n\\n'), 15000)
-    req.on('close', () => { clearInterval(ping); clients.delete(client); detachStreamIfIdle() })
+    req.on('close', () => { clearInterval(ping); detachViewer(viewer) })
+    attachViewer(viewer)
     return
   }
 
@@ -268,6 +483,7 @@ const server = http.createServer((req, res) => {
   res.writeHead(404)
   res.end()
 })
+server.on('upgrade', handleUpgrade)
 server.on('error', (err) => {
   // Another bridge already owns the port — this launch is the idempotent loser.
   if (err && err.code === 'EADDRINUSE') process.exit(0)

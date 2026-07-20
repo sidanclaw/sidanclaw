@@ -123,6 +123,34 @@ export function looksLikeCaptcha(page: {
   return (page.nodes ?? []).some((n) => CAPTCHA_NODE_PATTERN.test(n.name))
 }
 
+/**
+ * Heuristic for "the site refused the connection at its network edge" — a hard
+ * reject that happens BEFORE any page loads, so Chrome surfaces it as a thrown
+ * navigation error (`net::ERR_HTTP2_PROTOCOL_ERROR`, a connection reset/close,
+ * or an SSL/QUIC handshake failure), never as a snapshot. In our pipeline the
+ * `&&`-chained navigate exec fails fast at `open`, so these arrive as a thrown
+ * `BrowserBackendError` message, not a page.
+ *
+ * This is categorically different from a captcha: a captcha is a page you can
+ * watch and take over; a connection block is NOTHING rendered. On the cloud
+ * backend it is almost always the anti-bot edge (Akamai / DataDome / PerimeterX)
+ * dropping the sandbox's datacenter IP + automation fingerprint on the first
+ * packet — so retrying, or handing the user a live-view / take-over link, both
+ * dead-end against a page that never loaded (the Cathay Pacific flow, 2026-07-21).
+ * The durable unblock is a real residential identity (the local real-Chrome
+ * backend, or a residential proxy on the profile), not persistence.
+ *
+ * Deliberately narrow: only the "edge slammed the connection shut / never
+ * handshook" codes, plus a landed `chrome-error://` document. A plain timeout
+ * or DNS miss (site-down / typo) is left to the generic error path.
+ */
+const CONNECTION_BLOCK_PATTERN =
+  /ERR_HTTP2_PROTOCOL_ERROR|ERR_SPDY_PROTOCOL_ERROR|ERR_QUIC_PROTOCOL_ERROR|ERR_SSL_PROTOCOL_ERROR|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ERR_SSL_VERSION_OR_CIPHER_MISMATCH|chrome-error:\/\//i
+
+export function looksLikeConnectionBlock(message: string): boolean {
+  return CONNECTION_BLOCK_PATTERN.test(message)
+}
+
 export function registrableSiteOf(url: string): string | null {
   try {
     const host = new URL(url).hostname.toLowerCase()

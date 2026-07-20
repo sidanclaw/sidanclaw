@@ -46,6 +46,7 @@ export {
   type RetrievalToolEvent,
   type EntityInstanceSearchRow,
   type FileSegmentSearchRow,
+  type TranscriptSegmentSearchRow,
   type RetrievalStep,
   type RetrievalStepName,
   type RetrievalStepCandidate,

@@ -32,6 +32,18 @@ const AGENT_BROWSER_BIN = 'agent-browser'
  */
 export const SANDBOX_SESSION_NAME = 'main'
 
+/**
+ * The sandbox browser's viewport (CSS px, DPR 1). The agent-browser default
+ * (1280×577) letterboxed the Take-Over view into a short wide band and made
+ * lazy-loading sites reveal less per screen; 1440×900 matches a typical
+ * laptop viewing window. Applied per-navigate (`set viewport` chains into the
+ * same exec, so it costs no extra round trip) because the template snapshot's
+ * pre-warmed daemon and a vault-injected relaunch both start at the default.
+ * The Take-Over wire cost does NOT scale with this: the stream bridge caps
+ * frame pixels independently (takeover-stream.ts SCREENCAST maxWidth).
+ */
+export const SANDBOX_VIEWPORT = { width: 1440, height: 900 }
+
 /** One agent-browser session per sandbox — the task's browsing identity. */
 export function sessionEnv(sessionName: string): Record<string, string> {
   return { AGENT_BROWSER_SESSION_NAME: sessionName }
@@ -56,6 +68,9 @@ export function splitCommandParts(stdout: string): string[] {
 export const cli = {
   open(url: string): string {
     return `${AGENT_BROWSER_BIN} open ${shellQuote(url)}`
+  },
+  setViewport(width: number, height: number): string {
+    return `${AGENT_BROWSER_BIN} set viewport ${Math.round(width)} ${Math.round(height)}`
   },
   snapshot(): string {
     // -i = interactive elements with @e refs (the token-cheap a11y list).
