@@ -31,7 +31,7 @@ import {
   type SessionBundle,
   type TakeoverInputEvent,
 } from '../../types.js'
-import { SANDBOX_SESSION_NAME, chainCommands, cli, parseSnapshotOutput, sessionEnv, splitCommandParts } from './agent-browser-cli.js'
+import { SANDBOX_SESSION_NAME, SANDBOX_VIEWPORT, chainCommands, cli, parseSnapshotOutput, sessionEnv, splitCommandParts } from './agent-browser-cli.js'
 import {
   TAKEOVER_INPUT_HELPER_MJS,
   TAKEOVER_INPUT_HELPER_PATH,
@@ -43,7 +43,6 @@ import {
   TAKEOVER_STREAM_BRIDGE_PATH,
   bridgeLaunchCommand,
   bridgeProbeCommand,
-  streamEnableCommand,
 } from './takeover-stream.js'
 import type { E2bRuntime, E2bSandboxHandle } from './runtime.js'
 import { randomBytes } from 'node:crypto'
@@ -140,9 +139,16 @@ export function createE2bCloudProvider(
       navigate: async (url) => {
         const proxy = meta(sandboxId).proxyUrl
         const open = proxy ? `${cli.open(url)} -p '${proxy.replace(/'/g, '')}'` : cli.open(url)
-        const out = await runBrowserCommand(sandboxId, chainCommands(open, cli.getUrl()))
+        // Viewport rides the same exec (chained = zero extra round trips) on
+        // every navigate: the snapshot's pre-warmed daemon and a
+        // vault-injected relaunch both come up at the CLI default size, and
+        // re-applying an unchanged viewport is a no-op.
+        const out = await runBrowserCommand(
+          sandboxId,
+          chainCommands(cli.setViewport(SANDBOX_VIEWPORT.width, SANDBOX_VIEWPORT.height), open, cli.getUrl()),
+        )
         const parts = splitCommandParts(out)
-        const current = (parts[1] ?? '').trim()
+        const current = (parts[2] ?? '').trim()
         return { url: current || url }
       },
       snapshot: async (): Promise<BrowserSnapshot> => {
@@ -273,9 +279,10 @@ export function createE2bCloudProvider(
         const m = meta(sandboxId)
         if (!m.streamToken) {
           const token = randomBytes(32).toString('hex')
-          // Order matters: pin the screencast port, resolve CDP while the
-          // daemon is warm, write + launch the bridge, then probe it up.
-          await runBrowserCommand(sandboxId, streamEnableCommand())
+          // Order matters: resolve CDP while the daemon is warm, write +
+          // launch the bridge, then probe it up. The bridge drives the
+          // screencast itself over CDP — agent-browser's stream server is
+          // not involved anymore.
           if (!m.cdpUrl) {
             m.cdpUrl = (await runBrowserCommand(sandboxId, cli.getCdpUrl())).trim()
             if (!m.cdpUrl) {
@@ -315,6 +322,9 @@ export function createE2bCloudProvider(
         return {
           framesUrl: `https://${host}/frames?token=${m.streamToken}`,
           inputUrl: `https://${host}/input?token=${m.streamToken}`,
+          // The duplex leg: binary frames down, input up, one socket. Old
+          // clients ignore it and stay on SSE + POST against the same bridge.
+          wsUrl: `wss://${host}/ws?token=${m.streamToken}`,
         }
       },
     }

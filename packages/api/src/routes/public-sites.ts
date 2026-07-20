@@ -215,9 +215,14 @@ export async function buildSitePaths(
   for (const block of blocks) {
     if (block.kind === 'child_page' && block.childPageId) ids.add(block.childPageId)
   }
-  ids.delete(domain.pageId)
+  // The default page owns `/` (an unbound domain has none — every referenced
+  // page then addresses by slug or /p/<id>).
+  const paths: Record<string, string> = {}
+  if (domain.pageId) {
+    ids.delete(domain.pageId)
+    paths[domain.pageId] = '/'
+  }
   const slugs = await store.listCurrentSlugs(domain.id, [...ids])
-  const paths: Record<string, string> = { [domain.pageId]: '/' }
   for (const id of ids) {
     const slug = slugs.get(id)
     paths[id] = slug ? `/${slug}` : `/p/${id}`

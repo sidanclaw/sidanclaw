@@ -179,6 +179,12 @@ export type TakeoverInputEvent =
   | { kind: 'click'; x: number; y: number }
   | { kind: 'key'; text: string }
   | { kind: 'scroll'; deltaY: number }
+  /**
+   * Browser-chrome navigation from the take-over toolbar (§5). `goto` carries a
+   * validated http(s) `url`; back/forward/reload need none. Dispatched via CDP
+   * `Page.*` on both the stream bridge and the per-event helper (kept in lockstep).
+   */
+  | { kind: 'navigate'; action: 'back' | 'forward' | 'reload' | 'goto'; url?: string }
 
 export type TakeoverFrame = { data: string; mimeType: string }
 
@@ -265,6 +271,8 @@ export type SandboxBridge = {
 export type TakeoverStreamInfo = {
   framesUrl: string
   inputUrl: string
+  /** Duplex WebSocket (binary frames down, JSON input up). Absent on backends that only speak SSE. */
+  wsUrl?: string
 }
 
 /** The per-sandbox discrete browser surface (agent-browser glue lives behind it). */

@@ -191,6 +191,17 @@ const TOOL_STATUS_NAMES: Record<string, string> = {
   notionSearch: 'Searching Notion',
   notionCreatePage: 'Creating a Notion page',
   useSkill: 'Using a skill',
+  // Browser / computer-use. These are fallbacks before the input arrives;
+  // `describeToolInput` overrides the URL-carrying ones with the page host
+  // ("Browsing news.ycombinator.com") so the timeline says WHERE, not just WHAT.
+  browserNavigate: 'Opening a page',
+  browserReadPage: 'Reading a page',
+  browserClick: 'Clicking in the browser',
+  browserType: 'Typing in the browser',
+  browserSnapshot: 'Reading the page',
+  browserCurrentUrl: 'Checking the page',
+  runBrowserSkill: 'Running a browser task',
+  browserExplore: 'Exploring the web',
 }
 
 /**
@@ -211,6 +222,21 @@ export function describeToolInput(name: string, input: Record<string, unknown>):
     return q ? `Searching "${q}"` : undefined
   }
   if (name === 'urlReader') {
+    const url = input.url as string | undefined
+    if (url) {
+      try { return `Reading ${new URL(url).hostname.replace(/^www\./, '')}` } catch { return undefined }
+    }
+  }
+  // Browser tools: show WHICH page. Only navigate/read carry a URL in their
+  // input — click/type/snapshot act on the current page and keep the status
+  // label (see TOOL_STATUS_NAMES). Mirrors the urlReader host rendering.
+  if (name === 'browserNavigate') {
+    const url = input.url as string | undefined
+    if (url) {
+      try { return `Browsing ${new URL(url).hostname.replace(/^www\./, '')}` } catch { return undefined }
+    }
+  }
+  if (name === 'browserReadPage') {
     const url = input.url as string | undefined
     if (url) {
       try { return `Reading ${new URL(url).hostname.replace(/^www\./, '')}` } catch { return undefined }

@@ -5,10 +5,8 @@ import {
   TAKEOVER_BRIDGE_PORT,
   TAKEOVER_STREAM_BRIDGE_MJS,
   TAKEOVER_STREAM_BRIDGE_PATH,
-  TAKEOVER_STREAM_PORT,
   bridgeLaunchCommand,
   bridgeProbeCommand,
-  streamEnableCommand,
 } from '../providers/e2b/takeover-stream.js'
 import type { E2bCommandResult, E2bRuntime, E2bSandboxHandle } from '../providers/e2b/runtime.js'
 
@@ -72,16 +70,19 @@ describe('[COMP:sandbox/takeover-stream] Take-Over live stream', () => {
     expect(imports.length).toBeGreaterThan(0)
     expect(imports.every((s) => s.startsWith('node:'))).toBe(true)
     // The ONE exposed listener binds 0.0.0.0 (E2B ingress upgrades only reach
-    // 0.0.0.0 binds — probed 2026-07-15); the stream server stays loopback.
+    // 0.0.0.0 binds — probed 2026-07-15); CDP stays loopback behind it.
     expect(TAKEOVER_STREAM_BRIDGE_MJS).toContain(`server.listen(PORT, '0.0.0.0'`)
-    expect(bridgeLaunchCommand('t', 'ws://x').includes(`--stream ws://127.0.0.1:${TAKEOVER_STREAM_PORT}`)).toBe(true)
-    // Token check happens BEFORE any route dispatch, in constant time.
-    const gate = TAKEOVER_STREAM_BRIDGE_MJS.indexOf(`if (!tokenOk(url.searchParams.get('token')))`)
+    // Token check happens BEFORE any route dispatch, in constant time — on
+    // the HTTP routes AND on the WebSocket upgrade.
+    const gate = TAKEOVER_STREAM_BRIDGE_MJS.indexOf(`if (!tokenOk(url.searchParams.get('token'))) { res.writeHead(403)`)
     const framesRoute = TAKEOVER_STREAM_BRIDGE_MJS.indexOf(`url.pathname === '/frames'`)
     const inputRoute = TAKEOVER_STREAM_BRIDGE_MJS.indexOf(`url.pathname === '/input'`)
     expect(gate).toBeGreaterThan(-1)
     expect(gate).toBeLessThan(framesRoute)
     expect(gate).toBeLessThan(inputRoute)
+    expect(TAKEOVER_STREAM_BRIDGE_MJS).toContain(
+      `if (url.pathname !== '/ws' || !tokenOk(url.searchParams.get('token')))`,
+    )
     expect(TAKEOVER_STREAM_BRIDGE_MJS).toContain('timingSafeEqual')
     // Latest-frame-wins under backpressure — stale pixels are dropped, not queued.
     expect(TAKEOVER_STREAM_BRIDGE_MJS).toContain('writableLength')
@@ -89,31 +90,67 @@ describe('[COMP:sandbox/takeover-stream] Take-Over live stream', () => {
     expect(TAKEOVER_STREAM_BRIDGE_MJS).toContain('EADDRINUSE')
   })
 
-  it('bridge input vocabulary stays in lockstep with takeover-input.ts (click/key/scroll, named-key no-op)', () => {
+  it('bridge OWNS a tuned screencast: startScreencast + throttled acks + idle sharp frame + stop when unwatched', () => {
+    // The whole point of the bridge-owned screencast: tuned quality/scale
+    // (agent-browser's stream server has no knobs), ack-paced frame rate,
+    // and zero encoding cost with no viewer connected.
+    for (const marker of [
+      'Page.startScreencast',
+      'Page.screencastFrameAck',
+      'Page.stopScreencast',
+      'Page.captureScreenshot',
+      'maxWidth',
+      'ACK_DELAY_MS',
+      'IDLE_SHARP_MS',
+      // Screencast only paints the FOREGROUND tab (a background attach
+      // starts fine and emits nothing — observed 2026-07-21).
+      'Page.bringToFront',
+      // The sandbox's initial about:blank must never win the target pick.
+      `t.url !== 'about:blank'`,
+      // captureScreenshot forces a compositor frame; without hash dedup an
+      // idle page ping-pongs cast ↔ sharp forever (observed 2026-07-21).
+      'lastCastHash',
+    ]) {
+      expect(TAKEOVER_STREAM_BRIDGE_MJS).toContain(marker)
+    }
+  })
+
+  it('bridge input vocabulary stays in lockstep with takeover-input.ts (click/key/scroll), plus socket-only move and the frame→viewport rescale', () => {
     for (const marker of [
       `event.kind === 'click'`,
+      `event.kind === 'move'`,
       `event.kind === 'key'`,
       `event.kind === 'scroll'`,
       'Input.insertText',
       'Input.dispatchMouseEvent',
       'Input.dispatchKeyEvent',
       'mouseWheel',
+      // Stream frames are size-capped, so frame px != viewport px — input
+      // must rescale or clicks land offset.
+      'event.frameW',
+      // Browser-chrome navigation (§5) rides the same dispatch as click/key/scroll.
+      `event.kind === 'navigate'`,
+      'Page.reload',
+      'Page.navigate',
+      'Page.navigateToHistoryEntry',
     ]) {
       expect(TAKEOVER_STREAM_BRIDGE_MJS).toContain(marker)
     }
   })
 
-  it('launch command detaches every fd and the enable command pins the stream port', () => {
+  it('launch command detaches every fd and carries no stream-server leg', () => {
     const launch = bridgeLaunchCommand('tok-1', 'ws://127.0.0.1:1/x')
     expect(launch).toContain('setsid nohup node')
     expect(launch).toContain('</dev/null')
     expect(launch).toContain('2>&1 &')
     expect(launch).toContain(TAKEOVER_STREAM_BRIDGE_PATH)
-    expect(streamEnableCommand()).toContain(`--port ${TAKEOVER_STREAM_PORT}`)
+    // The bridge screencasts over CDP itself — agent-browser's stream server
+    // is out of the loop entirely.
+    expect(launch).not.toContain('--stream')
     expect(bridgeProbeCommand()).toContain(String(TAKEOVER_BRIDGE_PORT))
   })
 
-  it('openTakeoverStream enables the stream, writes + launches the bridge, and returns tokened capability URLs', async () => {
+  it('openTakeoverStream writes + launches the bridge and returns tokened capability URLs incl. the duplex socket', async () => {
     const { runtime, commands, files } = fakeRuntime(respondUp)
     const provider = createE2bCloudProvider(runtime)
     const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
@@ -121,19 +158,25 @@ describe('[COMP:sandbox/takeover-stream] Take-Over live stream', () => {
 
     expect(info).not.toBeNull()
     const cmds = commands.map((c) => c.cmd)
-    expect(cmds.some((c) => c.includes(`stream enable --port ${TAKEOVER_STREAM_PORT}`))).toBe(true)
+    // No stream-server exec anymore: the bridge drives the screencast itself.
+    expect(cmds.some((c) => c.includes('stream enable'))).toBe(false)
     expect(cmds.some((c) => c.includes('setsid nohup node'))).toBe(true)
     expect(files.has(TAKEOVER_STREAM_BRIDGE_PATH)).toBe(true)
 
     const framesUrl = new URL(info!.framesUrl)
     const inputUrl = new URL(info!.inputUrl)
+    const wsUrl = new URL(info!.wsUrl!)
     expect(framesUrl.protocol).toBe('https:')
     expect(framesUrl.host).toBe(`${TAKEOVER_BRIDGE_PORT}-${sandboxId}.e2b.test`)
     expect(framesUrl.pathname).toBe('/frames')
     expect(inputUrl.pathname).toBe('/input')
+    expect(wsUrl.protocol).toBe('wss:')
+    expect(wsUrl.host).toBe(`${TAKEOVER_BRIDGE_PORT}-${sandboxId}.e2b.test`)
+    expect(wsUrl.pathname).toBe('/ws')
     const token = framesUrl.searchParams.get('token')!
     expect(token).toMatch(/^[0-9a-f]{64}$/)
     expect(inputUrl.searchParams.get('token')).toBe(token)
+    expect(wsUrl.searchParams.get('token')).toBe(token)
     // The token rides the launch command into the bridge.
     expect(cmds.find((c) => c.includes('setsid nohup node'))).toContain(token)
   })

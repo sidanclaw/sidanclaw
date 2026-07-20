@@ -58,14 +58,20 @@ describe('[COMP:doc/page-domains] Page domain + slug store', () => {
       expect(await store.resolveSitePath('nope.acme.com', null)).toBeNull()
     })
 
-    it('serves the domain root at "/" when the publish gate passes', async () => {
+    it('serves the domain default page at "/" when the publish gate passes', async () => {
       mockQuery
         .mockResolvedValueOnce(rows([DOMAIN_ROW])) // domain lookup
         .mockResolvedValueOnce(rows([TARGET_ROW])) // gated target
       const out = await store.resolveSitePath('docs.acme.com', '')
       expect(out).toMatchObject({ kind: 'page', canonicalPath: '/' })
-      // target === root → no rootPageId tag
+      // target === its own anchor → no rootPageId tag
       expect((out as { target: { rootPageId?: string } }).target.rootPageId).toBeUndefined()
+    })
+
+    it('404s "/" on an UNBOUND domain (no default page) without running the gate', async () => {
+      mockQuery.mockResolvedValueOnce(rows([{ ...DOMAIN_ROW, pageId: null }]))
+      expect(await store.resolveSitePath('docs.acme.com', '')).toBeNull()
+      expect(mockQuery).toHaveBeenCalledTimes(1)
     })
 
     it('404s the root when the publish gate fails (unpublished / clearance raised)', async () => {
@@ -181,21 +187,37 @@ describe('[COMP:doc/page-domains] Page domain + slug store', () => {
       expect(out).toEqual({ ok: false, reason: 'root_has_no_slug' })
     })
 
-    it('rejects a page outside the domain subtree', async () => {
+    it('rejects an unservable, unpublished page (mini-root gate)', async () => {
       mockTx([
         { rows: [{ pageId: ROOT_ID }] }, // domain
-        { rows: [] }, // containment miss
+        { rows: [] }, // self-published check miss
       ])
+      mockQuery.mockResolvedValueOnce(rows([])) // exposure walk miss
       const out = await store.setSlug({ userId: 'u_1', domainId: 'd_1', pageId: 'p_x', slug: 'x' })
-      expect(out).toEqual({ ok: false, reason: 'not_in_subtree' })
+      expect(out).toEqual({ ok: false, reason: 'not_servable' })
+    })
+
+    it('allows an alias on a cross-tree page that is itself published', async () => {
+      const { client } = mockTx([
+        { rows: [{ pageId: ROOT_ID }] }, // domain
+        { rows: [{ ok: 1 }] }, // self-published hit
+        { rows: [] }, // no holder
+        { rows: [] }, // no demotion
+        { rows: [] }, // insert
+      ])
+      mockQuery.mockResolvedValueOnce(rows([])) // walk miss (not under any anchor yet)
+      const out = await store.setSlug({ userId: 'u_1', domainId: 'd_1', pageId: 'p_x', slug: 'x' })
+      expect(out).toEqual({ ok: true, slug: 'x', previousSlug: null })
+      const sqls = client.query.mock.calls.map((c) => String(c[0]))
+      expect(sqls.some((s) => s.includes('INSERT INTO page_slugs'))).toBe(true)
     })
 
     it("rejects a slug held by another page", async () => {
       mockTx([
         { rows: [{ pageId: ROOT_ID }] },
-        { rows: [{ ok: 1 }] }, // contained
         { rows: [{ id: 's_1', pageId: 'p_other', isCurrent: true }] }, // holder
       ])
+      mockQuery.mockResolvedValueOnce(rows([TARGET_ROW])) // servable via walk
       const out = await store.setSlug({ userId: 'u_1', domainId: 'd_1', pageId: 'p_1', slug: 'x' })
       expect(out).toEqual({ ok: false, reason: 'slug_taken' })
     })
@@ -203,9 +225,9 @@ describe('[COMP:doc/page-domains] Page domain + slug store', () => {
     it('is a no-op when the page already holds the slug', async () => {
       mockTx([
         { rows: [{ pageId: ROOT_ID }] },
-        { rows: [{ ok: 1 }] },
         { rows: [{ id: 's_1', pageId: 'p_1', isCurrent: true }] },
       ])
+      mockQuery.mockResolvedValueOnce(rows([TARGET_ROW]))
       const out = await store.setSlug({ userId: 'u_1', domainId: 'd_1', pageId: 'p_1', slug: 'x' })
       expect(out).toEqual({ ok: true, slug: 'x', previousSlug: null })
     })
@@ -213,11 +235,11 @@ describe('[COMP:doc/page-domains] Page domain + slug store', () => {
     it('demotes the previous slug and inserts the new one', async () => {
       const { client } = mockTx([
         { rows: [{ pageId: ROOT_ID }] },
-        { rows: [{ ok: 1 }] },
         { rows: [] }, // no holder
         { rows: [{ slug: 'old-name' }] }, // demoted
         { rows: [] }, // insert
       ])
+      mockQuery.mockResolvedValueOnce(rows([TARGET_ROW]))
       const out = await store.setSlug({
         userId: 'u_1',
         domainId: 'd_1',
@@ -233,11 +255,11 @@ describe('[COMP:doc/page-domains] Page domain + slug store', () => {
     it("re-promotes the page's own historical slug instead of inserting", async () => {
       const { client } = mockTx([
         { rows: [{ pageId: ROOT_ID }] },
-        { rows: [{ ok: 1 }] },
         { rows: [{ id: 's_old', pageId: 'p_1', isCurrent: false }] }, // own historical
         { rows: [{ slug: 'current-name' }] }, // demoted
         { rows: [] }, // re-promote UPDATE
       ])
+      mockQuery.mockResolvedValueOnce(rows([TARGET_ROW]))
       const out = await store.setSlug({
         userId: 'u_1',
         domainId: 'd_1',
@@ -257,11 +279,37 @@ describe('[COMP:doc/page-domains] Page domain + slug store', () => {
       const out = await store.createDomain({
         userId: 'u_1',
         workspaceId: 'w_1',
-        pageId: ROOT_ID,
         hostname: 'docs.acme.com',
         provider: 'manual',
       })
       expect(out).toEqual({ error: 'hostname_taken' })
+    })
+  })
+
+  describe('setDefaultPage', () => {
+    it('updates and returns the domain when the page is in the workspace', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce(rows([{ ...DOMAIN_ROW, pageId: CHILD_ID }]))
+      const out = await store.setDefaultPage('u_1', 'd_1', CHILD_ID)
+      expect(out).toMatchObject({ pageId: CHILD_ID })
+    })
+
+    it('distinguishes a cross-workspace page from a missing domain', async () => {
+      mockQueryWithRLS
+        .mockResolvedValueOnce(rows([])) // guarded UPDATE hit nothing
+        .mockResolvedValueOnce(rows([{ id: 'd_1' }])) // but the domain exists
+      expect(await store.setDefaultPage('u_1', 'd_1', CHILD_ID)).toEqual({
+        error: 'page_not_in_workspace',
+      })
+      mockQueryWithRLS
+        .mockResolvedValueOnce(rows([])) // guarded UPDATE hit nothing
+        .mockResolvedValueOnce(rows([])) // and no domain either
+      expect(await store.setDefaultPage('u_1', 'd_1', CHILD_ID)).toBeNull()
+    })
+
+    it('clears the default (unbinds) on null', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce(rows([{ ...DOMAIN_ROW, pageId: null }]))
+      const out = await store.setDefaultPage('u_1', 'd_1', null)
+      expect(out).toMatchObject({ pageId: null })
     })
   })
 

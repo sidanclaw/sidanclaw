@@ -115,6 +115,69 @@ export function deriveOwnApexBlocks(originHosts: readonly string[]): string[] {
   return [...out];
 }
 
+// ── Platform-issued subdomain labels (<label>.<apex>) ────────────
+// A platform subdomain (docs/architecture/features/platform-subdomains.md) is a
+// governed workspace label under the product's own apex, served by the wildcard.
+// Its LABEL (the leftmost part, `acme`) is validated/suggested here; the API
+// composes `${label}.${apex}` and stores it as a page_domains row.
+
+/** Generic reserved subdomain labels — never product hostnames (those derive
+ *  from configured origins in `deriveReservedSubdomainLabels`). */
+const RESERVED_SUBDOMAIN_LABELS: readonly string[] = [
+  'www', 'app', 'api', 'admin', 'mail', 'smtp', 'imap', 'ftp', 'ns', 'ns1',
+  'ns2', 'assets', 'static', 'cdn', 'status', 'blog', 'docs', 'help', 'support',
+  'dashboard', 'auth', 'login', 'account', 'billing', 'internal', 'staging',
+];
+
+/** A valid DNS label: lowercase, 1-63 chars, alphanumeric with interior
+ *  hyphens, no leading/trailing hyphen. (`HOSTNAME_LABEL` already caps at 63.) */
+export function isValidSubdomainLabel(label: string): boolean {
+  return HOSTNAME_LABEL.test(label);
+}
+
+/** Reserved labels a workspace may not claim: the generic set above + the
+ *  leftmost label of each of the deployment's own origin hosts (so `app`,
+ *  `api`, `admin` from the configured URLs stay unclaimable) + operator extras
+ *  (`PLATFORM_SUBDOMAIN_RESERVED`). No product hostnames hardcoded. */
+export function deriveReservedSubdomainLabels(
+  originHosts: readonly string[] = [],
+  extra: readonly string[] = [],
+): string[] {
+  const out = new Set<string>(RESERVED_SUBDOMAIN_LABELS);
+  for (const raw of originHosts) {
+    const first = raw.trim().toLowerCase().split('.').filter(Boolean)[0];
+    if (first) out.add(first);
+  }
+  for (const e of extra) {
+    const v = e.trim().toLowerCase();
+    if (v) out.add(v);
+  }
+  return [...out];
+}
+
+/** The default-subdomain word pool: short, friendly, unambiguous fruit names
+ *  (lowercase ascii — valid DNS label prefixes). */
+const SUBDOMAIN_FRUITS: readonly string[] = [
+  'apple', 'apricot', 'avocado', 'banana', 'blackberry', 'blueberry',
+  'cherry', 'coconut', 'cranberry', 'date', 'dragonfruit', 'durian',
+  'fig', 'grape', 'guava', 'kiwi', 'kumquat', 'lemon', 'lime', 'lychee',
+  'mango', 'melon', 'nectarine', 'olive', 'orange', 'papaya', 'peach',
+  'pear', 'persimmon', 'pineapple', 'plum', 'pomelo', 'raspberry',
+  'starfruit', 'strawberry', 'tangerine', 'watermelon',
+];
+
+/**
+ * Generate a default workspace-subdomain label: `<fruit><3 digits>` —
+ * `grape209`, `watermelon102`. The digits (100-999) keep collisions rare;
+ * the API layer still availability-checks and re-rolls on a clash. `rng`
+ * is injectable for tests (defaults to Math.random).
+ */
+export function generateSubdomainLabel(rng: () => number = Math.random): string {
+  const fruit = SUBDOMAIN_FRUITS[Math.floor(rng() * SUBDOMAIN_FRUITS.length)];
+  const digits = 100 + Math.floor(rng() * 900);
+  return `${fruit}${digits}`;
+}
+
 /**
  * Normalize user input ("https://Docs.Acme.com/path" → "docs.acme.com").
  * Returns null when the input is not a usable public hostname. IDN input is

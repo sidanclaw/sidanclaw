@@ -130,6 +130,19 @@ ws.onopen = async () => {
         deltaY: event.deltaY,
         pointerType: 'mouse',
       }, sessionId)
+    } else if (event.kind === 'navigate') {
+      // Browser-chrome navigation (§5). goto only carries http(s) — reject
+      // anything else so a bad url can never reach Page.navigate below the seam.
+      if (event.action === 'reload') {
+        await send('Page.reload', {}, sessionId)
+      } else if (event.action === 'goto') {
+        if (/^https?:\\/\\//i.test(event.url || '')) await send('Page.navigate', { url: event.url }, sessionId)
+      } else {
+        const delta = event.action === 'back' ? -1 : 1
+        const hist = await send('Page.getNavigationHistory', {}, sessionId)
+        const target = hist.entries[hist.currentIndex + delta]
+        if (target) await send('Page.navigateToHistoryEntry', { entryId: target.id }, sessionId) // ends of history → no-op
+      }
     }
     clearTimeout(deadline)
     ws.close()

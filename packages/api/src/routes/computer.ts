@@ -30,6 +30,17 @@ const InputEventSchema = z.union([
   z.object({ kind: z.literal('click'), x: z.number(), y: z.number() }),
   z.object({ kind: z.literal('key'), text: z.string().min(1).max(64) }),
   z.object({ kind: z.literal('scroll'), deltaY: z.number() }),
+  // Take-over toolbar navigation (§5): goto must carry an http(s) url — the
+  // seam re-validates, but a bad scheme is rejected here first.
+  z
+    .object({
+      kind: z.literal('navigate'),
+      action: z.enum(['back', 'forward', 'reload', 'goto']),
+      url: z.string().url().max(2048).optional(),
+    })
+    .refine((e) => e.action !== 'goto' || (!!e.url && /^https?:\/\//i.test(e.url)), {
+      message: 'goto requires an http(s) url',
+    }),
 ])
 
 const ClearanceSchema = z.enum(['public', 'internal', 'confidential'])

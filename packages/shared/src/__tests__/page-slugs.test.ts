@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   deriveOwnApexBlocks,
+  deriveReservedSubdomainLabels,
+  generateSubdomainLabel,
   isValidPageSlug,
+  isValidSubdomainLabel,
   normalizeHostname,
   PAGE_SLUG_MAX_LENGTH,
   RESERVED_PAGE_SLUGS,
@@ -129,6 +132,67 @@ describe('[COMP:doc/page-slug-helpers] Page slug + hostname helpers', () => {
       expect(deriveOwnApexBlocks(['example.co.uk'])).toEqual([]);
       // but a real subdomain under it derives the registrable apex correctly
       expect(deriveOwnApexBlocks(['app.example.co.uk'])).toEqual(['.example.co.uk']);
+    });
+  });
+
+  describe('isValidSubdomainLabel', () => {
+    it('accepts valid DNS labels', () => {
+      for (const l of ['acme', 'a', 'acme-hq', 'a1b2', 'x'.repeat(63)]) {
+        expect(isValidSubdomainLabel(l)).toBe(true);
+      }
+    });
+    it('rejects invalid labels', () => {
+      for (const l of [
+        '',
+        'x'.repeat(64), // too long
+        '-acme', // leading hyphen
+        'acme-', // trailing hyphen
+        'Acme', // uppercase
+        'a.b', // dot (not a single label)
+        'acme_hq', // underscore
+        'ac me', // space
+      ]) {
+        expect(isValidSubdomainLabel(l)).toBe(false);
+      }
+    });
+  });
+
+  describe('deriveReservedSubdomainLabels', () => {
+    it('always reserves the generic set', () => {
+      const r = deriveReservedSubdomainLabels();
+      expect(r).toContain('www');
+      expect(r).toContain('app');
+      expect(r).toContain('api');
+      expect(r).toContain('admin');
+    });
+    it('reserves the leftmost label of each origin host + operator extras', () => {
+      const r = deriveReservedSubdomainLabels(
+        ['app.usebrian.ai', 'bubbles.usebrian.ai'],
+        ['feed', 'Studio'],
+      );
+      expect(r).toContain('bubbles');
+      expect(r).toContain('feed');
+      expect(r).toContain('studio'); // lowercased
+    });
+  });
+
+  describe('generateSubdomainLabel', () => {
+    it('produces `<fruit><3 digits>` and always a valid DNS label', () => {
+      for (let i = 0; i < 50; i++) {
+        const label = generateSubdomainLabel();
+        expect(label).toMatch(/^[a-z]+[1-9]\d{2}$/);
+        expect(isValidSubdomainLabel(label)).toBe(true);
+      }
+    });
+    it('is deterministic under an injected rng', () => {
+      expect(generateSubdomainLabel(() => 0)).toBe('apple100');
+      expect(generateSubdomainLabel(() => 0.999999)).toBe('watermelon999');
+    });
+    it('never collides with a reserved label', () => {
+      const reserved = new Set(deriveReservedSubdomainLabels());
+      for (let i = 0; i < 50; i++) {
+        expect(reserved.has(generateSubdomainLabel())).toBe(false);
+      }
     });
   });
 });

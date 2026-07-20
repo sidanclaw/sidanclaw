@@ -313,7 +313,7 @@ import { createDeckStore } from './db/deck-store.js'
 import { publicShareRoutes } from './routes/public-share.js'
 import { publicSiteRoutes } from './routes/public-sites.js'
 import { createDomainProvisioner } from './domains/provisioner.js'
-import { deriveOwnApexBlocks } from '@use-brian/shared/page-slugs'
+import { deriveOwnApexBlocks, deriveReservedSubdomainLabels } from '@use-brian/shared/page-slugs'
 import { createEmailInboxProvider, setGlobalEmailInboxProvider } from './agentmail/provider.js'
 import { docThemesRoutes } from './routes/doc-themes.js'
 import { runIngestPage } from './doc/ingest-page-runner.js'
@@ -495,6 +495,15 @@ export interface OpenApiEnv {
   // API_URL/APP_URL/AUTHED_APP_URL); this adds policy on top. No hostname
   // policy lives in code.
   PAGE_DOMAIN_BLOCKED_HOSTS?: string
+  // Platform-issued workspace subdomains (docs/architecture/features/
+  // platform-subdomains.md). Customer subdomains → CUSTOMER_SUBDOMAIN_APEX;
+  // first-party workspaces (FIRST_PARTY_SUBDOMAIN_WORKSPACE_IDS, comma list) →
+  // PLATFORM_SUBDOMAIN_APEX. Either apex unset = that half dark.
+  // PLATFORM_SUBDOMAIN_RESERVED adds reserved labels (comma list).
+  CUSTOMER_SUBDOMAIN_APEX?: string
+  PLATFORM_SUBDOMAIN_APEX?: string
+  FIRST_PARTY_SUBDOMAIN_WORKSPACE_IDS?: string
+  PLATFORM_SUBDOMAIN_RESERVED?: string
   // AgentMail assistant-owned email (docs/architecture/integrations/agentmail.md).
   // Hosted passes the platform org key; OSS/self-host passes a BYO key. Unset
   // (open default) → the email surface is dark: inbox provisioning routes 503,
@@ -2828,6 +2837,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     onCloudLoginWall: sandboxOrchestrator
       ? async (toolCtx) => sandboxOrchestrator.pauseForTakeover(toolCtx.sessionId)
       : undefined,
+    // Proactive live-view hand-off (§5): when a cloud browse starts, push the
+    // Take-Over link to the user's channel out-of-band, before any work.
+    // Channels drop mid-turn model text and have no live chip, so the model
+    // relaying the link cannot reach them — deliverToChannel persists to the
+    // session AND pushes to telegram/slack/whatsapp (web is persist-only; the
+    // live chip covers realtime there). The tool only fires this on
+    // interactive sessions (never headless/autonomous).
+    onCloudSessionStarted: async (toolCtx, { takeoverUrl }) => {
+      await deliverToChannel({
+        assistantId: toolCtx.assistantId,
+        userId: toolCtx.userId,
+        text: `🖥️ I've opened a live browser to work on this. You can watch it live or take over (for example, to sign in) here: ${takeoverUrl}`,
+        sessionId: toolCtx.sessionId,
+        channelType: toolCtx.channelType,
+        channelId: toolCtx.channelId,
+        integrationStore: integrationStore ?? undefined,
+        defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN,
+        waConnectorUrl: env.WA_CONNECTOR_URL,
+        waConnectorSecret: env.WA_CONNECTOR_SECRET,
+      })
+    },
     resolvePolicy: resolveComputerToolPolicy,
     // Barrier 2 (§4.9): the flag alone cannot enable unattended computer-use
     // — resolveUnattendedComputerUse also requires live metering, so a
@@ -3659,6 +3689,35 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         .map((h) => h.trim().toLowerCase())
         .filter(Boolean)
       return [...originHosts, ...deriveOwnApexBlocks(originHosts), ...operator]
+    })(),
+    // Platform-issued workspace subdomains (docs/architecture/features/
+    // platform-subdomains.md). Customer subdomains ride the customer apex;
+    // first-party workspaces (allowlist) ride the product apex. Either apex
+    // unset = that half dark (fail-safe).
+    customerSubdomainApex: env.CUSTOMER_SUBDOMAIN_APEX?.trim().toLowerCase() || undefined,
+    platformSubdomainApex: env.PLATFORM_SUBDOMAIN_APEX?.trim().toLowerCase() || undefined,
+    firstPartySubdomainWorkspaceIds: new Set(
+      (env.FIRST_PARTY_SUBDOMAIN_WORKSPACE_IDS ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+    reservedSubdomainLabels: (() => {
+      const originHosts = [env.API_URL, env.APP_URL, env.AUTHED_APP_URL]
+        .map((url) => {
+          if (!url) return null
+          try {
+            return new URL(url).hostname.toLowerCase()
+          } catch {
+            return null
+          }
+        })
+        .filter((h): h is string => Boolean(h))
+      const extra = (env.PLATFORM_SUBDOMAIN_RESERVED ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+      return deriveReservedSubdomainLabels(originHosts, extra)
     })(),
     workspaceGroupStore,
     analytics,
