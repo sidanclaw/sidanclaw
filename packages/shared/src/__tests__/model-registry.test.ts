@@ -13,6 +13,7 @@ import {
   providerAliasMap,
   recordedAliasIds,
   providerModelIds,
+  menuForClass,
   bracketFor,
   effectiveRatePerMTok,
   UNKNOWN_MODEL_RATES,
@@ -79,6 +80,9 @@ describe('[COMP:providers/model-registry] derivations match the pre-registry lit
       'gemini-3-flash-standard',
       'gemini-3.1-flash-lite',
       'gemini-3.1-flash-lite-preview',
+      // Wave-1 background-lane candidate (plan §5.1): classifies standard
+      // like the flash-lite lane it may replace.
+      'qwen3.5-flash',
     ].sort())
     expect([...tierModelIds('pro')].sort()).toEqual([
       'pro', 'gemini-flash-3', 'gemini-3-flash-preview', 'gemini-flash',
@@ -193,6 +197,49 @@ describe('[COMP:providers/model-registry] provider derivations', () => {
     expect(gemini).not.toContain('gemini-embedding-001')
     expect(gemini).not.toContain('gemini-2.5-flash') // legacy
     expect(providerModelIds('anthropic')).toEqual(['claude-haiku-4-5'])
+  })
+})
+
+describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', () => {
+  it('ports the locked wave-1 slate as metered/background rows, all text-only', () => {
+    for (const alias of ['qwen3.7-plus', 'deepseek-v4-flash', 'qwen3.7-max', 'deepseek-v4-pro']) {
+      const row = registryRow(alias)!
+      expect(row.class).toBe('metered')
+      expect(row.tier).toBe('other') // never in CREDIT_PER_TIER counts — the metered ledger bills
+      expect(row.capabilities.vision).toBe(false)
+      expect(row.provider).toBe('openai-compat:dashscope-intl')
+    }
+    const background = registryRow('qwen3.5-flash')!
+    expect(background.class).toBe('background')
+    expect(background.menu).not.toBe(true) // internal lane, never a menu
+  })
+
+  it('qwen3.7-max is snapshot-pinned at LIST price, not the promo (L6/L13)', () => {
+    const row = registryRow('qwen3.7-max')!
+    expect(row.apiModelId).toBe('qwen3.7-max-2026-06-08')
+    expect(row.rates!.brackets[0]!.inPerMTok).toBe(5.00) // list, not the $2.50 promo
+  })
+
+  it('deepseek-v4-pro prices its cache exclusion honestly (full input rate)', () => {
+    const rates = registryRow('deepseek-v4-pro')!.rates!
+    expect(rates.cacheReadPerMTok).toBe(rates.brackets[0]!.inPerMTok)
+  })
+
+  it('menuForClass lists curated defaults and metered ports, never fallback/background/legacy', () => {
+    expect(menuForClass('standard-pro').map((r) => r.alias)).toEqual(['gemini-3-flash-standard', 'gemini-flash-3'])
+    expect(menuForClass('max').map((r) => r.alias)).toEqual(['gemini-3.5-flash'])
+    expect(menuForClass('research').map((r) => r.alias)).toEqual(['gemini-3-pro-research'])
+    expect(menuForClass('metered').map((r) => r.alias).sort()).toEqual(
+      ['qwen3.7-plus', 'deepseek-v4-flash', 'qwen3.7-max', 'deepseek-v4-pro'].sort(),
+    )
+    expect(menuForClass('background')).toEqual([])
+  })
+
+  it('keyless providers drop their models from every menu (L12)', () => {
+    const geminiOnly = new Set(['gemini'])
+    expect(menuForClass('metered', geminiOnly)).toEqual([])
+    expect(menuForClass('standard-pro', geminiOnly).map((r) => r.alias))
+      .toEqual(['gemini-3-flash-standard', 'gemini-flash-3'])
   })
 })
 

@@ -82,6 +82,11 @@ export type ModelRegistryRow = {
   status: 'active' | 'legacy'
   /** Marks this row as the chat selector default: `MODEL_MAP[chatTierKey] = alias`. */
   chatTierKey?: ChatTierKey
+  /** Offered in selection menus (workspace/assistant/session pickers). False
+   * for fallback-only rows (claude-haiku), the internal background lane, and
+   * every legacy row. Metered rows with `menu: true` are pickable ONLY
+   * through the metered confirm flow (plan L8/L10). */
+  menu?: boolean
   /** Ids that resolve AND classify to this row. */
   idAliases?: readonly string[]
   /** Ids that price at this row's rates but classify as 'other' (see header). */
@@ -163,6 +168,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     tier: 'standard',
     status: 'active',
     chatTierKey: 'standard',
+    menu: true,
     recordAlias: true,
     fallbackAlias: 'claude-haiku-4-5', // same class (standard-pro), L2
     rates: FLASH3_RATES,
@@ -179,6 +185,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     tier: 'pro',
     status: 'active',
     chatTierKey: 'pro',
+    menu: true,
     // 'pro' = bare tier key recorded defensively; 'gemini-3-flash-preview' =
     // the resolved provider id actually recorded; 'gemini-flash' = legacy alias.
     idAliases: ['pro', 'gemini-3-flash-preview', 'gemini-flash'],
@@ -197,6 +204,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     tier: 'max',
     status: 'active',
     chatTierKey: 'max',
+    menu: true,
     idAliases: ['max'],
     rates: FLASH35_RATES,
     contextWindow: 1_048_576,
@@ -213,6 +221,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     tier: 'research',
     status: 'active',
     chatTierKey: 'research',
+    menu: true,
     idAliases: ['research'],
     recordAlias: true,
     rates: PRO31_RATES,
@@ -375,6 +384,127 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     contextWindow: 2_000_000,
     maxOutput: 8_192,
     capabilities: { tools: false, vision: false, thinking: false },
+  },
+
+  // ── Wave-1 ports (plan §5.1, locked 2026-07-21; DashScope intl) ──
+  //
+  // All metered-first (L14): billed 5 + ceil(cost/$0.020) credits through
+  // the metered ledger, never CREDIT_PER_TIER (tier 'other' keeps them out
+  // of the per-tier credit counts). Every row is TEXT-ONLY — the L7
+  // capability gate serves vision turns via the class default. Curated
+  // promotion (Pro menu for qwen3.7-plus / deepseek-v4-flash, background
+  // default for qwen3.5-flash) is an assessed registry edit gated on the
+  // behavioral-evals rig — verdicts recorded in docs/plans/model-registry.md
+  // §5.1. Rates are DashScope intl LIST prices (researched 2026-07-20/21),
+  // never promo (L6).
+  {
+    // Pro-menu candidate (zh/Cantonese quality + 1M context is the case,
+    // not price). 20% cache read; DashScope implicit cache has no write fee.
+    // Thinking-mode output is priced higher by the vendor but unrecorded
+    // here: TokenUsage carries no thinking split, so COGS uses the plain
+    // output rate (understates thinking-heavy turns — the metered estimate
+    // notes this; revisit when usage decomposition lands).
+    alias: 'qwen3.7-plus',
+    provider: 'openai-compat:dashscope-intl',
+    apiModelId: 'qwen3.7-plus',
+    class: 'metered',
+    tier: 'other',
+    status: 'active',
+    menu: true,
+    rates: {
+      brackets: [
+        { upToInputTokens: 256_000, inPerMTok: 0.40, outPerMTok: 1.60 },
+        { upToInputTokens: Infinity, inPerMTok: 1.20, outPerMTok: 4.80 },
+      ],
+      cacheReadPerMTok: 0.08, // 20% of the base-bracket input rate
+      cacheWritePerMTok: 0,
+    },
+    contextWindow: 1_000_000,
+    maxOutput: 16_384,
+    capabilities: { tools: true, vision: false, thinking: true },
+  },
+  {
+    // Cheapest credible Pro-class candidate (beats Flash 3 on II/GPQA/
+    // MCP-Atlas). Rig must probe the reported tool-chain decay past ~8
+    // calls before any Pro promotion (plan §5.1).
+    alias: 'deepseek-v4-flash',
+    provider: 'openai-compat:dashscope-intl',
+    apiModelId: 'deepseek-v4-flash',
+    class: 'metered',
+    tier: 'other',
+    status: 'active',
+    menu: true,
+    rates: {
+      brackets: [{ upToInputTokens: Infinity, inPerMTok: 0.20, outPerMTok: 0.40 }],
+      cacheReadPerMTok: 0.04, // 20% cache
+      cacheWritePerMTok: 0,
+    },
+    contextWindow: 131_072,
+    maxOutput: 8_192,
+    capabilities: { tools: true, vision: false, thinking: true },
+  },
+  {
+    // Background-lane candidate (Flash Lite replacement, 2.5-3.75x cheaper
+    // sticker). Internal routing only, NEVER a menu: its gate is
+    // extraction-quality evals, not the chat rig — a background regression
+    // poisons the brain silently. Nothing pins it until that verdict.
+    alias: 'qwen3.5-flash',
+    provider: 'openai-compat:dashscope-intl',
+    apiModelId: 'qwen3.5-flash',
+    class: 'background',
+    tier: 'standard',
+    status: 'active',
+    rates: {
+      brackets: [{ upToInputTokens: Infinity, inPerMTok: 0.10, outPerMTok: 0.40 }],
+      cacheReadPerMTok: 0.02, // 20% cache
+      cacheWritePerMTok: 0,
+    },
+    contextWindow: 1_000_000,
+    maxOutput: 16_384,
+    capabilities: { tools: true, vision: false, thinking: true },
+  },
+  {
+    // Permanent metered resident: fails the Max anchor ~3.3x at list and
+    // the Max-tier inclusion was REJECTED (settled 2026-07-21 — plan §5,
+    // do not re-litigate). Its offering IS a metered profile at the honest
+    // price. LIST rates, not the launch promo (L6). Snapshot-pinned (L13).
+    alias: 'qwen3.7-max',
+    provider: 'openai-compat:dashscope-intl',
+    apiModelId: 'qwen3.7-max-2026-06-08',
+    class: 'metered',
+    tier: 'other',
+    status: 'active',
+    menu: true,
+    rates: {
+      brackets: [{ upToInputTokens: Infinity, inPerMTok: 5.00, outPerMTok: 15.00 }],
+      cacheReadPerMTok: 0.50,  // explicit cache: 10% read
+      cacheWritePerMTok: 6.25, // explicit cache: 125% write
+    },
+    contextWindow: 262_144,
+    maxOutput: 32_768,
+    capabilities: { tools: true, vision: false, thinking: true },
+  },
+  {
+    // Permanent metered resident: capability-credible vs Pro 3.1 (ties
+    // SWE-bench 80.6) but EXCLUDED from the cache discount on Model Studio
+    // — cache reads bill the FULL input rate, which is priced in here so
+    // its metered estimates stay truthful (the plan §5 counterexample for
+    // why sticker classification is forbidden).
+    alias: 'deepseek-v4-pro',
+    provider: 'openai-compat:dashscope-intl',
+    apiModelId: 'deepseek-v4-pro',
+    class: 'metered',
+    tier: 'other',
+    status: 'active',
+    menu: true,
+    rates: {
+      brackets: [{ upToInputTokens: Infinity, inPerMTok: 2.40, outPerMTok: 4.80 }],
+      cacheReadPerMTok: 2.40, // cache-discount EXCLUDED: full input rate
+      cacheWritePerMTok: 0,
+    },
+    contextWindow: 131_072,
+    maxOutput: 8_192,
+    capabilities: { tools: true, vision: false, thinking: true },
   },
 
   // ── Embeddings (own cost class; the models themselves are out of scope
@@ -605,6 +735,23 @@ export function recordedAliasIds(provider: ModelProvider): ReadonlySet<string> {
     if (row.provider === provider && row.recordAlias) ids.add(row.alias)
   }
   return ids
+}
+
+/**
+ * Menu contents for one class: active, menu-flagged rows in registry order.
+ * The selection surfaces (workspace defaults, assistant overrides, session
+ * picker) list exactly these; metered-class entries are pickable ONLY
+ * through the metered confirm flow (plan L8/L10). Availability still
+ * requires the row's provider key at boot (L12) — callers pass the set of
+ * configured provider keys so keyless models are absent, never erroring.
+ */
+export function menuForClass(cls: ModelClass, configuredProviders?: ReadonlySet<string>): ModelRegistryRow[] {
+  return MODEL_REGISTRY.filter((row) =>
+    row.class === cls &&
+    row.status === 'active' &&
+    row.menu === true &&
+    (!configuredProviders || configuredProviders.has(row.provider)),
+  )
 }
 
 const CHAT_TIER_KEYS: ReadonlySet<string> = new Set(['standard', 'pro', 'max', 'research'])
