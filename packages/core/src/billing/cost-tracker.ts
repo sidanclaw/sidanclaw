@@ -129,6 +129,17 @@ export type UsageStore = {
      */
     workspaceId?: string
     model: string
+    /**
+     * Billing tier this call served (model-registry `ModelTier`), recorded
+     * alongside the model id since the (model, tier) decouple (migration
+     * 342). Optional: when omitted, implementations derive it from the
+     * recorded model id via the registry classifier — correct whenever the
+     * model maps 1:1 to a tier (every current id, incl. the synthetic ones).
+     * Pass it explicitly when the route knows better than the id (a shared
+     * standard-pro model serving a specific tier, or a menu model serving an
+     * off-class turn).
+     */
+    modelTier?: string
     inputTokens: number
     outputTokens: number
     cacheReadTokens?: number

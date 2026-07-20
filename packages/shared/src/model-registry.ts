@@ -88,8 +88,10 @@ export type ModelRegistryRow = {
   priceAliases?: readonly string[]
   /** Record `alias` (not `apiModelId`) in usage tracking — the synthetic
    * billing ids that keep Standard/Research billable-distinct from the tier
-   * sharing their underlying model. Retired by the (model, tier) decouple
-   * (plan L9); kept for live behavior until that migration lands. */
+   * sharing their underlying model. Since the (model, tier) decouple
+   * (migration 342) the recorded `model_tier` column carries billing, so
+   * these ids are belt-and-suspenders; the flag comes off once every main
+   * recording seam stamps `modelTier` explicitly (plan L9 retirement). */
   recordAlias?: boolean
   /** Absent = unpriced: cost tracking falls back to `UNKNOWN_MODEL_RATES`
    * (pre-existing behavior for ids that never had a pricing row). */
@@ -510,6 +512,16 @@ export function tierCaseExpression(column = 'model'): string {
     ELSE 'other'
   END
 `
+}
+
+/**
+ * Tier classifier over `usage_tracking`: trust the recorded `model_tier`
+ * (migration 342, the (model, tier) decouple) and fall back to the model-id
+ * CASE for pre-342 rows — so historical rows classify exactly as recorded
+ * while new rows can decouple tier from model id.
+ */
+export function tierClassifierExpression(modelColumn = 'model', tierColumn = 'model_tier'): string {
+  return `COALESCE(${tierColumn}, ${tierCaseExpression(modelColumn)})`
 }
 
 /** List rates for cost tracking; undefined for unknown/unpriced ids. */

@@ -7,6 +7,7 @@ import {
   tierForModelId,
   chatTierDefaults,
   tierCaseExpression,
+  tierClassifierExpression,
   modelRates,
   modelContextWindow,
   providerAliasMap,
@@ -108,6 +109,16 @@ describe('[COMP:providers/model-registry] derivations match the pre-registry lit
     expect(tierForModelId('gemini-3-flash-standard')).toBe('standard')
     expect(tierForModelId('gemini-flash-3')).toBe('pro')
     expect(tierForModelId('totally-unknown')).toBe('other')
+  })
+
+  it('tierClassifierExpression trusts recorded model_tier before the id CASE', () => {
+    const sql = tierClassifierExpression('model', 'model_tier')
+    expect(sql.startsWith('COALESCE(model_tier,')).toBe(true)
+    expect(sql).toContain("ELSE 'other'")
+    // Custom column names thread through both halves.
+    const aliased = tierClassifierExpression('ut.model', 'ut.model_tier')
+    expect(aliased).toContain('COALESCE(ut.model_tier,')
+    expect(aliased).toContain('ut.model IN (')
   })
 
   it('tierCaseExpression covers every tier arm with the same ids', () => {

@@ -16,6 +16,7 @@ import {
   tierModelIds,
   tierForModelId,
   tierCaseExpression,
+  tierClassifierExpression,
   type ModelTier,
 } from '@use-brian/shared/model-registry'
 
@@ -112,6 +113,13 @@ export function tierForModel(model: string): ModelTierLabel {
  * into.
  */
 export const MODEL_TIER_SQL_CASE = tierCaseExpression('model')
+
+/**
+ * The classifier billing/admin queries should use since the (model, tier)
+ * decouple (migration 342): trust the recorded `model_tier`, fall back to
+ * the model-id CASE for pre-342 rows. Same output labels as `tierForModel`.
+ */
+export const MODEL_TIER_CLASSIFIER_SQL = tierClassifierExpression('model', 'model_tier')
 
 /**
  * Models each plan tier is allowed to use (plan = `workspaces.plan`).
