@@ -62,12 +62,6 @@ export async function fetchMeteredEstimate(
   return ((await res.json()) as { estimate: MeteredEstimate | null }).estimate;
 }
 
-export async function listMeteredProfiles(workspaceId: string): Promise<MeteredProfile[]> {
-  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/metered-profiles`);
-  if (!res.ok) throw new Error(`profiles list failed (${res.status})`);
-  return ((await res.json()) as { profiles: MeteredProfile[] }).profiles;
-}
-
 export async function createMeteredProfile(
   workspaceId: string,
   params: { name: string; modelAlias: string; toolRounds: number; thinking?: boolean | null },
