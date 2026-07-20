@@ -40,12 +40,38 @@ export function formatStamp(ms: number): string {
   return `${h}:${m}:${s}`
 }
 
+/** The bare `H:MM:SS` / `MM:SS` moment, with no brackets around it. */
+const STAMP_CORE = String.raw`(?:(\d+):)?(\d{1,2}):(\d{2})`
+
 /**
- * Matches a `[H:MM:SS]` or `[MM:SS]` citation. Anchored on the brackets so it
- * cannot swallow surrounding prose. Kept beside the formatter deliberately —
- * writer and reader change together or not at all.
+ * Matches a single `[H:MM:SS]` or `[MM:SS]` citation. Anchored on the brackets
+ * so it cannot swallow surrounding prose. Kept beside the formatter
+ * deliberately — writer and reader change together or not at all.
  */
-export const STAMP_RE = /\[(?:(\d+):)?(\d{1,2}):(\d{2})\]/
+export const STAMP_RE = new RegExp(String.raw`\[${STAMP_CORE}\]`)
+
+/**
+ * Matches a citation GROUP: one or more moments inside a single pair of
+ * brackets, comma-separated — `[0:01:24]` and `[0:01:24, 0:01:44]` alike.
+ *
+ * The model writes the multi-moment form whenever a claim is grounded in more
+ * than one place ("...they are not traditional [0:01:24, 0:01:44]"), and the
+ * single-stamp `STAMP_RE` matched NONE of it: the `]` does not follow the first
+ * moment, so the whole citation silently rendered as plain text. Every
+ * multi-moment citation in every brief was therefore unclickable.
+ */
+const STAMP_GROUP_RE = new RegExp(
+  String.raw`\[\s*${STAMP_CORE}(?:\s*,\s*${STAMP_CORE})*\s*\]`,
+)
+
+/** Shared arithmetic so the bracketed and bare paths cannot disagree. */
+function coreToMs(h: string | undefined, min: string, sec: string): number | null {
+  const hours = h ? Number(h) : 0
+  const minutes = Number(min)
+  const seconds = Number(sec)
+  if (minutes > 59 || seconds > 59) return null
+  return ((hours * 60 + minutes) * 60 + seconds) * 1000
+}
 
 /**
  * Parse a `[H:MM:SS]` / `[MM:SS]` citation back to milliseconds. Returns null
@@ -56,18 +82,18 @@ export const STAMP_RE = /\[(?:(\d+):)?(\d{1,2}):(\d{2})\]/
 export function parseStamp(text: string): number | null {
   const m = STAMP_RE.exec(text)
   if (!m) return null
-  const h = m[1] ? Number(m[1]) : 0
-  const min = Number(m[2])
-  const sec = Number(m[3])
-  if (min > 59 || sec > 59) return null
-  return ((h * 60 + min) * 60 + sec) * 1000
+  return coreToMs(m[1], m[2], m[3])
 }
 
 /** A citation found inside a longer text, with the offsets it occupies. */
 export type StampMatch = {
-  /** Character offset of the `[` within the scanned text. */
+  /** Character offset of the match within the scanned text. */
   index: number
-  /** Length of the matched citation, including brackets. */
+  /**
+   * Length of the matched citation. A lone citation matches its whole bracketed
+   * token (`[0:47:21]`); inside a multi-moment group each moment matches on its
+   * own, without the shared brackets.
+   */
   length: number
   ms: number
   text: string
@@ -81,17 +107,43 @@ export type StampMatch = {
  * come through here, so a stamp either IS a citation for both of them or for
  * neither. Impossible stamps are skipped, not returned — `parseStamp` owns that
  * judgement, and this must not develop a second opinion about it.
+ *
+ * Scans in two levels: find the bracketed group, then each moment within it.
+ * A group holding ONE moment reports the whole bracketed token, so a lone
+ * citation keeps rendering as a single `[0:47:21]` pill exactly as before. A
+ * group holding several reports each moment separately, so `[0:01:24, 0:01:44]`
+ * becomes two independent seek links and the punctuation between them stays
+ * plain text — there is no sensible single destination for a two-moment link.
  */
 export function scanStamps(text: string): StampMatch[] {
   // A fresh global twin per call: a module-level /g regex carries `lastIndex`
   // between calls, which makes results depend on call order.
-  const re = new RegExp(STAMP_RE.source, 'g')
+  const groupRe = new RegExp(STAMP_GROUP_RE.source, 'g')
   const out: StampMatch[] = []
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text)) !== null) {
-    const ms = parseStamp(m[0])
-    if (ms === null) continue
-    out.push({ index: m.index, length: m[0].length, ms, text: m[0] })
+  let group: RegExpExecArray | null
+  while ((group = groupRe.exec(text)) !== null) {
+    const coreRe = new RegExp(STAMP_CORE, 'g')
+    const moments: Array<{ index: number; length: number; ms: number; text: string }> = []
+    let core: RegExpExecArray | null
+    let impossible = false
+    while ((core = coreRe.exec(group[0])) !== null) {
+      const ms = coreToMs(core[1], core[2], core[3])
+      // One bad moment invalidates only itself, not its neighbours — a group is
+      // a list of independent claims, not a single compound citation.
+      if (ms === null) {
+        impossible = true
+        continue
+      }
+      moments.push({ index: core.index, length: core[0].length, ms, text: core[0] })
+    }
+    if (moments.length === 0) continue
+    if (moments.length === 1 && !impossible) {
+      out.push({ index: group.index, length: group[0].length, ms: moments[0].ms, text: group[0] })
+      continue
+    }
+    for (const m of moments) {
+      out.push({ index: group.index + m.index, length: m.length, ms: m.ms, text: m.text })
+    }
   }
   return out
 }

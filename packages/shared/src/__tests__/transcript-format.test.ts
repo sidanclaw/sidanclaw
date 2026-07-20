@@ -80,6 +80,48 @@ describe('[COMP:media/transcript-format] scanStamps', () => {
   it('finds nothing in prose', () => {
     expect(scanStamps('no stamps here')).toEqual([])
   })
+
+  // The model grounds a claim in several moments at once whenever more than one
+  // supports it. The single-stamp pattern matched none of it (no `]` after the
+  // first moment), so every multi-moment citation rendered as dead plain text.
+  it('links each moment of a multi-moment citation independently', () => {
+    const text = 'Not traditional [0:01:24, 0:01:44].'
+    const hits = scanStamps(text)
+    expect(hits.map((h) => h.ms)).toEqual([84_000, 104_000])
+    // Each moment is its own link; the brackets and comma stay plain text,
+    // because a two-moment span has no single seek destination.
+    expect(hits.map((h) => h.text)).toEqual(['0:01:24', '0:01:44'])
+    for (const h of hits) expect(text.slice(h.index, h.index + h.length)).toBe(h.text)
+  })
+
+  it('handles a multi-moment citation with no space after the comma', () => {
+    expect(scanStamps('[0:00:05,0:00:09]').map((h) => h.ms)).toEqual([5_000, 9_000])
+  })
+
+  it('keeps a lone citation rendering as one bracketed pill', () => {
+    // Guards the no-visual-regression promise: existing briefs must not have
+    // every citation silently shrink to exclude its brackets.
+    expect(scanStamps('at [0:02:01] ok')[0]).toEqual({
+      index: 3,
+      length: 9,
+      ms: 121_000,
+      text: '[0:02:01]',
+    })
+  })
+
+  it('drops only the impossible moment from a mixed group', () => {
+    // A group is a list of independent claims: one hallucinated moment must not
+    // take a real neighbour down with it.
+    const hits = scanStamps('[0:01:24, 00:85]')
+    expect(hits.map((h) => h.ms)).toEqual([84_000])
+    expect(hits[0].text).toBe('0:01:24')
+  })
+
+  it('scans several groups in one paragraph, in order', () => {
+    expect(scanStamps('a [0:00:05] b [0:01:00, 0:02:00] c').map((h) => h.ms)).toEqual([
+      5_000, 60_000, 120_000,
+    ])
+  })
 })
 
 describe('[COMP:media/transcript-format] formatTranscript', () => {

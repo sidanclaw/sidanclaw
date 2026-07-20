@@ -171,42 +171,120 @@ export type PartitionedUpload = {
 };
 
 /**
- * Audio at or above this routes to the recording pipeline (a real recording),
- * not the inline voice-note path — when the host wired `onRouteMedia`. It is a
- * "is this a meeting or a quick note" size proxy: compressed speech is roughly
- * 0.5-1 MB/min, so ~5 MB is several minutes in, well past a "remind me to call
- * the bank" voice note. A short note stays inline (transcribe-and-discard is
- * exactly right for it, and spawning a brief page + surcharge for 10 seconds
- * would be absurd). Server-side ffprobe still measures the true duration for
- * billing — this size check only decides routing, so a rough proxy is fine.
+ * Audio at or above this DURATION routes to the recording pipeline (a real
+ * recording), not the inline voice-note path — when the host wired
+ * `onRouteMedia`. The fork asks "is this a meeting or a quick note", which is a
+ * question about length, so it is answered with length. A short note stays
+ * inline (transcribe-and-discard is exactly right for it, and spawning a brief
+ * page + surcharge for 10 seconds would be absurd).
+ *
+ * Server-side ffprobe still measures the authoritative duration for billing —
+ * this client probe only decides routing.
+ */
+export const RECORDING_AUDIO_MIN_DURATION_SEC = 120;
+
+/**
+ * Size FALLBACK for the routing fork, used only when the real duration cannot
+ * be read (exotic codec, probe error, probe timeout).
+ *
+ * This was the primary rule and it was wrong: bytes are bitrate-dependent, so
+ * 5 MB is ~9 min of 74 kbps speech but only 2.6 min at 256 kbps and 21 min at
+ * 32 kbps. The same 10-minute meeting routed differently depending on the
+ * encoder, and a short high-bitrate note could be promoted to a recording.
+ * Duration is the honest signal; this survives as a one-directional degradation
+ * because an unreadable 200 MB file is still obviously a meeting, and dropping
+ * it into the 20 MB cache lane would just reject it.
  */
 export const RECORDING_AUDIO_MIN_BYTES = 5 * 1024 * 1024;
 
+/** Cap on the metadata probe so a hostile/broken file cannot hang an upload. */
+const DURATION_PROBE_TIMEOUT_MS = 5_000;
+
 /**
- * Split a picked/dropped/pasted batch into the three upload lanes. Pure so it
- * unit-tests without a DOM (same stance as the reconciliation helpers above).
+ * Read a media file's duration in seconds WITHOUT uploading or decoding it:
+ * point an `<audio preload="metadata">` at an object URL and wait for the
+ * header. Resolves `null` when the browser cannot read the codec, the probe
+ * errors, or it exceeds `DURATION_PROBE_TIMEOUT_MS` — callers treat `null` as
+ * "unknown" and fall back to size, never as "zero".
  *
- * - `video/*`, and `audio/*` at or over `RECORDING_AUDIO_MIN_BYTES`, → `media`
- *   when `canRouteMedia` (a host wired `onRouteMedia`). This lane bypasses
- *   `maxBytes`: the recording flow uploads DIRECT to GCS, so a meeting far past
- *   the 20 MB cache cap is exactly what it exists for.
+ * The object URL is revoked on every exit path; leaking one pins the whole file
+ * in memory for the life of the document, which for a 500 MB meeting matters.
+ */
+async function probeAudioDurationSec(file: File): Promise<number | null> {
+  if (typeof document === "undefined" || typeof URL.createObjectURL !== "function") {
+    return null;
+  }
+  const url = URL.createObjectURL(file);
+  const el = document.createElement("audio");
+  try {
+    return await new Promise<number | null>((resolve) => {
+      let settled = false;
+      const finish = (v: number | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(v);
+      };
+      const timer = setTimeout(() => finish(null), DURATION_PROBE_TIMEOUT_MS);
+      el.preload = "metadata";
+      el.onloadedmetadata = () => {
+        const d = el.duration;
+        // A stream with an unknown header reports Infinity or NaN; both mean
+        // "could not read", not "instant".
+        finish(Number.isFinite(d) && d > 0 ? d : null);
+      };
+      el.onerror = () => finish(null);
+      el.src = url;
+    });
+  } finally {
+    el.removeAttribute("src");
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
+ * Split a picked/dropped/pasted batch into the three upload lanes. Async only
+ * because audio routing reads real duration; `opts.probeDurationSec` is
+ * injectable so this still unit-tests without a DOM (same stance as the
+ * reconciliation helpers above).
+ *
+ * - `video/*` → `media` when `canRouteMedia`. Never probed: video is a
+ *   recording regardless of length, and the inline lane cannot take it anyway.
+ * - `audio/*` at or over `RECORDING_AUDIO_MIN_DURATION_SEC` → `media` when
+ *   `canRouteMedia`, falling back to `RECORDING_AUDIO_MIN_BYTES` when the
+ *   duration is unreadable. This lane bypasses `maxBytes`: the recording flow
+ *   uploads DIRECT to GCS, so a meeting far past the 20 MB cache cap is exactly
+ *   what it exists for.
  * - `video/*` with no `canRouteMedia` → `rejected` as `video_unsupported` (the
  *   cache route's mime allowlist excludes video anyway).
  * - a short `audio/*` note, and everything else, under `maxBytes` → `attach`
  *   (the unchanged inline POST path).
  * - anything else over `maxBytes` → `rejected` as `too_large`.
  */
-export function partitionUpload(
+export async function partitionUpload(
   files: readonly File[],
-  opts: { maxBytes: number; canRouteMedia: boolean },
-): PartitionedUpload {
+  opts: {
+    maxBytes: number;
+    canRouteMedia: boolean;
+    probeDurationSec?: (file: File) => Promise<number | null>;
+  },
+): Promise<PartitionedUpload> {
+  const probe = opts.probeDurationSec ?? probeAudioDurationSec;
   const attach: File[] = [];
   const media: File[] = [];
   const rejected: PartitionedUpload["rejected"] = [];
   for (const file of files) {
     const isVideo = file.type.startsWith("video/");
-    const isRecordingAudio =
-      file.type.startsWith("audio/") && file.size >= RECORDING_AUDIO_MIN_BYTES;
+    let isRecordingAudio = false;
+    // Probe only when the answer can change the outcome: no routing host means
+    // audio takes the inline path no matter how long it is.
+    if (!isVideo && file.type.startsWith("audio/") && opts.canRouteMedia) {
+      const durationSec = await probe(file);
+      isRecordingAudio =
+        durationSec === null
+          ? file.size >= RECORDING_AUDIO_MIN_BYTES
+          : durationSec >= RECORDING_AUDIO_MIN_DURATION_SEC;
+    }
     if ((isVideo || isRecordingAudio) && opts.canRouteMedia) {
       media.push(file);
     } else if (isVideo) {
@@ -275,7 +353,7 @@ export function useFileAttachments(
     const all = Array.from(fileList);
     if (all.length === 0) return;
 
-    const { attach, media, rejected } = partitionUpload(all, {
+    const { attach, media, rejected } = await partitionUpload(all, {
       maxBytes: optsRef.current?.maxBytes ?? MAX_ATTACHMENT_BYTES,
       canRouteMedia: !!optsRef.current?.onRouteMedia,
     });
