@@ -561,6 +561,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // like the other embedding rows; present so a Qwen-only deploy prices its
     // embedding COGS instead of falling to the unknown-model rate.
     alias: 'text-embedding-v3',
+    displayName: 'Qwen Text Embedding v3',
     provider: 'openai-compat:dashscope-intl',
     apiModelId: 'text-embedding-v3',
     class: 'background',
