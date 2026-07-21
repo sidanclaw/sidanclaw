@@ -28,7 +28,7 @@ import {
   calculateCost,
   filterToolsByCapabilities,
   sanitize as sanitizeAnalytics,
-  stripUnsignedToolUses,
+  stripUnsignedToolUses, modelRequiresToolSignatures,
   modelToCompactionTier,
 } from '@use-brian/core'
 import type {
@@ -577,7 +577,12 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
         usageStore: options.usageStore,
         userMessageId: storedUserMsg.id,
       })
-      let messages: Message[] = stripUnsignedToolUses(compactionResult.messages)
+      // Gate on the serving provider (the `model` resolved above) — the strip
+      // is Gemini-only and would erase a Qwen turn's tool calls. See tool-pairing.ts.
+      let messages: Message[] = stripUnsignedToolUses(
+        compactionResult.messages,
+        modelRequiresToolSignatures(model),
+      )
 
       // Inject the retry/edit hint into the last user turn for the
       // model only — the persisted row stays clean. Mirrors
