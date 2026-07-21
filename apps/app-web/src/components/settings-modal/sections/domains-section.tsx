@@ -238,7 +238,7 @@ export function SubdomainRow({
       <div className="flex items-center gap-2">
         <Globe className="size-4 shrink-0 text-muted-foreground" aria-hidden />
         {editing ? (
-          <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background focus-within:border-primary">
+          <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
             <input
               value={label}
               onChange={(e) => setLabel(e.target.value)}
@@ -249,7 +249,7 @@ export function SubdomainRow({
                 }
               }}
               aria-label={t.subdomainHeading}
-              className="min-w-0 flex-1 bg-transparent px-2 py-1 text-sm outline-none"
+              className="min-w-0 flex-1 bg-transparent px-2 py-1 text-sm outline-none focus-visible:shadow-none"
             />
             <span className="shrink-0 pr-2 text-sm text-muted-foreground">{apexSuffix}</span>
           </div>
@@ -415,7 +415,7 @@ export function SubdomainClaim({
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background focus-within:border-primary">
+        <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
           <input
             value={label}
             onChange={(e) => setLabel(e.target.value)}
@@ -426,7 +426,7 @@ export function SubdomainClaim({
               }
             }}
             aria-label={t.subdomainHeading}
-            className="min-w-0 flex-1 bg-transparent px-3 py-1.5 text-sm outline-none"
+            className="min-w-0 flex-1 bg-transparent px-3 py-1.5 text-sm outline-none focus-visible:shadow-none"
           />
           <span className="shrink-0 pr-2 text-sm text-muted-foreground">.{apex}</span>
           <button

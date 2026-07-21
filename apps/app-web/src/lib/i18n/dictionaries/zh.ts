@@ -719,8 +719,6 @@ export const zh: Dictionary = {
         errBlockedHostname: "該主機名稱為保留名稱。請使用您自己的網域，例如 docs.yourcompany.com。",
         errDomainLimit: "此工作空間已達網域數量上限。",
         homeChip: "首頁",
-        setAsHome: "設為首頁",
-        settingHome: "設定中...",
         noDomainsHint: "尚未連接任何網域。請在設定中取得工作空間子網域，或連接自訂網域。",
         openSettingsCta: "開啟網域設定",
       },
