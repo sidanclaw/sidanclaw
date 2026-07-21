@@ -184,7 +184,11 @@ export function ModelsSection() {
                 : "";
             const classLabel =
               cls === "standard-pro" ? t.classStandardPro : cls === "max" ? t.classMax : t.classResearch;
-            const registryLabel = t.registryDefault.replace("{alias}", curated[0]?.alias ?? "");
+            // Label with the WIRE model (apiModelId), not the alias: aliases
+            // like gemini-3-pro-research are stable billing labels that
+            // survive model upgrades, so they misread as stale versions
+            // (research actually serves gemini-3.1-pro-preview).
+            const registryLabel = t.registryDefault.replace("{alias}", curated[0]?.apiModelId ?? "");
             // A pin option only exists for a model that genuinely differs
             // from the registry default (and from other pins) by wire id —
             // standard-pro's two aliases are the standard/pro billing labels
