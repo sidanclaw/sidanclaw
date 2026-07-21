@@ -50,6 +50,10 @@ describe('[COMP:api/model-menu] GET /models/menu', () => {
     const res = await request(makeApp()).get('/api/models/menu?workspaceId=00000000-0000-0000-0000-000000000001').expect(200)
     expect(res.body.classes['standard-pro'].map((m: { alias: string }) => m.alias))
       .toEqual(['gemini-3-flash-standard', 'gemini-flash-3'])
+    // Both standard-pro aliases are billing labels of ONE wire model; the
+    // serialized apiModelId is what lets pickers collapse them.
+    expect(res.body.classes['standard-pro'].map((m: { apiModelId: string }) => m.apiModelId))
+      .toEqual(['gemini-3-flash-preview', 'gemini-3-flash-preview'])
     expect(res.body.classes['metered'].map((m: { alias: string }) => m.alias).sort())
       .toEqual(['deepseek-v4-flash', 'deepseek-v4-pro', 'qwen3.7-max', 'qwen3.7-plus'])
     expect(res.body.meteredBillingAvailable).toBe(true)

@@ -45,6 +45,9 @@ const MENU_CLASSES: ModelClass[] = ['standard-pro', 'max', 'research', 'metered'
 function serializeRow(row: ModelRegistryRow) {
   return {
     alias: row.alias,
+    // Wire id: lets pickers collapse alias rows of the same underlying
+    // model (standard-pro's two tier labels) instead of listing fake choices.
+    apiModelId: row.apiModelId,
     class: row.class,
     provider: row.provider,
     contextWindow: row.contextWindow,

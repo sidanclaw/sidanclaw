@@ -180,9 +180,21 @@ export function ModelsSection() {
             const classLabel =
               cls === "standard-pro" ? t.classStandardPro : cls === "max" ? t.classMax : t.classResearch;
             const registryLabel = t.registryDefault.replace("{alias}", curated[0]?.alias ?? "");
+            // A pin option only exists for a model that genuinely differs
+            // from the registry default (and from other pins) by wire id —
+            // standard-pro's two aliases are the standard/pro billing labels
+            // of ONE model, so they collapse into the registry-default entry
+            // instead of posing as choices. Pins appear the day a promotion
+            // adds a second real model to the class.
+            const seenWire = new Set(curated[0] ? [curated[0].apiModelId] : []);
+            const pins = curated.slice(1).filter((m) => {
+              if (seenWire.has(m.apiModelId)) return false;
+              seenWire.add(m.apiModelId);
+              return true;
+            });
             const items: SearchableSelectItem[] = [
               { value: "", label: registryLabel },
-              ...curated.map((m) => ({ value: `a:${m.alias}`, label: m.alias })),
+              ...pins.map((m) => ({ value: `a:${m.alias}`, label: m.alias })),
               ...profiles.map((p) => ({
                 value: `p:${p.id}`,
                 label: `${p.modelAlias} / ${p.name}`,
