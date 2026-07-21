@@ -8,10 +8,10 @@
 // route), mirroring the BillingSection — apps/web reads `useWorkspaces()`
 // because it is multi-workspace.
 //
-// Renders as an embedded block at the bottom of the Plan section
-// (`billing-section.tsx`) — the standalone ws-usage nav entry merged into
-// ws-plan ("Plan & usage"); `openWorkspaceSettings("ws-usage")` still lands
-// there via the settings-modal alias case.
+// Renders as an embedded block inside the Plan section
+// (`billing-section.tsx`, above Cancellation) — the standalone ws-usage nav
+// entry merged into ws-plan ("Plan & usage"); `openWorkspaceSettings("ws-usage")`
+// still lands there via the settings-modal alias case.
 
 import { useState, useEffect, useCallback } from "react";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -146,19 +146,7 @@ export function UsageSection() {
   const canBuyExtraUsage = PACK_ELIGIBLE_PLANS.has(plan.toLowerCase());
 
   return (
-    <div className="border-t border-border pt-6 space-y-6">
-      {/* Header (embedded block heading inside the Plan section) */}
-      <div className="flex items-center justify-between">
-        <h3 className="text-base font-semibold">{t.settings.usage.title}</h3>
-        <span className="text-sm text-muted-foreground">
-          {plan === ""
-            ? ""
-            : plan.toLowerCase() === "free"
-              ? t.settings.billing.noPlanTitle
-              : plan.charAt(0).toUpperCase() + plan.slice(1)}
-        </span>
-      </div>
-
+    <div className="space-y-6">
       {/* Monthly credit allowance */}
       <div className="border-t border-border pt-6">
         <div className="mb-6">

@@ -591,6 +591,9 @@ export function BillingSection() {
         )}
       </div>
 
+      {/* ── Usage (credits + extra-usage pack) ─────────────── */}
+      <UsageSection />
+
       {/* ── Cancellation (paid plans only) ─────────────────── */}
       {/* Hidden while trialing without a card on file — Stripe will
           auto-cancel at trial end via end_behavior=cancel, so a manual
@@ -669,8 +672,6 @@ export function BillingSection() {
           .
         </p>
       </div>
-
-      <UsageSection />
     </div>
   );
 }
