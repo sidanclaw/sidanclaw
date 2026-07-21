@@ -2746,10 +2746,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // the files pattern: L1/L2 strictest-wins policy over mcp_tool_settings
   // (serverName='computer'), metadata-only analytics audit, and the
   // in-tool send gate + autonomous-path block (§8).
+  // BROWSER_RELAY_URL resolution: an explicit value always wins (prod upserts
+  // it via the BROWSER_RELAY_URL secret in deploy-browser-relay.sh). In local
+  // dev it defaults to the relay's own PORT default (8080), so a My-Browser
+  // e2e test only needs BROWSER_RELAY_SECRET set. NEVER defaulted outside
+  // development: prod keeps BROWSER_RELAY_SECRET set while the URL secret stays
+  // absent until the relay is deployed, and a stray localhost default there
+  // would flip the `URL && SECRET` gate true against a dead relay.
+  const browserRelayUrl =
+    env.BROWSER_RELAY_URL ||
+    (env.NODE_ENV === 'development' ? 'http://localhost:8080' : undefined)
   const browserRelayTransport =
-    env.BROWSER_RELAY_URL && env.BROWSER_RELAY_SECRET
+    browserRelayUrl && env.BROWSER_RELAY_SECRET
       ? createRelayCommandTransport({
-          relayUrl: env.BROWSER_RELAY_URL,
+          relayUrl: browserRelayUrl,
           relaySecret: env.BROWSER_RELAY_SECRET,
         })
       : null
@@ -3558,8 +3568,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   // Browser-extension pairing (computer-use local mode, P1.3). The relay's
   // WS endpoint derives from the HTTP base: https://relay → wss://relay/ext.
-  const browserRelayWsUrl = env.BROWSER_RELAY_URL
-    ? `${env.BROWSER_RELAY_URL.replace(/\/$/, '').replace(/^http/, 'ws')}/ext`
+  const browserRelayWsUrl = browserRelayUrl
+    ? `${browserRelayUrl.replace(/\/$/, '').replace(/^http/, 'ws')}/ext`
     : null
   // Take-Over live view + backend toggle + Profile-Management
   // (computer-use.md §5, §7; R2-3/R2-4).
@@ -3579,10 +3589,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceStore,
     relayWsUrl: browserRelayWsUrl,
     extensionConnected:
-      env.BROWSER_RELAY_URL && env.BROWSER_RELAY_SECRET
+      browserRelayUrl && env.BROWSER_RELAY_SECRET
         ? (userId) =>
             relayExtensionConnected({
-              relayUrl: env.BROWSER_RELAY_URL as string,
+              relayUrl: browserRelayUrl as string,
               relaySecret: env.BROWSER_RELAY_SECRET as string,
               userId,
             })
