@@ -82,18 +82,34 @@ loadDotEnv(join(ROOT, '.env'))
 // developer's local Postgres on the default 5432 (verified failure mode).
 const PORTS = { pglite: 54329, api: 4000, docSync: 8080, appWeb: 3003, discordConnector: 8090, waConnector: 8091 }
 
-// ── config (the only required input is GEMINI_API_KEY) ─────────────
+// ── config (needs ONE LLM credential — AI Studio, Vertex, or Alicloud) ─────────────
 mkdirSync(CONFIG_DIR, { recursive: true })
 const config = existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) : {}
+
+// `.env` was already merged into process.env by loadDotEnv() above, and
+// process.env is spread into the child's `env` below — so a Vertex/Alicloud
+// credential set in .env reaches the api without any extra plumbing here.
 let geminiKey = process.env.GEMINI_API_KEY || config.geminiApiKey
+// Vertex / Alicloud are alternative LLM backends — a deployment in a region
+// where Google blocks AI Studio (e.g. Hong Kong) has no Gemini key and uses
+// one of these instead. Their presence skips the Gemini prompt entirely.
+const hasLlmCredential = Boolean(
+  geminiKey || process.env.VERTEX_PROJECT_ID || process.env.DASHSCOPE_API_KEY,
+)
 // The single-player owner identity — shown in the app, no login. Local config
 // is the source of truth; prompt once (default the OS username) and persist.
 let ownerName = process.env.USEBRIAN_OWNER_NAME || config.ownerName
-if (!geminiKey || !ownerName) {
+if (!hasLlmCredential || !ownerName) {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
-  if (!geminiKey) {
-    geminiKey = (await rl.question('Enter your GEMINI_API_KEY (https://aistudio.google.com/apikey): ')).trim()
-    if (!geminiKey) { rl.close(); console.error('A GEMINI_API_KEY is required to boot. Exiting.'); process.exit(1) }
+  if (!hasLlmCredential) {
+    console.log('No LLM credential found. Enter a Gemini (AI Studio) key, or Ctrl-C and set')
+    console.log('VERTEX_PROJECT_ID (Vertex AI) or DASHSCOPE_API_KEY (Alicloud/Qwen) in .env instead.')
+    geminiKey = (await rl.question('GEMINI_API_KEY (https://aistudio.google.com/apikey): ')).trim()
+    if (!geminiKey) {
+      rl.close()
+      console.error('An LLM credential is required: GEMINI_API_KEY, VERTEX_PROJECT_ID, or DASHSCOPE_API_KEY. Exiting.')
+      process.exit(1)
+    }
   }
   if (!ownerName) {
     const fallback = (userInfo().username || 'You').trim()
@@ -126,7 +142,7 @@ const waConnectorSecret = process.env.WA_CONNECTOR_SECRET || config.waConnectorS
 const channelCredentialKey = config.channelCredentialKey || randomBytes(32).toString('base64')
 writeFileSync(
   CONFIG_FILE,
-  JSON.stringify({ ...config, geminiApiKey: geminiKey, jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, channelCredentialKey, ownerName }, null, 2),
+  JSON.stringify({ ...config, ...(geminiKey ? { geminiApiKey: geminiKey } : {}), jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, channelCredentialKey, ownerName }, null, 2),
 )
 
 // External-store escape hatch: a real Postgres URL skips the embedded brain.
@@ -138,6 +154,11 @@ const useLocalWaConnector = !process.env.WA_CONNECTOR_URL
 const env = {
   ...process.env,
   NODE_ENV: 'development',
+  // `...process.env` already carries every LLM credential from .env
+  // (VERTEX_PROJECT_ID, VERTEX_LOCATION, VERTEX_SERVICE_ACCOUNT_JSON,
+  // DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL) — the child (apps/api) accepts any
+  // one and Gemini may be absent. Only GEMINI_API_KEY is overridden here, to
+  // carry the config-persisted / just-prompted value when it isn't in .env.
   GEMINI_API_KEY: geminiKey,
   JWT_SECRET: jwtSecret,
   DATABASE_URL: databaseUrl,
