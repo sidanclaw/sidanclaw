@@ -823,8 +823,6 @@ export const en = {
         errBlockedHostname: "That hostname is reserved. Use your own domain, like docs.yourcompany.com.",
         errDomainLimit: "This workspace reached its domain limit.",
         homeChip: "Home page",
-        setAsHome: "Set as home page",
-        settingHome: "Setting...",
         noDomainsHint: "No domains connected yet. Claim your workspace subdomain or connect a custom domain in Settings.",
         openSettingsCta: "Open domain settings",
       },

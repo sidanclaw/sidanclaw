@@ -41,7 +41,6 @@ import {
   listWorkspaceGroups,
   publishPage,
   revokeGrant,
-  setDomainDefaultPage,
   setPageSlug,
   unpublishPage,
   updateGrantRole,
@@ -133,43 +132,27 @@ function Avatar({ name, url }: { name: string; url?: string | null }) {
 }
 
 /** One connected workspace domain from this page's perspective (workspace-
- *  first lifecycle): home-page state, the alias editor, and a "set as home
- *  page" action when the domain has no default yet. Connecting/claiming
- *  lives in Settings → Domains. */
+ *  first lifecycle): a read-only home-page chip when this page is the domain's
+ *  default, plus the alias editor. The home/default page is set and cleared
+ *  only in Settings → Domains (and cleared automatically on unpublish) — it is
+ *  workspace infrastructure, not per-page state. Connecting/claiming also lives
+ *  in Settings → Domains. */
 function PageDomainCard({
   pageId,
-  workspaceId,
   row,
   t,
   onChanged,
 }: {
   pageId: string;
-  workspaceId: string;
   row: SiteDomainRow;
   t: ShareT;
   onChanged: () => Promise<void>;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
   const href = row.isDefault
     ? `https://${row.hostname}`
     : row.slug
       ? `https://${row.hostname}/${row.slug}`
       : `https://${row.hostname}/p/${pageId}`;
-
-  const setHome = async () => {
-    setBusy(true);
-    setErr(null);
-    try {
-      await setDomainDefaultPage(workspaceId, row.domainId, pageId);
-      await onChanged();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
 
   return (
     <div className="rounded-md border border-border p-3 space-y-2">
@@ -195,25 +178,8 @@ function PageDomainCard({
         ) : null}
       </div>
       {row.isDefault ? null : (
-        <>
-          <SlugRow pageId={pageId} ctx={row} t={t} onChanged={onChanged} />
-          {!row.hasDefault ? (
-            <button
-              type="button"
-              onClick={() => void setHome()}
-              disabled={busy}
-              className="rounded-md border border-border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-muted disabled:opacity-50"
-            >
-              {busy ? t.site.settingHome : t.site.setAsHome}
-            </button>
-          ) : null}
-        </>
+        <SlugRow pageId={pageId} ctx={row} t={t} onChanged={onChanged} />
       )}
-      {err ? (
-        <p role="alert" className="break-all text-xs text-destructive">
-          {err}
-        </p>
-      ) : null}
     </div>
   );
 }
@@ -222,13 +188,11 @@ function PageDomainCard({
  *  page's address on it, or a pointer to Settings when none are connected. */
 function PageDomainsSection({
   pageId,
-  workspaceId,
   site,
   t,
   onChanged,
 }: {
   pageId: string;
-  workspaceId: string;
   site: SiteState | null;
   t: ShareT;
   onChanged: () => Promise<void>;
@@ -254,7 +218,6 @@ function PageDomainsSection({
             <PageDomainCard
               key={row.domainId}
               pageId={pageId}
-              workspaceId={workspaceId}
               row={row}
               t={t}
               onChanged={onChanged}
@@ -349,8 +312,8 @@ function SlugRow({
     <div className="space-y-1.5 border-t border-border pt-3">
       <p className="text-xs font-medium text-muted-foreground">{t.site.pageLinkLabel}</p>
       <div className="flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background px-3 py-1.5 text-sm focus-within:border-primary">
-          <span className="shrink-0 text-muted-foreground">{ctx.hostname}/</span>
+        <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background text-sm transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
+          <span className="shrink-0 pl-3 text-muted-foreground">{ctx.hostname}/</span>
           <input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -360,7 +323,7 @@ function SlugRow({
                 void save();
               }
             }}
-            className="min-w-0 flex-1 bg-transparent outline-none"
+            className="min-w-0 flex-1 bg-transparent py-1.5 pr-3 outline-none focus-visible:shadow-none"
             aria-label={t.site.pageLinkLabel}
           />
         </div>
@@ -797,7 +760,6 @@ export function ShareDialog({
             {!publish.published && site?.domains.some((d) => d.servable || d.slug) ? (
               <PageDomainsSection
                 pageId={pageId}
-                workspaceId={workspaceId}
                 site={site}
                 t={t}
                 onChanged={refreshSite}
@@ -840,7 +802,6 @@ export function ShareDialog({
                     (workspace-first: connect/claim lives in Settings). */}
                 <PageDomainsSection
                   pageId={pageId}
-                  workspaceId={workspaceId}
                   site={site}
                   t={t}
                   onChanged={refreshSite}

@@ -132,6 +132,11 @@ export type PageDomainStore = {
     domainId: string,
     pageId: string | null,
   ): Promise<PageDomain | { error: 'page_not_in_workspace' } | null>
+  /** Unbind this page as the default (`/`) page on every domain pointing at
+   *  it. Called on unpublish — the domain stays connected but returns to
+   *  unbound (404 at `/`), so a stale home-page pointer can never survive a
+   *  page that no longer serves. Returns how many domains were unbound. */
+  clearDefaultPageForPage(userId: string, pageId: string): Promise<number>
   /** Every workspace domain as seen from this page (Share-dialog select). */
   listDomainContextForPage(userId: string, pageId: string): Promise<PageDomainContext[]>
   /** Every slug on the domain (current + historical) — suggestion dedupe input. */
@@ -420,6 +425,17 @@ export function createDbPageDomainStore(): PageDomainStore {
         [domainId],
       )
       return domain.rows[0] ? { error: 'page_not_in_workspace' } : null
+    },
+
+    async clearDefaultPageForPage(userId, pageId) {
+      // RLS (page_domains_workspace_member) scopes this to the caller's
+      // workspaces, so any member who can unpublish the page can unbind it.
+      const r = await queryWithRLS<{ id: string }>(
+        userId,
+        `UPDATE page_domains SET page_id = NULL WHERE page_id = $1 RETURNING id`,
+        [pageId],
+      )
+      return r.rows.length
     },
 
     async listDomainContextForPage(userId, pageId) {

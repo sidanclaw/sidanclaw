@@ -313,6 +313,23 @@ describe('[COMP:doc/page-domains] Page domain + slug store', () => {
     })
   })
 
+  describe('clearDefaultPageForPage', () => {
+    it('unbinds the page as home on every domain pointing at it (unpublish cascade)', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce(rows([{ id: 'd_1' }, { id: 'd_2' }]))
+      const count = await store.clearDefaultPageForPage('u_1', ROOT_ID)
+      expect(count).toBe(2)
+      const [, sql, params] = mockQueryWithRLS.mock.calls[0]
+      expect(sql).toContain('UPDATE page_domains SET page_id = NULL')
+      expect(sql).toContain('WHERE page_id = $1')
+      expect(params).toEqual([ROOT_ID])
+    })
+
+    it('reports zero when the page is nobody’s home page', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce(rows([]))
+      expect(await store.clearDefaultPageForPage('u_1', ROOT_ID)).toBe(0)
+    })
+  })
+
   describe('listCurrentSlugs', () => {
     it('short-circuits on an empty id list', async () => {
       const out = await store.listCurrentSlugs('d_1', [])

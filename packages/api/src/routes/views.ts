@@ -941,6 +941,12 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       return res.status(403).json({ error: 'Only the page owner or a workspace admin can unpublish this page' })
     }
     await opts.pageGrantStore.unpublishPage(userId, view.id)
+    // Unpublishing kills the page's ability to serve at `/`, so also unbind it
+    // as any domain's home page. Otherwise the stale `page_domains.page_id`
+    // pointer survives (Settings still shows it as the home page and
+    // re-publishing silently restores it) with no per-page way to clear it.
+    // custom-domains.md → "Serving gate". Home page is set only in Settings.
+    await opts.pageDomainStore?.clearDefaultPageForPage(userId, view.id)
     publishPageShareChange(view.id)
     res.json({ published: false })
   })

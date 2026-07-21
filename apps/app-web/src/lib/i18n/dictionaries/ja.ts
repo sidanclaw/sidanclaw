@@ -731,8 +731,6 @@ export const ja: Dictionary = {
         errBlockedHostname: "そのホスト名は予約されています。docs.yourcompany.com のように、ご自身のドメインを使用してください。",
         errDomainLimit: "このワークスペースのドメイン数が上限に達しました。",
         homeChip: "ホームページ",
-        setAsHome: "ホームページに設定",
-        settingHome: "設定中...",
         noDomainsHint: "接続済みのドメインはまだありません。設定でワークスペースのサブドメインを取得するか、カスタムドメインを接続してください。",
         openSettingsCta: "ドメイン設定を開く",
       },
