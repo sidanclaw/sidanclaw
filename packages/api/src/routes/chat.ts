@@ -4,7 +4,7 @@ import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels } from '../db/sessions.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote } from '@use-brian/core'
+import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, type MediaBackend } from '@use-brian/core'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -340,6 +340,7 @@ type WebChatOptions = {
   voiceTranscription?: {
     enabled: boolean
     apiKey: string
+    backend?: MediaBackend
     model?: string
   }
   capabilityStore: CapabilityStore
@@ -1949,6 +1950,9 @@ export function chatRoutes(options: WebChatOptions): Router {
                   {
                     enabled: options.voiceTranscription.enabled,
                     apiKey: options.voiceTranscription.apiKey,
+                    ...(options.voiceTranscription.backend
+                      ? { backend: options.voiceTranscription.backend }
+                      : {}),
                     model: options.voiceTranscription.model,
                   },
                 )
@@ -2293,7 +2297,15 @@ export function chatRoutes(options: WebChatOptions): Router {
         workspaceId: assistant.workspaceId ?? undefined,
         chatEpisodeIngestor: options.chatEpisodeIngestor,
       })
-      let messages: Message[] = stripUnsignedToolUses(compactionResult.messages)
+      // Gate on the serving provider: the signature strip is a Gemini-only
+      // workaround and would erase a Qwen (openai-compat) turn's tool calls
+      // from history. Resolve the requested model to its provider here (the
+      // budget-final model is resolved later; a pure-Qwen deploy still resolves
+      // to Qwen, and the unknown/gemini default fails safe). See tool-pairing.ts.
+      let messages: Message[] = stripUnsignedToolUses(
+        compactionResult.messages,
+        modelRequiresToolSignatures(resolveModel(requestedModel, userPlan, 'ok')),
+      )
 
       // Doc tool-result elision (across-turn context-window control).
       // Doc authoring accumulates a full-page outline in every

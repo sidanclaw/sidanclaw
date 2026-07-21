@@ -24,11 +24,17 @@
 
 import type { GoogleTransport } from '../providers/google-transport.js'
 import type { Embedder } from './embedder.js'
-import { GEMINI_EMBEDDING_DIMENSIONS, createGeminiEmbedder } from './embedder.js'
+import { GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_MODEL_ID, createGeminiEmbedder } from './embedder.js'
 
-/** Vertex serves the same embedding family as AI Studio, via `:predict`. */
+/**
+ * Vertex serves the same embedding family as AI Studio (`gemini-embedding-001`),
+ * via `:predict`. It reports the SAME `model_id` as AI Studio deliberately:
+ * the vectors occupy the identical space, so (a) switching a deployment between
+ * AI Studio and Vertex needs no re-embed, and (b) usage prices via the existing
+ * `gemini-embedding-001` registry row. Only DashScope is a distinct space.
+ */
 const VERTEX_EMBEDDING_MODEL = 'gemini-embedding-001'
-export const VERTEX_EMBEDDING_MODEL_ID = 'vertex:gemini-embedding-001'
+export const VERTEX_EMBEDDING_MODEL_ID = GEMINI_EMBEDDING_MODEL_ID
 
 /** DashScope's multilingual embedding model; v3 supports an explicit `dimensions`. */
 const DASHSCOPE_EMBEDDING_MODEL = 'text-embedding-v3'

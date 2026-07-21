@@ -31,6 +31,8 @@ import type http from 'node:http'
 import express, { type Express } from 'express'
 import { createTelegramApi } from '@use-brian/channels'
 import {
+  vertexTransport, resolveVertexTokenSource, aiStudioTransport,
+  createEmbedderForAdapter, type EmbedderAdapterConfig, type GoogleTransport, type MediaBackend,
   createGeminiProvider, createAnthropicProvider, createOpenAICompatProvider, createRoutingProvider,
   DASHSCOPE_INTL_BASE_URL, DASHSCOPE_INTL_LABEL, wrapProvider,
   createBaseTools, LAYER_1_SYSTEM_PROMPT,
@@ -46,7 +48,6 @@ import {
   createCommitmentLifecycleWorker,
   createSprintVarianceResolver,
   createCompositeCommitmentResolver,
-  createGeminiEmbedder,
   calculateCost,
   createGoalClarityAssessor,
   createGoalVerifier,
@@ -433,7 +434,19 @@ import type { CreditBudgetGate } from './routes/route-helpers.js'
  * absent — the open routes never read them, so they never travel here.
  */
 export interface OpenApiEnv {
-  GEMINI_API_KEY: string
+  // Optional because the Gemini provider can be Vertex-backed instead (see
+  // VERTEX_PROJECT_ID). A deployment in a region where Google blocks the AI
+  // Studio developer API (e.g. Hong Kong) has no such key; the open entry
+  // requires GEMINI_API_KEY *or* VERTEX_PROJECT_ID.
+  GEMINI_API_KEY?: string
+  // Vertex AI backing for the `gemini` provider. When VERTEX_PROJECT_ID is set,
+  // boot builds the gemini transport against Vertex (regional host + OAuth)
+  // instead of AI Studio. Credentials come from the metadata server (ADC)
+  // unless VERTEX_SERVICE_ACCOUNT_JSON holds a full service-account key.
+  // VERTEX_LOCATION picks host + regional quota pool (default asia-east2).
+  VERTEX_PROJECT_ID?: string
+  VERTEX_LOCATION?: string
+  VERTEX_SERVICE_ACCOUNT_JSON?: string
   JWT_SECRET: string
   NODE_ENV: string
   API_URL: string
@@ -830,7 +843,7 @@ export interface BootContext {
   filesApi: ReturnType<typeof createFilesApi> | null
   entityKindClassifier: ReturnType<typeof createEntityKindClassifier>
   workflowEventDispatcher: WorkflowEventDispatcher
-  voiceTranscription: { enabled: boolean; apiKey: string; model: string | undefined }
+  voiceTranscription: { enabled: boolean; apiKey: string; backend?: MediaBackend; model: string | undefined }
   resolvePrimaryAssistantForWorkspace: (workspaceId: string) => Promise<string | null>
   resolveDataRequest: (messageId: string, decision: 'approved' | 'rejected') => Promise<void>
   emailAuth: EmailAuth | undefined
@@ -936,9 +949,48 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ════════════════════════════════════════════════════════════════
   // Shared infrastructure + stores
   // ════════════════════════════════════════════════════════════════
+  // ── Google/Vertex transport + shared embedder (built once) ──
+  // Vertex when a GCP project is configured (Google blocks AI Studio in some
+  // regions, e.g. Hong Kong; Vertex reaches Gemini there), else the AI Studio
+  // key. The same transport backs the `gemini` chat provider (below), the
+  // shared embedder, and the media backend, so one OAuth-token cache serves
+  // all three. See docs/architecture/engine/provider-abstraction.md.
+  const vertexTx: GoogleTransport | undefined = env.VERTEX_PROJECT_ID
+    ? vertexTransport({
+        project: env.VERTEX_PROJECT_ID,
+        location: env.VERTEX_LOCATION || 'asia-east2',
+        tokenSource: resolveVertexTokenSource(env.VERTEX_SERVICE_ACCOUNT_JSON),
+      })
+    : undefined
+  const geminiTransport = vertexTx ?? env.GEMINI_API_KEY
+
+  // One embedder for the whole process (was reconstructed at ten sites).
+  // Embeddings default to Google (gemini-embedding-001, the registry's
+  // embedding rows) via Vertex or AI Studio; a pure-Qwen deployment with no
+  // Google credential falls back to DashScope text-embedding-v3. Vectors from
+  // different vendors are NOT comparable — each embedder reports a distinct
+  // model_id and switching requires a full re-embed.
+  const embedderConfig: EmbedderAdapterConfig = vertexTx
+    ? { adapter: 'vertex', transport: vertexTx }
+    : env.GEMINI_API_KEY
+      ? { adapter: 'google-ai-studio', apiKey: env.GEMINI_API_KEY }
+      : { adapter: 'alicloud', apiKey: env.DASHSCOPE_API_KEY ?? '', baseUrl: DASHSCOPE_INTL_BASE_URL }
+  const sharedEmbedder = createEmbedderForAdapter(embedderConfig)
+
+  // Media backend for file distillation + short-audio transcription. Google
+  // (Gemini inlineData) via Vertex or AI Studio; a pure-Qwen deployment uses
+  // DashScope (Qwen-VL for documents, Qwen-ASR for audio). DashScope is
+  // image-only for documents — PDFs are refused there, see media/backend.ts.
+  const mediaBackend: MediaBackend = vertexTx
+    ? { kind: 'google', transport: vertexTx }
+    : env.GEMINI_API_KEY
+      ? { kind: 'google', transport: aiStudioTransport(env.GEMINI_API_KEY) }
+      : { kind: 'dashscope', apiKey: env.DASHSCOPE_API_KEY ?? '', baseUrl: DASHSCOPE_INTL_BASE_URL }
+
   const voiceTranscription = {
     enabled: env.VOICE_TRANSCRIPTION_ENABLED ?? false,
-    apiKey: env.GEMINI_API_KEY,
+    apiKey: env.GEMINI_API_KEY ?? '',
+    backend: mediaBackend,
     model: env.VOICE_TRANSCRIPTION_MODEL,
   }
   const memoryStore = createDbMemoryStore()
@@ -1033,10 +1085,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const entitiesStore = createDbEntitiesStore({ entityLinks: entityLinksStore })
   const episodesStore = createDbEpisodesStore()
   const connectorActionStore = createDbConnectorActionStore()
+
   const retrievalStore = composeRetrievalStore({
     entityStore: entitiesStore,
     searchEpisodes: createDbRetrievalStore({
-      embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
+      embedder: sharedEmbedder,
     }),
     provenance: createDbProvenanceStore(),
     aggregate: createDbAggregateStore(),
@@ -1046,7 +1099,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const retrievalMissStore = createDbRetrievalMissStore()
   const kbGapCandidateStore = createDbKbGapCandidateStore()
-  const _detectorEmbedder = createGeminiEmbedder(env.GEMINI_API_KEY)
+  const _detectorEmbedder = sharedEmbedder
   const retrievalMissDetector = createRetrievalMissDetector({
     retrievalMissStore,
     getEmbedding: async (text) => {
@@ -1074,8 +1127,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // old whole-provider wrapFallback: standard-pro Gemini models fall back
   // to Claude Haiku; Max/Research/background rows have no same-class
   // fallback and now surface outages instead of silently swapping class.
+  // `geminiTransport` (Vertex or AI Studio) was resolved once above and is
+  // shared with the embedder + media backend. The registry still names this
+  // provider `gemini`; a Vertex-backed instance serves the same rows.
+  console.log(
+    `[provider] gemini transport: ${vertexTx ? `vertex (${env.VERTEX_LOCATION || 'asia-east2'})` : 'ai-studio'}`,
+  )
+
   const providerInstances: Record<string, LLMProvider> = {
-    gemini: wrapProvider(createGeminiProvider(env.GEMINI_API_KEY)),
+    gemini: wrapProvider(createGeminiProvider(geminiTransport)),
   }
   if (env.FALLBACK_PROVIDER_ENABLED) {
     if (env.ANTHROPIC_API_KEY) {
@@ -1142,7 +1202,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const workspaceSkillFilesStore = createDbWorkspaceSkillFilesStore()
   const workspaceSkillEnablementStore = createDbWorkspaceSkillEnablementStore()
   const skillCuratorDigestStore = createDbSkillCuratorDigestStore()
-  const curatorEmbedder = createGeminiEmbedder(env.GEMINI_API_KEY)
+  const curatorEmbedder = sharedEmbedder
   const skillReviewLeaseHolderId = randomUUID()
   const communitySkillRegistry = loadSkillRegistry()
 
@@ -1396,7 +1456,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // ToolContext per call, so read ceilings hold on every path.
     tools.set(
       'searchFileContent',
-      createSearchFileContentTool({ embedder: createGeminiEmbedder(env.GEMINI_API_KEY) }),
+      createSearchFileContentTool({ embedder: sharedEmbedder }),
     )
 
     // The recording surface for chat, registered at the same seam and for the
@@ -1413,7 +1473,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // loop cannot pivot off the recording it was told to summarize.
     tools.set(
       'searchRecording',
-      createChatSearchRecordingTool({ embedder: createGeminiEmbedder(env.GEMINI_API_KEY) }),
+      createChatSearchRecordingTool({ embedder: sharedEmbedder }),
     )
     tools.set('listRecordings', createListRecordingsTool())
 
@@ -1550,7 +1610,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         memoryStore,
         workflowRunStore,
         workspaceDirectory: workspaceDirectoryStore,
-        embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
+        embedder: sharedEmbedder,
         usageStore,
         pageTemplateStore,
         blueprintRecordStore,
@@ -2732,7 +2792,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         filesApi,
         ingest: brainEpisodeIngestor,
         distill: async ({ buffer, mime }) =>
-          (await distillFileToText({ buffer, mime }, { apiKey: env.GEMINI_API_KEY })).text,
+          (await distillFileToText({ buffer, mime }, { backend: mediaBackend })).text,
       })
     }
   }
@@ -3316,7 +3376,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ingest: brainEpisodeIngestor,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
     // Powers the searchRecording tool's vector arm (recording-to-brain).
-    embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
+    embedder: sharedEmbedder,
     // Computer-use R2: writeBrowserSkill — the OSS authoring skill's sync tool.
     browserSkills: browserSkillsStore,
   }))
@@ -4582,7 +4642,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (process.env.CL9_AGGREGATOR_ENABLED === 'true') {
     const { startRetrievalMissAggregator } = await import('./workers/retrieval-miss-aggregator.js')
     const { query: rawQuery } = await import('./db/client.js')
-    const _aggregatorEmbedder = createGeminiEmbedder(env.GEMINI_API_KEY)
+    const _aggregatorEmbedder = sharedEmbedder
     const retrievalMissAggregator = startRetrievalMissAggregator({
       retrievalMissStore,
       kbGapStore: kbGapCandidateStore,
@@ -4618,8 +4678,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // attribution) — absent in OSS, embedding runs unmetered locally.
   const embeddingWorker = createEmbeddingWorker({
     store: createDbEmbeddingStore(),
-    embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
-    ...(usageStore ? { usage: createEmbeddingUsageRecorder(usageStore) } : {}),
+    embedder: sharedEmbedder,
+    ...(usageStore ? { usage: createEmbeddingUsageRecorder(usageStore, sharedEmbedder.model_id) } : {}),
   })
   if (runWorkers) embeddingWorker.start()
 
@@ -4749,7 +4809,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         memoryStore,
         workflowRunStore,
         workspaceDirectory: workspaceDirectoryStore,
-        embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
+        embedder: sharedEmbedder,
         usageStore,
         pageTemplateStore,
         blueprintRecordStore,
