@@ -31,7 +31,8 @@ import type http from 'node:http'
 import express, { type Express } from 'express'
 import { createTelegramApi } from '@use-brian/channels'
 import {
-  createGeminiProvider, createAnthropicProvider, wrapProvider, wrapFallback,
+  createGeminiProvider, createAnthropicProvider, createOpenAICompatProvider, createRoutingProvider,
+  DASHSCOPE_INTL_BASE_URL, DASHSCOPE_INTL_LABEL, wrapProvider,
   createBaseTools, LAYER_1_SYSTEM_PROMPT,
   createWorkerManager, createWorkerTools,
   createSchedulingTools, createPollWorker,
@@ -137,6 +138,8 @@ import { localSessionRoutes, isOssEdition } from './routes/local-session.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
 import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
+import { menuForClass } from '@use-brian/shared/model-registry'
+import { createMeteredProfileStore } from './db/metered-profile-store.js'
 import { createSessionResumeReplay } from './routes/session-resume-replay.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
@@ -300,6 +303,7 @@ import { createApprovalDeliveryDispatcher } from './workflow/approval-deliveries
 import { workflowApprovalsRoutes } from './routes/workflow-approvals.js'
 import { approvalsRoutes } from './routes/approvals.js'
 import { workflowsRoutes } from './routes/workflows.js'
+import { modelMenuRoutes } from './routes/model-menu.js'
 import { pageActionsRoutes } from './routes/page-actions.js'
 import { workflowWebhookRoutes } from './routes/workflow-webhooks.js'
 import { createWorkflowChannelDelivery } from './workflow/channel-delivery.js'
@@ -443,6 +447,11 @@ export interface OpenApiEnv {
   // Optional outage-only Claude fallback.
   FALLBACK_PROVIDER_ENABLED?: boolean
   ANTHROPIC_API_KEY?: string
+  // Optional OpenAI-compatible endpoint key (DashScope international — the
+  // wave-1 Qwen/DeepSeek models). Absent ⇒ those models are absent from
+  // routing and every menu (model-registry plan L12); the base URL is a
+  // constant in the provider module, never an env var.
+  DASHSCOPE_API_KEY?: string
   // Optional connector / channel config (closed-secret gated; open passes none).
   GOOGLE_CLIENT_ID?: string
   CHANNEL_CREDENTIAL_KEY?: string
@@ -477,6 +486,9 @@ export interface OpenApiEnv {
   // backend reports not_configured and routing falls back to local.
   E2B_API_KEY?: string
   E2B_TEMPLATE_ID?: string
+  // The watched browser-use exploration's model (§4 — the browser-grounding
+  // leg rides a cheap tier). Optional; defaults per available key below.
+  BROWSER_USE_MODEL?: string
   // Barrier 2 (§4.9): the deploy flag for the unattended acting path. The
   // flag is necessary but NOT sufficient — boot also requires live metering
   // (resolveUnattendedComputerUse). Ships dark.
@@ -559,6 +571,17 @@ export interface OpenApiPorts {
    * Pipeline B wiring; default absent — OSS ingest is uncharged.
    */
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
+  /**
+   * Metered model lane billing (model-registry.md L8/L15) — the closed
+   * `5 + ceil(cost/$0.020)` estimate / spend-cap / charge seams. Default
+   * absent: the OSS build serves metered-class picks unbilled (self-host
+   * pays its own provider bill) and the UI hides credit figures.
+   */
+  meteredBilling?: {
+    estimateMeteredTurn: (modelAlias: string, toolRounds: number) => { modelAlias: string; toolRounds: number; minCredits: number; maxCredits: number } | null
+    checkMeteredSpendCap: (workspaceId: string) => Promise<{ allowed: boolean; usedCredits: number; capCredits: number }>
+    chargeMeteredSurcharge: (params: { workspaceId: string; requestId: string; modelAlias: string; profileId?: string | null; toolRounds?: number | null; modelCostUsd: number; chargedByUserId?: string | null }) => Promise<{ charged: boolean; credits: number }>
+  }
 
   // ── Feed/distribution host hooks — open default: inert ──
   injectExtraTools?: InjectExtraTools
@@ -1039,32 +1062,56 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const analytics = new AnalyticsLogger(analyticsStore)
 
   // ── LLM provider stack ──
-  const geminiProvider = wrapProvider(createGeminiProvider(env.GEMINI_API_KEY))
-  const provider: LLMProvider = (() => {
-    if (!env.FALLBACK_PROVIDER_ENABLED) return geminiProvider
-    if (!env.ANTHROPIC_API_KEY) {
-      console.warn('[provider] FALLBACK_PROVIDER_ENABLED=true but ANTHROPIC_API_KEY is empty — running bare Gemini.')
-      return geminiProvider
+  //
+  // Registry-routed (docs/architecture/platform/model-registry.md): one
+  // wrapped instance per configured provider key; the routing provider
+  // dispatches per request on the model's registry row. A missing key means
+  // that provider's models are simply absent (plan L12) — the ONLY env
+  // gates here are the provider API keys (+ the pre-existing
+  // FALLBACK_PROVIDER_ENABLED toggle for the Claude outage fallback).
+  // Same-class fallback (registry `fallbackAlias`, plan L2) replaces the
+  // old whole-provider wrapFallback: standard-pro Gemini models fall back
+  // to Claude Haiku; Max/Research/background rows have no same-class
+  // fallback and now surface outages instead of silently swapping class.
+  const providerInstances: Record<string, LLMProvider> = {
+    gemini: wrapProvider(createGeminiProvider(env.GEMINI_API_KEY)),
+  }
+  if (env.FALLBACK_PROVIDER_ENABLED) {
+    if (env.ANTHROPIC_API_KEY) {
+      providerInstances['anthropic'] = wrapProvider(createAnthropicProvider({ apiKey: env.ANTHROPIC_API_KEY }))
+    } else {
+      console.warn('[provider] FALLBACK_PROVIDER_ENABLED=true but ANTHROPIC_API_KEY is empty — running without the Claude fallback.')
     }
-    const anthropicProvider = wrapProvider(createAnthropicProvider({ apiKey: env.ANTHROPIC_API_KEY }))
-    return wrapFallback(geminiProvider, anthropicProvider, {
-      fallbackModel: 'claude-haiku-4-5',
-      analytics: {
-        onFallback({ primaryModel, fallbackModel, errorKind, errorStatus }) {
-          analytics.logEvent({
-            userId: 'system',
-            eventName: 'llm_provider_fallback',
-            metadata: {
-              primary_model: sanitizeAnalytics(primaryModel),
-              fallback_model: sanitizeAnalytics(fallbackModel),
-              error_kind: sanitizeAnalytics(errorKind),
-              error_status: errorStatus ?? undefined,
-            },
-          })
-        },
+  }
+  if (env.DASHSCOPE_API_KEY) {
+    providerInstances[`openai-compat:${DASHSCOPE_INTL_LABEL}`] = wrapProvider(
+      createOpenAICompatProvider({ apiKey: env.DASHSCOPE_API_KEY, baseURL: DASHSCOPE_INTL_BASE_URL, label: DASHSCOPE_INTL_LABEL }),
+    )
+  }
+  // Selection-surface derivations (model-registry.md L10/L12): which
+  // provider keys exist decides which models exist — menus and the chat
+  // route's metered gate both consume these, so a keyless model is absent
+  // everywhere at once.
+  const configuredProviders: ReadonlySet<string> = new Set(Object.keys(providerInstances))
+  const meteredModelsAvailable: ReadonlySet<string> = new Set(
+    menuForClass('metered', configuredProviders).map((r) => r.alias),
+  )
+  const provider: LLMProvider = createRoutingProvider(providerInstances, {
+    analytics: {
+      onFallback({ primaryModel, fallbackModel, errorKind, errorStatus }) {
+        analytics.logEvent({
+          userId: 'system',
+          eventName: 'llm_provider_fallback',
+          metadata: {
+            primary_model: sanitizeAnalytics(primaryModel),
+            fallback_model: sanitizeAnalytics(fallbackModel),
+            error_kind: sanitizeAnalytics(errorKind),
+            error_status: errorStatus ?? undefined,
+          },
+        })
       },
-    })
-  })()
+    },
+  })
 
   const jobStore = createDbJobStore()
   const sessionResumeStore = createDbSessionResumeStore()
@@ -1199,6 +1246,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const { createConnectorGrantStore } = await import('./db/connector-grant-store.js')
   const connectorGrantStore = createConnectorGrantStore()
   const workspaceStore = createWorkspaceStore({ connectorGrantStore, channelRouteStore })
+  const meteredProfileStore = createMeteredProfileStore()
 
   // ── KB sync-credential resolver ──
   // Resolves the GitHub PAT a synced knowledge source operates through, by
@@ -2705,9 +2753,30 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : null
   // Cloud mode (§5): E2B behind the SandboxProvider seam. providers/e2b is
   // the only E2B-SDK importer; everything here talks to the interface.
+  // The watched exploration's LLM (browserExplore → provider runBrowserUse)
+  // threads from HERE — no model id lives in the sandbox tree (§4.14). The
+  // browser-grounding leg rides a cheap tier: Haiku when the Anthropic key
+  // exists, else the platform Gemini key on Flash. Without either config the
+  // provider refuses the lane honestly instead of argparse-dying in the VM.
+  const browserUseLlm = env.ANTHROPIC_API_KEY
+    ? {
+        apiKeyEnvName: 'ANTHROPIC_API_KEY' as const,
+        apiKey: env.ANTHROPIC_API_KEY,
+        model: env.BROWSER_USE_MODEL || 'claude-haiku-4-5-20251001',
+      }
+    : env.GEMINI_API_KEY
+      ? {
+          apiKeyEnvName: 'GOOGLE_API_KEY' as const,
+          apiKey: env.GEMINI_API_KEY,
+          // The REAL Google API id (browser-use bypasses our provider layer,
+          // so no alias resolution) — Flash 3, the cheap-leg tier.
+          model: env.BROWSER_USE_MODEL || 'gemini-3-flash-preview',
+        }
+      : undefined
   const sandboxProvider: SandboxProvider | null = env.E2B_API_KEY
     ? createE2bCloudProvider(
         createE2bRuntime({ apiKey: env.E2B_API_KEY, defaultTemplateId: env.E2B_TEMPLATE_ID }),
+        { browserUse: browserUseLlm },
       )
     : null
   // The §4.9 meter: all three COGS lines record through the usage spine, and
@@ -3115,6 +3184,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     provider,
     artifactPromoter,
     checkCreditBudget: ports.checkCreditBudget,
+    meteredProfileStore,
+    meteredModelsAvailable,
+    estimateMeteredTurn: ports.meteredBilling?.estimateMeteredTurn,
+    checkMeteredSpendCap: ports.meteredBilling?.checkMeteredSpendCap,
+    chargeMeteredSurcharge: ports.meteredBilling?.chargeMeteredSurcharge,
     publishSessionEvent,
     isPlaceholderTitle: ports.isPlaceholderTitle,
     getTitleChannelPrefix: ports.getTitleChannelPrefix,
@@ -3619,6 +3693,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       assessClarity: goalClarityAssessor,
     }),
   )
+
+  // Model selection surfaces (model-registry.md L10): per-class menus,
+  // metered profiles CRUD, pre-flight estimates. Authed; membership-gated
+  // per workspace inside the router.
+  app.use('/api', requireAuth(env.JWT_SECRET), modelMenuRoutes({
+    workspaceStore,
+    meteredProfileStore,
+    configuredProviders,
+    estimateMeteredTurn: ports.meteredBilling?.estimateMeteredTurn,
+  }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), workflowsRoutes({
     workflowStore,

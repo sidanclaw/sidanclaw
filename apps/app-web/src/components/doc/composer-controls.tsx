@@ -93,6 +93,15 @@ type Props = {
   /** Flip the AI-reply toggle. Presence of this handler is what renders the
    *  toggle — so the floating chat (which omits it) never shows it. */
   onAiReplyChange?: (next: boolean) => void;
+  /** Metered model entries (models + saved profiles) for the picker's
+   *  premium group (model-registry.md L10/L15). Empty/undefined hides the
+   *  group — surfaces that don't wire metered keep the curated trio. */
+  meteredOptions?: Array<{ key: string; label: string; sublabel: string }>;
+  /** Currently selected metered entry key, or null when a curated tier is
+   *  active. The owner runs the estimate→confirm flow before setting it. */
+  meteredSelectedKey?: string | null;
+  /** Pick a metered entry (key) or clear back to curated (null). */
+  onMeteredSelect?: (key: string | null) => void;
   /** Row layout override (margin) for the host composer. */
   className?: string;
 };
@@ -112,6 +121,9 @@ export function ComposerControls({
   selectSide = "top",
   aiReply,
   onAiReplyChange,
+  meteredOptions,
+  meteredSelectedKey,
+  onMeteredSelect,
   className,
 }: Props) {
   const t = useT().chat;
@@ -185,8 +197,16 @@ export function ComposerControls({
       ) : null}
       <div className="flex-1" />
       <Select
-        value={model}
-        onValueChange={(v) => { if (v) onModelChange(v as ModelTier); }}
+        value={meteredSelectedKey ? `metered:${meteredSelectedKey}` : model}
+        onValueChange={(v) => {
+          if (!v) return;
+          if (v.startsWith("metered:")) {
+            onMeteredSelect?.(v.slice("metered:".length));
+            return;
+          }
+          onMeteredSelect?.(null);
+          onModelChange(v as ModelTier);
+        }}
         disabled={aiTurnDisabled}
       >
         <SelectTrigger
@@ -196,7 +216,9 @@ export function ComposerControls({
           className="gap-1.5 border-transparent bg-muted/60 text-xs hover:bg-muted disabled:pointer-events-none disabled:opacity-40"
         >
           <span className="font-medium">
-            {model === "pro" ? t.modelPro : model === "max" ? t.modelMax : t.modelStandard}
+            {meteredSelectedKey
+              ? meteredOptions?.find((o) => o.key === meteredSelectedKey)?.label ?? t.modelMeteredGroup
+              : model === "pro" ? t.modelPro : model === "max" ? t.modelMax : t.modelStandard}
           </span>
         </SelectTrigger>
         <SelectContent side={selectSide} align="end" alignItemWithTrigger={false} className="w-auto min-w-56">
@@ -218,6 +240,21 @@ export function ComposerControls({
               <span className="text-[11px] text-muted-foreground">{t.modelMaxDesc}</span>
             </div>
           </SelectItem>
+          {meteredOptions && meteredOptions.length > 0 ? (
+            <>
+              <div className="mt-1 border-t border-border/60 px-2 pb-0.5 pt-1.5 text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground">
+                {t.modelMeteredGroup}
+              </div>
+              {meteredOptions.map((o) => (
+                <SelectItem key={o.key} value={`metered:${o.key}`} disabled={plan === "free"}>
+                  <div className="flex flex-col gap-0.5 py-0.5">
+                    <span className="text-sm font-medium">{o.label}</span>
+                    <span className="text-[11px] text-muted-foreground">{o.sublabel}</span>
+                  </div>
+                </SelectItem>
+              ))}
+            </>
+          ) : null}
         </SelectContent>
       </Select>
     </div>
