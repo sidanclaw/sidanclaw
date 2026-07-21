@@ -2790,19 +2790,23 @@ export function chatRoutes(options: WebChatOptions): Router {
           'If you cannot save the file, say plainly that it could not be saved.'
       }
 
-      // Task autopilot nudge (task-goal-autopilot.md). Capability-gated + dynamic
-      // (post-`injectMcpTools`), so naming the goal tools here is allowed — they
-      // exist whenever this runs. Without this, the auto-drafted goal is a silent
-      // DB row the model never surfaces; this makes the model offer it + enforces
-      // the confirm-before-work contract.
+      // Task autopilot nudge (task-goal-autopilot.md §8). Capability-gated +
+      // dynamic (post-`injectMcpTools`), so naming the goal tools here is
+      // allowed — they exist whenever this runs. v2: task creation is triaged
+      // in the BACKGROUND (a judge drafts a goal only for tasks the assistant
+      // can honestly help with), so the model must NOT announce or pitch a
+      // goal per created task — the creating turn cannot know the verdict.
+      // What remains is the fails-safe contract: never work an unconfirmed
+      // goal.
       if (activeCapabilities.has('goals')) {
         fullSystemPrompt +=
           '\n\n# Goals for tasks\n' +
-          'Every top-level task you create is automatically given a DRAFT goal — a plan to drive that task to done. A draft goal does NOTHING on its own. ' +
-          'Right after you create a task, briefly tell the user the goal it was given and ask whether you should work it for them. ' +
-          'If they agree, confirm the goal (confirmGoal), then spin it up (workTask) so you complete the task autonomously. ' +
-          'NEVER start working a task whose goal is not confirmed: if you are about to work a task and its goal is still a draft, stop and confirm the outcome with the user first. ' +
-          'Use listGoals to find a task’s draft goal.'
+          'Some tasks are judged in the background as workable by you; those get a DRAFT goal (an outcome, verification criteria, and an approach) the user reviews on their Tasks-assignable surface. A draft goal does NOTHING on its own. ' +
+          'Do NOT announce or pitch goals when you create tasks — the judgment happens after creation and most tasks will not have one. ' +
+          'When the user asks you to work a task, find its goal with listGoals (filter by the task id). ' +
+          'If the goal is still a draft, review its outcome with the user, confirm it (confirmGoal), then spin it up (workTask). ' +
+          'If the task has NO goal, you may define one with the user explicitly before working it. ' +
+          'NEVER start working a task whose goal is not confirmed.'
       }
 
       // ── Doc outline injection (Lock #5/#6, §5.4) ────────────
