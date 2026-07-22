@@ -3648,6 +3648,7 @@ export const ja: Dictionary = {
     filter: "フィルター",
     clearFilter: "フィルターを解除",
     view: "表示",
+    resize: "パネル幅を調整",
   },
   tasksPage: {
     title: "タスク",
@@ -5376,6 +5377,10 @@ export const ja: Dictionary = {
     discardBody: "ここまで録音した音声は削除されます。",
     discardAction: "破棄",
     micHint: "マイクが有効になりました。もう一度録音ボタンを押すと開始します。",
+    keptOnDevice:
+      "この録音はこの端末に安全に保存されています。未完了の録音としてここに表示され、いつでもアップロードできます。",
+    autoStopped:
+      "録音は3時間までのため、この録音は停止して端末に保存しました。録音を続けるには録音ボタンを押してください。",
     micDenied: "マイクへのアクセスがブロックされています。ブラウザの設定で許可してからもう一度お試しください。",
     captureFailed: "録音に失敗しました。もう一度お試しください。",
     voiceFailed: "ボイスメッセージを送信できませんでした。もう一度お試しください。",

@@ -62,6 +62,7 @@ import {
   type SelectPropertyOption,
 } from "@/components/brain/property-field";
 import { AmountCell, CompanyCell, STAGE_DOT, type CellCommit } from "./crm-cells";
+import { ResizablePeek } from "@/components/operator/resizable-peek";
 
 export type CrmRecordRef =
   | { kind: "deal"; row: CrmDealRow }
@@ -127,7 +128,7 @@ export function CrmRecordDetail({
   return (
     // A floating peek panel, NOT a flex sibling — it overlays the content
     // pane so opening a record never reflows the table/board underneath.
-    <aside className="absolute inset-y-0 right-0 z-20 flex w-[420px] max-w-[94vw] flex-col border-l border-border/60 bg-background shadow-2xl animate-in slide-in-from-right-4 fade-in duration-200">
+    <ResizablePeek storageKey="operator:peek-width" ariaLabel={record.row.name}>
       {/* Slim action toolbar — the Brain entry page's top-row shape. */}
       <div className="flex items-center justify-end gap-1 border-b border-border/60 px-3 py-2">
         <Link
@@ -204,7 +205,7 @@ export function CrmRecordDetail({
           )}
         </section>
       </div>
-    </aside>
+    </ResizablePeek>
   );
 }
 

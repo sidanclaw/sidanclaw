@@ -3612,6 +3612,7 @@ export const zh: Dictionary = {
     filter: "篩選",
     clearFilter: "清除篩選",
     view: "檢視",
+    resize: "調整面板寬度",
   },
   tasksPage: {
     title: "任務",
@@ -5327,6 +5328,8 @@ export const zh: Dictionary = {
     discardBody: "已录制的音频将被删除。",
     discardAction: "丢弃",
     micHint: "麦克风已启用。再按一次录音按钮即可开始。",
+    keptOnDevice: "这段录音已安全保存在此设备上,将以未完成录音的形式显示在这里,随时可以上传。",
+    autoStopped: "录音上限为3小时,这段录音已停止并保存在此设备上。按录音按钮可继续录制。",
     micDenied: "麦克风访问被阻止。请在浏览器设置中允许后重试。",
     captureFailed: "录音失败,请重试。",
     voiceFailed: "语音消息发送失败,请重试。",

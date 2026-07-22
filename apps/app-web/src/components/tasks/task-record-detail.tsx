@@ -47,6 +47,7 @@ import {
   type PersonPropertyOption,
   type SelectPropertyOption,
 } from "@/components/brain/property-field";
+import { ResizablePeek } from "@/components/operator/resizable-peek";
 
 export function TaskRecordDetail({
   workspaceId,
@@ -117,7 +118,7 @@ export function TaskRecordDetail({
   const project = taskProject(row);
 
   return (
-    <aside className="absolute inset-y-0 right-0 z-20 flex w-[420px] max-w-[94vw] flex-col border-l border-border/60 bg-background shadow-2xl animate-in slide-in-from-right-4 fade-in duration-200">
+    <ResizablePeek storageKey="operator:peek-width" ariaLabel={row.title}>
       {/* Slim action toolbar — the Brain entry page's top-row shape. */}
       <div className="flex items-center justify-end gap-1 border-b border-border/60 px-3 py-2">
         <Link
@@ -240,6 +241,6 @@ export function TaskRecordDetail({
           />
         </div>
       </div>
-    </aside>
+    </ResizablePeek>
   );
 }

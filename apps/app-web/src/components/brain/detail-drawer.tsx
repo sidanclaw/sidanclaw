@@ -147,6 +147,10 @@ import {
   TASK_PRIORITY_DOT_CLASS,
   TASK_STATUS_DOT_CLASS,
 } from "@/components/brain/property-edit";
+import {
+  PeekResizeHandle,
+  usePeekResize,
+} from "@/components/operator/resizable-peek";
 import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
 
 // (The NEXT_PUBLIC_CHAT_HOME_ENABLED inline-actions rollback flag retired
@@ -348,6 +352,13 @@ function brainKindToInboxPrimitive(
 const ANIMATION_MS = 300;
 
 export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
+  // User-adjustable drawer width — shared key with the skill drawer so one
+  // adjustment applies everywhere; the operator peeks keep their own key.
+  const {
+    width: drawerWidth,
+    resizing: drawerResizing,
+    handleProps: drawerHandleProps,
+  } = usePeekResize("brain:drawer-width");
   const t = useT();
   const labels = t.brainPage.detailDrawer;
   // `displayRow` is what we *render*. It lingers after `row` clears so
@@ -732,6 +743,7 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
       <aside
         role="dialog"
         aria-label={headerName}
+        style={drawerWidth !== null ? { width: drawerWidth } : undefined}
         className={cn(
           "fixed top-0 right-0 bottom-0 z-50",
           "w-full sm:w-[480px] lg:w-[640px] xl:w-[760px] bg-popover border-l border-border shadow-2xl",
@@ -740,8 +752,10 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
           closing
             ? "animate-out slide-out-to-right"
             : "animate-in slide-in-from-right",
+          drawerResizing && "select-none",
         )}
       >
+        <PeekResizeHandle resizing={drawerResizing} {...drawerHandleProps} />
         {/* Top toolbar — the Notion chrome position: quiet state on the
             left, page actions on the right. */}
         <header className="flex items-center justify-between gap-3 px-3 py-2 border-b border-border">
@@ -3058,6 +3072,12 @@ function SkillDrawer({
   const t = useT();
   const labels = t.brainPage.detailDrawer;
   const skillsCopy = t.brainPage.skills;
+  // Same shared width key as the entry drawer — one adjustment, both shells.
+  const {
+    width: drawerWidth,
+    resizing: drawerResizing,
+    handleProps: drawerHandleProps,
+  } = usePeekResize("brain:drawer-width");
 
   return (
     <>
@@ -3073,6 +3093,7 @@ function SkillDrawer({
       <aside
         role="dialog"
         aria-label={skill.name}
+        style={drawerWidth !== null ? { width: drawerWidth } : undefined}
         className={cn(
           "fixed top-0 right-0 bottom-0 z-50",
           "w-full sm:w-[480px] lg:w-[640px] xl:w-[760px] bg-popover border-l border-border shadow-2xl",
@@ -3081,8 +3102,10 @@ function SkillDrawer({
           closing
             ? "animate-out slide-out-to-right"
             : "animate-in slide-in-from-right",
+          drawerResizing && "select-none",
         )}
       >
+        <PeekResizeHandle resizing={drawerResizing} {...drawerHandleProps} />
         <header className="flex items-start justify-between gap-3 px-4 py-3 border-b border-border">
           <div className="flex flex-col gap-1 min-w-0 flex-1">
             <div className="flex items-center gap-1.5 flex-wrap">

@@ -3856,6 +3856,7 @@ export const en = {
     filter: "Filter",
     clearFilter: "Clear filter",
     view: "View",
+    resize: "Resize panel",
   },
   // ── Tasks operator surface ([COMP:app-web/tasks-surface]) ──
   tasksPage: {
@@ -5591,6 +5592,10 @@ export const en = {
     discardBody: "The audio captured so far will be deleted.",
     discardAction: "Discard",
     micHint: "Microphone enabled. Press the record button again to start.",
+    keptOnDevice:
+      "This recording is kept safely on this device. It will appear here as an unfinished recording, ready to upload whenever you are.",
+    autoStopped:
+      "Recordings are limited to 3 hours, so this capture was stopped and saved on this device. Press the record button to keep capturing.",
     micDenied: "Microphone access is blocked. Allow it in your browser settings and try again.",
     captureFailed: "Recording failed. Please try again.",
     voiceFailed: "We could not send the voice message. Please try again.",
