@@ -206,9 +206,8 @@ type Props = {
    */
   homeHref: string;
   /**
-   * Whether the Feed operator app is available (hosted edition AND ≥1
-   * connected distribution profile — the `feedProfiles` probe in
-   * `DocSidebarDataProvider`). Gates the Feed entry in the operator
+   * Whether the Feed operator app is available (hosted edition only — the
+   * OSS edition 404s the surface). Gates the Feed entry in the operator
    * app-bar; the routes stay deep-linkable regardless.
    */
   feedEnabled: boolean;

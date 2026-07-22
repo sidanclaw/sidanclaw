@@ -38,6 +38,7 @@ import {
   surfaceFromPathname,
 } from "@/lib/doc-page-url";
 import { useT } from "@/lib/i18n/client";
+import { isHostedEdition } from "@/lib/edition";
 import { routeProgress } from "@/lib/route-progress";
 import { surfaceShortcutModifierPressed } from "@/lib/surface-shortcuts";
 import { useChatDockSuppressed } from "@/lib/chat-dock-suppress";
@@ -133,7 +134,6 @@ export function WorkspaceChrome({
     sidebarOpen,
     setSidebarOpen,
     studioSetupIncomplete,
-    feedProfiles,
     reloadSidebar,
     handleNewDraft,
     handleAddChild,
@@ -258,10 +258,11 @@ export function WorkspaceChrome({
   }, [workspaceId]);
   const studioNudge = studioSetupIncomplete === true && !nudgeDismissed;
 
-  // Feed availability — hosted workspaces with a connected distribution
-  // profile get the Feed entry in the operator app-bar (the probe lives in
-  // the sidebar-data provider; see `feedProfiles` there).
-  const feedEnabled = (feedProfiles?.length ?? 0) > 0;
+  // Feed availability — every hosted workspace gets the Feed entry in the
+  // operator app-bar (zero-profile visits land on the feed home's
+  // connect-account onboarding state). Only the OSS edition hides it, where
+  // `feed/layout.tsx` 404s the whole subtree.
+  const feedEnabled = isHostedEdition();
 
   // ── Operator app-bar + sticky Home resolution (operator-apps.ts) ───────
   // The active surface's operator app (Page / Tasks / Feed), or null on

@@ -417,6 +417,14 @@ export function authRoutes(
    * target device, which is the normal cross-device sign-in, never same-browser
    * account stashing. See docs/architecture/platform/auth.md → "Email
    * magic-link flow".
+   *
+   * Optional `tgLinkToken` (Telegram Mini App email onramp): after the code is
+   * consumed and the user resolved, the Telegram identity in the token is bound
+   * via the same `tryLinkTelegram` the Google path uses, and any bind failure
+   * surfaces as `linkWarning` on an otherwise-successful sign-in. Only this
+   * code path carries it — the emailed magic *link* opens outside the Telegram
+   * WebView, where the token (held in the Mini App page's state) is absent. See
+   * docs/architecture/channels/telegram-mini-app.md → "Email code sign-in".
    */
   router.post('/email/verify-code', async (req, res) => {
     if (!emailAuth || !emailAuth.magicLinkStore) {
@@ -425,10 +433,11 @@ export function authRoutes(
     }
     const { magicLinkStore } = emailAuth
 
-    const { email, code, timezone: bodyTimezone } = req.body as {
+    const { email, code, timezone: bodyTimezone, tgLinkToken } = req.body as {
       email?: unknown
       code?: unknown
       timezone?: unknown
+      tgLinkToken?: unknown
     }
     const emailRaw = typeof email === 'string' ? email.trim().toLowerCase() : ''
     const codeRaw = typeof code === 'string' ? code.trim() : ''
@@ -447,11 +456,17 @@ export function authRoutes(
       return
     }
 
+    const tgLink =
+      typeof tgLinkToken === 'string' && tgLinkToken.length > 0 && tgLinkToken.length <= 2048
+        ? { token: tgLinkToken, linkedAccountStore, notifyTelegramLinked }
+        : undefined
+
     await respondWithEmailSession(
       res,
       jwtSecret,
       result,
       resolveCaptureTz(req.clientTimezone, bodyTimezone),
+      tgLink,
     )
   })
 
@@ -948,15 +963,37 @@ function resolveCaptureTz(headerTz: string | undefined, bodyTimezone: unknown): 
  * response. Shared by the link (`/email/verify`) and passcode
  * (`/email/verify-code`) paths so both produce byte-identical response bodies
  * and can't drift.
+ *
+ * `tgLink` (passcode path only) binds the Telegram identity carried by a
+ * Mini-App-minted `tgLinkToken` to the resolved user, mirroring the
+ * `POST /auth/google` behaviour: a bind failure never fails the sign-in, it
+ * rides back as `linkWarning`.
  */
 async function respondWithEmailSession(
   res: Response,
   jwtSecret: string,
   consumed: MagicLinkConsumed,
   captureTz: string | undefined,
+  tgLink?: {
+    token: string
+    linkedAccountStore: LinkedAccountStore | undefined
+    notifyTelegramLinked: NotifyTelegramLinked | undefined
+  },
 ): Promise<void> {
   try {
     const { user, isNew } = await findOrCreateEmailUser(consumed.email, captureTz)
+
+    let linkWarning: string | undefined
+    if (tgLink) {
+      linkWarning = await tryLinkTelegram(
+        user.id,
+        tgLink.token,
+        jwtSecret,
+        tgLink.linkedAccountStore,
+        tgLink.notifyTelegramLinked,
+      )
+    }
+
     const tokens = createTokens(user.id, jwtSecret)
     res.json({
       user: {
@@ -967,6 +1004,7 @@ async function respondWithEmailSession(
       },
       isNew,
       nextPath: consumed.nextPath,
+      ...(linkWarning ? { linkWarning } : {}),
       ...tokens,
     })
   } catch (err) {

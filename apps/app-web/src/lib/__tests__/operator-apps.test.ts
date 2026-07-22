@@ -16,6 +16,10 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     window.localStorage.clear();
   });
 
+  it("keeps the app-bar order with Feed in the 4th slot", () => {
+    expect(OPERATOR_APP_KEYS).toEqual(["page", "tasks", "crm", "feed"]);
+  });
+
   it("maps operator surfaces to their app and leaves the rest null", () => {
     expect(operatorAppFromSurface("p")).toBe("page");
     expect(operatorAppFromSurface("tasks")).toBe("tasks");
@@ -46,7 +50,7 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
   });
 
   it("falls back to the default when the cached app is not enabled", () => {
-    // Feed cached, then distribution profiles disconnect → feed disabled.
+    // Feed cached, then the workspace opens on the OSS edition → feed disabled.
     writeOperatorApp("w1", "feed");
     expect(readOperatorApp("w1", ["page", "tasks"])).toBe("page");
     expect(homePath("w1", ["page", "tasks"])).toBe("/w/w1/p");
