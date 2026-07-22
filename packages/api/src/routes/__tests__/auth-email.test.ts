@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { authRoutes, type EmailAuthDeps } from '../auth.js'
+import { authRoutes, type EmailAuthDeps, type NotifyTelegramLinked } from '../auth.js'
+import { signTgLinkToken } from '../../auth/tg-link-token.js'
+import type { LinkedAccount, LinkedAccountStore } from '../../db/linked-accounts.js'
 import type { MagicLinkStore } from '../../db/magic-link-store.js'
 import type { SmtpClient } from '../../email/smtp-client.js'
 
@@ -62,14 +64,47 @@ function makeSmtp(): {
   }
 }
 
-function makeApp(emailAuth?: EmailAuthDeps) {
+function makeApp(
+  emailAuth?: EmailAuthDeps,
+  tgDeps?: {
+    linkedAccountStore?: LinkedAccountStore
+    notifyTelegramLinked?: NotifyTelegramLinked
+  },
+) {
   const app = express()
   app.use(express.json())
   app.use(
     '/auth',
-    authRoutes(JWT_SECRET, undefined, undefined, undefined, undefined, undefined, emailAuth),
+    authRoutes(
+      JWT_SECRET,
+      undefined,
+      tgDeps?.linkedAccountStore,
+      tgDeps?.notifyTelegramLinked,
+      undefined,
+      undefined,
+      emailAuth,
+    ),
   )
   return app
+}
+
+function stubLinkedAccountStore(overrides?: Partial<LinkedAccountStore>): LinkedAccountStore {
+  return {
+    findByProvider: async () => null,
+    upsert: async (p) => ({
+      id: 'la-1',
+      userId: p.userId,
+      assistantId: p.assistantId,
+      provider: p.provider,
+      providerId: p.providerId,
+      providerMetadata: p.providerMetadata ?? null,
+      linkedAt: new Date(),
+    }),
+    findByAssistant: async () => null,
+    listForUser: async () => [],
+    deleteForUser: async () => false,
+    ...overrides,
+  }
 }
 
 beforeEach(() => {
@@ -548,5 +583,100 @@ describe('[COMP:api/auth-email-verify-code] POST /auth/email/verify-code', () =>
     expect(res.body.accessToken).toBeTruthy()
     expect(res.body.refreshToken).toBeTruthy()
     expect(res.body.nextPath).toBe('/brain')
+  })
+
+  it('binds the Telegram identity when a valid tgLinkToken rides with the code', async () => {
+    const store = makeStore({
+      consumeByCode: async () => ({ status: 'ok', email: 'tg@example.com', nextPath: null, locale: 'en' }),
+    })
+    findUserByEmailMock.mockResolvedValueOnce({
+      id: 'u_tg',
+      email: 'tg@example.com',
+      name: null,
+      avatarUrl: null,
+      authProvider: 'email',
+      authProviderId: 'tg@example.com',
+      timezone: 'Asia/Hong_Kong',
+    })
+    // First query() inside tryLinkTelegram is the first-owned-assistant
+    // lookup; anything after (mergeShadowUser) gets the empty fallback.
+    queryMock.mockResolvedValueOnce({ rows: [{ id: 'assistant-1' }] })
+    queryMock.mockResolvedValue({ rows: [] })
+
+    let captured: Parameters<LinkedAccountStore['upsert']>[0] | null = null
+    const linkedAccountStore = stubLinkedAccountStore({
+      upsert: async (p): Promise<LinkedAccount> => {
+        captured = p
+        return {
+          id: 'la-1',
+          userId: p.userId,
+          assistantId: p.assistantId,
+          provider: p.provider,
+          providerId: p.providerId,
+          providerMetadata: p.providerMetadata ?? null,
+          linkedAt: new Date(),
+        }
+      },
+    })
+    const notify = vi.fn(async () => {})
+
+    const smtp = makeSmtp()
+    const app = makeApp(
+      { magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' },
+      { linkedAccountStore, notifyTelegramLinked: notify },
+    )
+
+    const tgLinkToken = signTgLinkToken(
+      { tgUserId: '424242', firstName: 'Hinson', chatId: '424242' },
+      JWT_SECRET,
+    )
+    const res = await request(app)
+      .post('/auth/email/verify-code')
+      .send({ email: 'tg@example.com', code: '123456', tgLinkToken })
+
+    expect(res.status).toBe(200)
+    expect(res.body.accessToken).toBeTruthy()
+    expect(res.body.linkWarning).toBeUndefined()
+    expect(captured).not.toBeNull()
+    expect(captured!.userId).toBe('u_tg')
+    expect(captured!.assistantId).toBe('assistant-1')
+    expect(captured!.provider).toBe('telegram')
+    expect(captured!.providerId).toBe('424242')
+    // The post-link bot push is fire-and-forget — wait a tick.
+    await new Promise((r) => setTimeout(r, 10))
+    expect(notify).toHaveBeenCalledWith('424242', 'Hinson')
+  })
+
+  it('still signs in with a linkWarning when the tgLinkToken is invalid', async () => {
+    const store = makeStore({
+      consumeByCode: async () => ({ status: 'ok', email: 'tg2@example.com', nextPath: null, locale: 'en' }),
+    })
+    findUserByEmailMock.mockResolvedValueOnce({
+      id: 'u_tg2',
+      email: 'tg2@example.com',
+      name: null,
+      avatarUrl: null,
+      authProvider: 'email',
+      authProviderId: 'tg2@example.com',
+      timezone: 'Asia/Hong_Kong',
+    })
+
+    const upsert = vi.fn()
+    const linkedAccountStore = stubLinkedAccountStore({ upsert })
+
+    const smtp = makeSmtp()
+    const app = makeApp(
+      { magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' },
+      { linkedAccountStore },
+    )
+
+    const res = await request(app)
+      .post('/auth/email/verify-code')
+      .send({ email: 'tg2@example.com', code: '123456', tgLinkToken: 'not-a-real-token' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.accessToken).toBeTruthy()
+    expect(res.body.linkWarning).toContain('invalid or expired')
+    expect(upsert).not.toHaveBeenCalled()
   })
 })

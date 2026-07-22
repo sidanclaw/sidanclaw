@@ -6,11 +6,11 @@
  *
  *   - The TOP icon row (doc-sidebar) is frozen at Home / Brain / Studio /
  *     Workflow — how you shape the brain. It never grows.
- *   - OPERATOR APPS — things you run over the brain (Page, Tasks, Feed;
- *     CRM reserved) — live under Home in the app-bar. Selecting Home
- *     resolves to the workspace's LAST-USED operator app (default Page),
- *     cached per workspace in localStorage, so leaving to Studio and
- *     returning resumes where you were.
+ *   - OPERATOR APPS — things you run over the brain (Page, Tasks, CRM,
+ *     Feed) — live under Home in the app-bar. Selecting Home resolves to
+ *     the workspace's LAST-USED operator app (default Page), cached per
+ *     workspace in localStorage, so leaving to Studio and returning
+ *     resumes where you were.
  *
  * Pure + IO-light (localStorage only, guarded) so vitest can exercise the
  * resolution logic without React or the router.
@@ -20,8 +20,8 @@
 
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
 
-/** The operator apps, in app-bar order. Page is the default. */
-export const OPERATOR_APP_KEYS = ["page", "tasks", "feed", "crm"] as const;
+/** The operator apps, in app-bar order. Page is the default; Feed holds the 4th slot. */
+export const OPERATOR_APP_KEYS = ["page", "tasks", "crm", "feed"] as const;
 export type OperatorAppKey = (typeof OPERATOR_APP_KEYS)[number];
 
 export const DEFAULT_OPERATOR_APP: OperatorAppKey = "page";
@@ -73,8 +73,8 @@ function isOperatorAppKey(value: unknown): value is OperatorAppKey {
 /**
  * Resolve the workspace's active operator app from the cache, constrained
  * to the apps currently available (`enabled`). An unknown / disabled cached
- * value (e.g. `feed` after distribution profiles disconnect) falls back to
- * the default. Safe on the server (no `window`) — returns the default.
+ * value (e.g. `feed` on the OSS edition, where the surface 404s) falls back
+ * to the default. Safe on the server (no `window`) — returns the default.
  */
 export function readOperatorApp(
   workspaceId: string,

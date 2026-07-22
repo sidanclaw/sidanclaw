@@ -25,12 +25,12 @@
  *
  * Clicking a row navigates to that app's route AND persists the selection
  * per workspace (`writeOperatorApp`), so the top-row Home icon and ⌘/Ctrl+1
- * resume it later. Feed appears only while the workspace has connected
- * distribution profiles (`feedEnabled` — the same probe that used to gate
- * its top-row icon before it re-parented here).
+ * resume it later. Feed (4th slot) shows on every hosted workspace —
+ * zero-profile visits land on its connect-account onboarding state — and is
+ * hidden only on the OSS edition (`feedEnabled`), where the surface 404s.
  *
  * The top icon row stays frozen at Home / Brain / Studio / Workflow; this
- * block is where the operator-app family grows (CRM's slot is reserved).
+ * block is where the operator-app family grows.
  *
  * [COMP:app-web/operator-app-bar]
  */
