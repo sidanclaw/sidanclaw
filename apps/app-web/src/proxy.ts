@@ -13,7 +13,7 @@ import { computeDocRedirect } from "@/lib/doc-redirect";
 import { isAppHost, isGuardedPath, normalizeHostHeader } from "@/lib/site-hosts";
 import { ossSignedOutRedirect } from "@/lib/oss-entry";
 
-const API_URL = process.env.API_URL ?? "http://localhost:4000";
+import { INTERNAL_API_URL as API_URL } from "@/lib/internal-api-url";
 
 type RefreshResult = {
   accessToken: string;
