@@ -5136,6 +5136,10 @@ export const ja: Dictionary = {
     blueprintAuto: "ブレインに取り込むのみ（ページなし）",
     blueprintPlaceholder: "ブリーフを選択、または取り込みのみ",
     blueprintSearchPlaceholder: "ブループリントを検索…",
+    destinationLabel: "ページの配置先",
+    destinationRoot: "最上位",
+    destinationPlaceholder: "配置先を選択",
+    destinationSearchPlaceholder: "ページを検索…",
     detailBack: "録音",
     detailPlay: "再生",
     detailPause: "一時停止",
@@ -5178,6 +5182,15 @@ export const ja: Dictionary = {
     searchPlaceholder: "ブループリントを検索…",
     ingestOnly: "ブレインに取り込むのみ（ページなし）",
     saveFailed: "既定値を保存できませんでした。もう一度お試しください。",
+  },
+  transcriptionScript: {
+    heading: "文字起こしの中国語表記",
+    description:
+      "今後の録音の文字起こしで、中国語をどの字体で表記するかを設定します。繁体字または簡体字を選ぶと、文字起こしに含まれる中国語をその字体に統一します。他の言語には影響しません。",
+    auto: "自動（変換しない）",
+    traditional: "繁体字中国語",
+    simplified: "簡体字中国語",
+    saveFailed: "設定を保存できませんでした。もう一度お試しください。",
   },
   computer: {
     liveViewTitle: "ライブブラウザ",

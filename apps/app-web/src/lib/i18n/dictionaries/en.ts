@@ -5345,6 +5345,10 @@ export const en = {
     blueprintAuto: "Ingest to brain only (no page)",
     blueprintPlaceholder: "Choose a brief, or ingest only",
     blueprintSearchPlaceholder: "Search blueprints…",
+    destinationLabel: "Place the page under",
+    destinationRoot: "Top level",
+    destinationPlaceholder: "Choose where to file it",
+    destinationSearchPlaceholder: "Search pages…",
     detailBack: "Recordings",
     detailPlay: "Play",
     detailPause: "Pause",
@@ -5389,6 +5393,15 @@ export const en = {
     searchPlaceholder: "Search blueprints…",
     ingestOnly: "Ingest to brain only (no page)",
     saveFailed: "Could not save the default. Please try again.",
+  },
+  transcriptionScript: {
+    heading: "Chinese script in transcripts",
+    description:
+      "How Chinese is written in future recording transcripts. Traditional or Simplified converts any Chinese in the transcript to that script; other languages are never changed.",
+    auto: "Auto (keep provider output)",
+    traditional: "Traditional Chinese",
+    simplified: "Simplified Chinese",
+    saveFailed: "Could not save the preference. Please try again.",
   },
   // Computer use: the Take-Over live view + Session Management
   // (docs/architecture/engine/computer-use.md).

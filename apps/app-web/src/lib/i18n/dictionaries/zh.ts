@@ -5088,6 +5088,10 @@ export const zh: Dictionary = {
     blueprintAuto: "僅匯入大腦（不建立頁面）",
     blueprintPlaceholder: "選擇簡報，或僅匯入",
     blueprintSearchPlaceholder: "搜尋藍圖…",
+    destinationLabel: "頁面放置位置",
+    destinationRoot: "最上層",
+    destinationPlaceholder: "選擇放置位置",
+    destinationSearchPlaceholder: "搜尋頁面…",
     detailBack: "录音",
     detailPlay: "播放",
     detailPause: "暂停",
@@ -5130,6 +5134,15 @@ export const zh: Dictionary = {
     searchPlaceholder: "搜尋藍圖…",
     ingestOnly: "僅匯入大腦（不建立頁面）",
     saveFailed: "無法儲存預設值。請重試。",
+  },
+  transcriptionScript: {
+    heading: "逐字稿中文字體",
+    description:
+      "設定之後錄音逐字稿中的中文以哪種字體呈現。選擇繁體或簡體後，逐字稿中的中文會統一為該字體，其他語言不受影響。",
+    auto: "自動（保留原始輸出）",
+    traditional: "繁體中文",
+    simplified: "簡體中文",
+    saveFailed: "無法儲存設定。請重試。",
   },
   computer: {
     liveViewTitle: "即時瀏覽器",

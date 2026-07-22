@@ -268,7 +268,7 @@ import { goalsRoutes } from './routes/goals.js'
 import { createDbCrmStore } from './db/crm-store.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
-import { createGcsFilesClient } from './files/gcs-client.js'
+import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
 import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
@@ -721,6 +721,20 @@ export interface OpenApiPorts {
   /** A later closed router owns the hosted shared-number fallback. */
   whatsappOfficialFallback?: boolean
 
+  /**
+   * BYO-storage signer for the PUBLIC shared-page recording playback URL
+   * (`<source>/recording/media-url` on the public share/site routes). A
+   * recording carrying a `storage_uri` must be signed by that bucket's own
+   * client — the platform client would mint a URL for the wrong bucket.
+   * Hosted passes its files-resolver-backed implementation (the same seam the
+   * authed recordings route uses); open build leaves it unset → the platform
+   * blob client signs everything, which is correct for single-bucket OSS.
+   */
+  resolveRecordingReadClient?: (
+    workspaceId: string,
+    storageUri: string | null | undefined,
+  ) => Promise<Pick<GcsFilesClient, 'signedReadUrl'>>
+
   // ── Extension hook: the platform mounts its closed routes/workers ──
   mountExtraRoutes?: (app: Express, ctx: BootContext) => void | Promise<void>
 
@@ -819,6 +833,12 @@ export interface BootContext {
   connectorGrantStore: Awaited<ReturnType<typeof import('./db/connector-grant-store.js').createConnectorGrantStore>>
   connectorActionStore: ReturnType<typeof createDbConnectorActionStore>
   workspaceFilesStore: ReturnType<typeof createDbWorkspaceFilesStore>
+  /**
+   * The doc page store. Exposed so a closed route can resolve a page under the
+   * CALLER's RLS — e.g. the recordings `/process` route verifying the brief's
+   * destination page before the (system-level) worker files into it.
+   */
+  savedViewStore: ReturnType<typeof createDbSavedViewStore>
   knowledgeStore: ReturnType<typeof createDbKnowledgeStore>
   capabilityStore: ReturnType<typeof createDbCapabilityStore>
   apiKeyStore: ReturnType<typeof createDbApiKeyStore>
@@ -3752,6 +3772,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowRunStore,
     workspaceDirectory: workspaceDirectoryStore,
     gcs: filesBlobClient,
+    ...(ports.resolveRecordingReadClient
+      ? { resolveRecordingReadClient: ports.resolveRecordingReadClient }
+      : {}),
   }))
 
   // Custom-domain site render — PUBLIC, same containment as publicShareRoutes
@@ -3764,6 +3787,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowRunStore,
     workspaceDirectory: workspaceDirectoryStore,
     gcs: filesBlobClient,
+    ...(ports.resolveRecordingReadClient
+      ? { resolveRecordingReadClient: ports.resolveRecordingReadClient }
+      : {}),
   }))
 
   // PUBLIC closed routes mount HERE — before the bare `/api` requireAuth guards
@@ -4934,6 +4960,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorGrantStore,
     connectorActionStore,
     workspaceFilesStore,
+    savedViewStore,
     knowledgeStore,
     capabilityStore,
     apiKeyStore,
