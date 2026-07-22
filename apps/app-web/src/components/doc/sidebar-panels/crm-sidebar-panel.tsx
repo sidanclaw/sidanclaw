@@ -2,15 +2,15 @@
 
 /**
  * CRM surface sidebar panel — swapped into the persistent left sidebar
- * while the CRM operator surface is active (mirrors `TasksSidebarPanel`).
+ * while the CRM operator surface is active. Styled on the Brain panel's
+ * recipe (`brain-sidebar-panel.tsx`): top-level SECTION ROWS in the Studio
+ * `.doc-nav-active` nav language (no primary blue), quiet tabular counts,
+ * and an Attention block whose live counts render as the same amber badge
+ * the Brain Reviews row wears.
  *
- * Sections:
- *   - Sections — Deals / Contacts / Companies with live counts,
- *     deep-linking `?section=…` (the same codec the surface uses);
- *   - Attention — the quick-filter presets with live counts, deep-linking
- *     `?filter=…` (the same definitions the surface chips and the Home
- *     dock's `deal_attention` card use, so "needs attention" means one
- *     thing everywhere).
+ * Sections deep-link `?section=…`, attention presets `?filter=…` — the
+ * same `crm-view.ts` codec the surface and the Home dock card use, so
+ * "needs attention" means one thing everywhere.
  *
  * Fetches its own row copy for the counts (the "sidebar fetches its own
  * copy" pattern) — cheap against the flat endpoint, refreshed on the
@@ -36,6 +36,28 @@ import {
   type CrmQuickFilter,
   type CrmSection,
 } from "@/lib/crm-view";
+
+/** The Brain panel's nav-row recipe — active is the `.doc-nav-active` pill. */
+const rowCls = (active: boolean) =>
+  cn(
+    "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+    active
+      ? "doc-nav-active font-medium text-sidebar-accent-foreground"
+      : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+  );
+
+const sectionHeaderCls =
+  "px-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45";
+
+/** The Brain Reviews row's amber attention badge. */
+function AttentionBadge({ count }: { count: number }) {
+  if (count === 0) return null;
+  return (
+    <span className="shrink-0 min-w-[1.1rem] h-[1.1rem] px-1 inline-flex items-center justify-center rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-400 text-[10px] font-semibold tabular-nums">
+      {count}
+    </span>
+  );
+}
 
 export function CrmSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const t = useT().crmPage;
@@ -81,66 +103,49 @@ export function CrmSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const base = `/w/${workspaceId}/crm`;
 
   return (
-    <div className="flex flex-col gap-4">
-      {/* Sections */}
-      <section>
-        <div className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45">
-          {t.sectionsLabel}
-        </div>
-        <ul className="space-y-0.5">
-          {CRM_SECTIONS.map((section) => (
-            <li key={section}>
-              <Link
-                href={section === "deals" ? base : `${base}?section=${section}`}
-                className={cn(
-                  "flex items-center gap-2 rounded-md px-2 py-1 text-[13px]",
-                  view.section === section && !view.quick
-                    ? "doc-nav-active font-medium"
-                    : "text-sidebar-foreground/80 hover:bg-sidebar-accent",
-                )}
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  {sectionLabels[section]}
-                </span>
-                {data !== null && (
-                  <span className="tabular-nums text-[11px] text-sidebar-foreground/50">
-                    {sectionCounts[section]}
-                  </span>
-                )}
-              </Link>
-            </li>
-          ))}
-        </ul>
-      </section>
+    <div className="flex flex-col gap-3 px-1 pt-1">
+      {/* Top-level section rows — Deals / Contacts / Companies. */}
+      <div className="flex flex-col gap-0.5">
+        {CRM_SECTIONS.map((section) => (
+          <Link
+            key={section}
+            href={section === "deals" ? base : `${base}?section=${section}`}
+            aria-current={
+              view.section === section && !view.quick ? "page" : undefined
+            }
+            className={rowCls(view.section === section && !view.quick)}
+          >
+            <span className="min-w-0 flex-1 truncate">
+              {sectionLabels[section]}
+            </span>
+            {data !== null && (
+              <span className="shrink-0 tabular-nums text-[11px] text-sidebar-foreground/50">
+                {sectionCounts[section]}
+              </span>
+            )}
+          </Link>
+        ))}
+      </div>
 
-      {/* Attention presets */}
-      <section>
-        <div className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45">
-          {t.attentionLabel}
-        </div>
-        <ul className="space-y-0.5">
+      {/* Attention presets — live counts as the amber attention badge. */}
+      <div>
+        <div className={sectionHeaderCls}>{t.attentionLabel}</div>
+        <div className="flex flex-col gap-0.5">
           {[...DEAL_QUICK_FILTERS, ...CONTACT_QUICK_FILTERS].map((f) => (
-            <li key={f}>
-              <Link
-                href={`${base}?filter=${f}${
-                  sectionForQuickFilter(f) === "deals" ? "&view=table" : ""
-                }`}
-                className={cn(
-                  "flex items-center gap-2 rounded-md px-2 py-1 text-[13px]",
-                  view.quick === f
-                    ? "doc-nav-active font-medium"
-                    : "text-sidebar-foreground/80 hover:bg-sidebar-accent",
-                )}
-              >
-                <span className="min-w-0 flex-1 truncate">{quickLabels[f]}</span>
-                <span className="tabular-nums text-[11px] text-sidebar-foreground/50">
-                  {counts[f]}
-                </span>
-              </Link>
-            </li>
+            <Link
+              key={f}
+              href={`${base}?filter=${f}${
+                sectionForQuickFilter(f) === "deals" ? "&view=table" : ""
+              }`}
+              aria-current={view.quick === f ? "page" : undefined}
+              className={rowCls(view.quick === f)}
+            >
+              <span className="min-w-0 flex-1 truncate">{quickLabels[f]}</span>
+              <AttentionBadge count={counts[f]} />
+            </Link>
           ))}
-        </ul>
-      </section>
+        </div>
+      </div>
     </div>
   );
 }
