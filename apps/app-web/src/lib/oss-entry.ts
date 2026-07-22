@@ -22,7 +22,7 @@
 import { isOssEdition } from "@/lib/edition";
 
 /** The web trigger route that mints the local-owner session. */
-export const LOCAL_SESSION_PATH = "/api/auth/local-session";
+const LOCAL_SESSION_PATH = "/api/auth/local-session";
 
 /**
  * Keep only same-origin absolute paths. A protocol-relative `//evil.com` would
