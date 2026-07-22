@@ -76,6 +76,9 @@ export type ChannelRecordingIngest = {
 // getConnectorUserId now used inside channel-pipeline.ts
 
 type TelegramByoRouteOptions = {
+  /** Servable background-lane model, resolved at boot; forwarded to the
+   * channel pipeline so its background calls work without a Google key. */
+  backgroundModel?: string
   provider: LLMProvider
   systemPrompt: string
   tools: Map<string, Tool>
@@ -862,6 +865,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // 6. Sequentialize per chat via Postgres advisory lock
       await withChatLock(`tg-byo:${incoming.channelId}`, () =>
         processMessage({
+          backgroundModel: options.backgroundModel,
           adapter,
           incoming,
           assistant: routedAssistant,
@@ -955,6 +959,8 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 // ── Per-message handler ─────────────────────────────────────────
 
 type ProcessMessageParams = {
+  /** Servable background-lane model, threaded from the route options. */
+  backgroundModel?: string
   adapter: ReturnType<typeof createTelegramAdapter>
   incoming: IncomingMessage
   assistant: { id: string; name: string; ownerUserId: string; telegramModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
@@ -1239,6 +1245,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // users with no @username). Same raw access as the allowlist check above.
   const byoUsername = (incoming.raw as { from?: { username?: string } }).from?.username
   await processChannelMessage({
+    backgroundModel: params.backgroundModel,
     userId: channelUserId,
     ownerId,
     assistant: { ...assistant, ownerUserId: ownerId },
