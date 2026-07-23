@@ -5647,6 +5647,14 @@ export const zh: Dictionary = {
       copy: "複製",
       copied: "已複製",
       refresh: "重新整理狀態",
+      sidebarRow: {
+        connect: "連接我的瀏覽器",
+        connecting: "連接中...",
+        connected: "我的瀏覽器",
+        connectedBadge: "已連接",
+        connectAria: "將你自己的 Chrome 連接到 Use Brian",
+        manageAria: "管理我的瀏覽器連接",
+      },
     },
     profiles: {
       title: "瀏覽器身分",

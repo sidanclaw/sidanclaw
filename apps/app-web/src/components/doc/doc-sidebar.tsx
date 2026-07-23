@@ -79,6 +79,7 @@ import {
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
 import { operatorAppFromSurface } from "@/lib/operator-apps";
 import { OperatorAppBar } from "./operator-app-bar";
+import { ConnectBrowserRow } from "./connect-browser-row";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -701,6 +702,13 @@ export function DocSidebar(props: Props) {
           feedEnabled={props.feedEnabled}
         />
       )}
+
+      {/* "My Browser" — connect / reconnect the local browser extension in one
+          click, from every surface. The pairing flow itself still lives in
+          Settings → Browser profiles; this row is the way in, and falls back to
+          opening that panel whenever one-click cannot finish. Renders nothing
+          where no relay is configured. See connect-browser-row.tsx. */}
+      <ConnectBrowserRow workspaceId={workspaceId} />
 
       {/* Search input — revealed by the Search icon (Home only). */}
       {searchOpen && props.activeSurface === "p" && (

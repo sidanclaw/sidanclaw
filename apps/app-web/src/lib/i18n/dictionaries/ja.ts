@@ -5706,6 +5706,14 @@ export const ja: Dictionary = {
       copy: "コピー",
       copied: "コピーしました",
       refresh: "状態を更新",
+      sidebarRow: {
+        connect: "自分のブラウザを接続",
+        connecting: "接続中...",
+        connected: "マイブラウザ",
+        connectedBadge: "接続済み",
+        connectAria: "自分の Chrome を Use Brian に接続します",
+        manageAria: "マイブラウザの接続を管理します",
+      },
     },
     profiles: {
       title: "ブラウザプロフィール",
