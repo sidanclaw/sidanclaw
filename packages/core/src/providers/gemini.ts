@@ -348,6 +348,50 @@ export function stripLeadingRoleToken(firstTurnText: string): string {
   return firstTurnText.replace(/^model\r?\n/, '')
 }
 
+/**
+ * Strip a leaked serialized-JSON *envelope tail* from the start of a Gemini
+ * turn's first text part — the sibling artifact to the `model\n` role-token
+ * leak above, from the same decoder-echo class.
+ *
+ * Observed in production (2026-07-23, session b8e567d6, msg cb76ea5d): on a
+ * post-tool-call continuation, gemini-3-flash opened its reply with the orphaned
+ * tail of a JSON structure it had just consumed as a `functionResponse` —
+ * literally `\n"}` (backslash-n, close-quote, close-brace) on its own line, glued
+ * ahead of the real body. It streamed to the user's Telegram verbatim (a
+ * non-interactive path, no client render layer) and, on the stateful `send()`
+ * path, was accumulated into persisted history (re-entering context next turn).
+ * `sanitizeDeliveryText` cannot catch it — that defends known scaffolding
+ * *phrasings*, while this is structural punctuation, not prose. The signal is
+ * structural, so the defense lives at the provider boundary, exactly where the
+ * role-token strip already lives.
+ *
+ * SURGICAL. Only the FIRST physical line is considered, and it is cut only when
+ * that whole line is (a) composed solely of JSON structural punctuation,
+ * whitespace, and literal escape sequences (`\n`, `\"`, …), AND (b) carries the
+ * serialized-JSON-tail signature — a string-close adjacent to a container-close
+ * (`"}` / `"]`) or a literal escape. Real prose never opens this way, so a reply
+ * that merely begins with a quotation mark, a `{`, or the word "model" is
+ * untouched. Requires a following body line (a leading orphan with no body after
+ * it is left alone rather than nulled), and never strips the whole turn to empty.
+ *
+ * Apply to the first text part of a turn only (see the two emit sites), after
+ * `stripLeadingRoleToken` — a `model\n"}` combined leak strips the role token
+ * first, then this removes the exposed envelope tail. Shares the role-token
+ * strip's per-delta assumption: the leaked head must arrive within the first
+ * text delta (Gemini's SSE chunks are coarse, so in practice it does).
+ */
+export function stripLeadingEnvelopeLeak(firstTurnText: string): string {
+  const nl = firstTurnText.indexOf('\n')
+  if (nl === -1) return firstTurnText // no body after the head — never strip a bare one-liner
+  const head = firstTurnText.slice(0, nl)
+  // (a) The whole first line is JSON structure / whitespace / literal escapes.
+  if (!/^(?:\\[nrt"\\/]|[ \t\r"}\],:])+$/.test(head)) return firstTurnText
+  // (b) It looks like a serialized-JSON tail, not a hand-written bracket.
+  if (!/"[}\]]|\\[nrt"]/.test(head)) return firstTurnText
+  const rest = firstTurnText.slice(nl + 1)
+  return rest.length > 0 ? rest : firstTurnText
+}
+
 // ── SSE streaming via REST API ─────────────────────────────────
 
 async function* streamGeminiSSE(
@@ -624,7 +668,7 @@ async function* convertStreamChunks(
         let text = part.text
         if (!firstTextSeen) {
           firstTextSeen = true
-          text = stripLeadingRoleToken(text)
+          text = stripLeadingEnvelopeLeak(stripLeadingRoleToken(text))
         }
         if (text) yield { chunk: { type: 'text_delta', text } }
       }
@@ -814,7 +858,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
                 let text = part.text
                 if (!firstTextSeen) {
                   firstTextSeen = true
-                  text = stripLeadingRoleToken(text)
+                  text = stripLeadingEnvelopeLeak(stripLeadingRoleToken(text))
                 }
                 if (text) {
                   yield { type: 'text_delta', text }
