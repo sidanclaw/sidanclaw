@@ -131,7 +131,9 @@ describe('[COMP:decks/spec] applyDeckOps', () => {
 describe('[COMP:decks/style] Deck style resolution + derivation', () => {
   it('resolveDeckStyle prefers an extracted style over theme presets', () => {
     const style = { ...DECK_PRESET_STYLES.dark, accent: 'ABCDEF' };
-    expect(resolveDeckStyle('light', style)).toBe(style);
+    // Merged key-by-key rather than returned as-is, so a style persisted before
+    // a token existed still resolves — see the backfill test below.
+    expect(resolveDeckStyle('light', style)).toEqual(style);
     expect(resolveDeckStyle('dark', null)).toBe(DECK_PRESET_STYLES.dark);
     expect(resolveDeckStyle(undefined, undefined)).toBe(DECK_PRESET_STYLES.light);
   });
@@ -524,5 +526,72 @@ describe('[COMP:decks/layout] Table grid fits the body box', () => {
             : p.box.y + p.box.h;
       expect(bottom).toBeLessThanOrEqual(DECK_PAGE_H + 0.001);
     }
+  });
+});
+
+describe('[COMP:decks/style] Paper theme, font pairs, motifs, texture', () => {
+  it('paper is a fourth preset with its own typography and motif', () => {
+    const paper = DECK_PRESET_STYLES.paper;
+    expect(paper.headingFont).toBe('Georgia');
+    expect(paper.motif).toBe('sunburst');
+    expect(contrastRatio(paper.background, paper.text)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(paper.background, paper.accent)).toBeGreaterThanOrEqual(2);
+    expect(contrastRatio(paper.background, paper.accentAlt)).toBeGreaterThanOrEqual(2);
+    // Texture is opt-in even here: it costs ~40KB per slide.
+    expect(paper.texture).toBeUndefined();
+  });
+
+  it('fontPair applies over a theme but NOT over an extracted style', () => {
+    const geometric = resolveDeckStyle('light', null, { fontPair: 'geometric' });
+    expect(geometric.headingFont).toBe('Trebuchet MS');
+    expect(geometric.bodyFont).toBe('Arial');
+    // Matching a reference deck means matching its typography too.
+    const extracted = { ...DECK_PRESET_STYLES.light, headingFont: 'Montserrat', bodyFont: 'Lato' };
+    const withRef = resolveDeckStyle('light', extracted, { fontPair: 'geometric' });
+    expect(withRef.headingFont).toBe('Montserrat');
+  });
+
+  it('backfills tokens missing from a style extracted before they existed', () => {
+    // A persisted style predating accentAlt: a comparison slide added to that
+    // deck later must not render an undefined colour.
+    const legacy = { ...DECK_PRESET_STYLES.light } as Record<string, unknown>;
+    delete legacy.accentAlt;
+    const resolved = resolveDeckStyle('light', legacy as never);
+    expect(resolved.accentAlt).toBe(DECK_PRESET_STYLES.light.accentAlt);
+    expect(resolved.background).toBe(DECK_PRESET_STYLES.light.background);
+  });
+
+  it('motif marks title and section slides only, and never the body', () => {
+    const spec = deckSpecSchema.parse({
+      title: 'T',
+      motif: 'sunburst',
+      slides: [{ title: 'Part One', layout: 'section' }, { title: 'Body', bullets: ['x'] }],
+    });
+    const [title, section, body] = layoutDeck(spec, resolveDeckStyle(undefined, null, { motif: 'sunburst' }));
+    const lines = (l: (typeof title)) => l.primitives.filter((p) => p.kind === 'lineSeg').length;
+    expect(lines(title)).toBeGreaterThan(0);
+    expect(lines(section)).toBeGreaterThan(0);
+    expect(lines(body)).toBe(0);
+  });
+
+  it("the arc motif draws unfilled rings, not discs", () => {
+    const spec = deckSpecSchema.parse({ title: 'T', motif: 'arc', slides: [{ title: 'B', bullets: ['x'] }] });
+    const rings = layoutDeck(spec, resolveDeckStyle(undefined, null, { motif: 'arc' }))[0].primitives.filter(
+      (p): p is Extract<DeckPrimitive, { kind: 'ellipse' }> => p.kind === 'ellipse',
+    );
+    expect(rings).toHaveLength(3);
+    for (const r of rings) {
+      expect(r.fill).toBeUndefined();
+      expect(r.outline).toBeDefined();
+    }
+  });
+
+  it('texture is a slide-level surface flag, off unless asked for', () => {
+    const spec = deckSpecSchema.parse({ title: 'T', theme: 'paper', slides: [{ title: 'B', bullets: ['x'] }] });
+    const off = layoutDeck(spec, resolveDeckStyle('paper', null));
+    expect(off.every((s) => !s.backgroundTexture)).toBe(true);
+
+    const on = layoutDeck(spec, resolveDeckStyle('paper', null, { texture: true }));
+    expect(on.every((s) => s.backgroundTexture)).toBe(true);
   });
 });

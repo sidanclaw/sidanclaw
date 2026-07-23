@@ -9,8 +9,14 @@ import { z } from 'zod';
  * - pie/doughnut charts reject negative values (bar/line render true ranges)
  */
 
-export const DECK_THEMES = ['light', 'dark', 'brand'] as const;
+export const DECK_THEMES = ['light', 'dark', 'brand', 'paper'] as const;
 export type DeckTheme = (typeof DECK_THEMES)[number];
+
+export const DECK_FONT_PAIR_NAMES = ['editorial', 'neutral', 'geometric'] as const;
+export type DeckFontPair = (typeof DECK_FONT_PAIR_NAMES)[number];
+
+export const DECK_MOTIFS = ['none', 'sunburst', 'arc'] as const;
+export type DeckMotif = (typeof DECK_MOTIFS)[number];
 
 export const DECK_CHART_TYPES = ['bar', 'line', 'pie', 'doughnut'] as const;
 export type DeckChartType = (typeof DECK_CHART_TYPES)[number];
@@ -345,7 +351,27 @@ export const deckSpecShape = {
   theme: z
     .enum(DECK_THEMES)
     .optional()
-    .describe("Preset theme: 'light' (default), 'dark', or 'brand'. Ignored when a reference style is applied."),
+    .describe(
+      "Preset theme: 'light' (default), 'dark', 'brand' (navy + teal), or 'paper' (warm off-white + terracotta, editorial). Ignored when a reference style is applied.",
+    ),
+  fontPair: z
+    .enum(DECK_FONT_PAIR_NAMES)
+    .optional()
+    .describe(
+      "Typography: 'editorial' (Georgia headings), 'neutral' (all Arial), 'geometric' (Trebuchet headings). Ignored when a reference style is applied — that supplies its own fonts.",
+    ),
+  motif: z
+    .enum(DECK_MOTIFS)
+    .optional()
+    .describe(
+      "Decorative corner mark on the title and section slides: 'none', 'sunburst' (radiating fan) or 'arc' (concentric rings)",
+    ),
+  texture: z
+    .boolean()
+    .optional()
+    .describe(
+      'Subtle paper grain behind every slide. Off by default; adds about 28KB per slide, so leave it off for long decks.',
+    ),
   slides: z
     .array(deckSlideSchema)
     .min(1)
@@ -404,6 +430,9 @@ export const deckOpSchema = z.discriminatedUnion('op', [
     title: z.string().min(1).max(200).optional(),
     subtitle: z.string().max(300).nullable().optional().describe('null clears the subtitle'),
     theme: z.enum(DECK_THEMES).optional(),
+    fontPair: z.enum(DECK_FONT_PAIR_NAMES).optional(),
+    motif: z.enum(DECK_MOTIFS).optional(),
+    texture: z.boolean().optional(),
   }),
 ]);
 
@@ -446,6 +475,9 @@ export function applyDeckOps(spec: DeckSpec, ops: DeckOp[]): DeckSpec {
         if (op.title !== undefined) next = { ...next, title: op.title };
         if (op.subtitle !== undefined) next = { ...next, subtitle: op.subtitle ?? undefined };
         if (op.theme !== undefined) next = { ...next, theme: op.theme };
+        if (op.fontPair !== undefined) next = { ...next, fontPair: op.fontPair };
+        if (op.motif !== undefined) next = { ...next, motif: op.motif };
+        if (op.texture !== undefined) next = { ...next, texture: op.texture };
         break;
       }
     }

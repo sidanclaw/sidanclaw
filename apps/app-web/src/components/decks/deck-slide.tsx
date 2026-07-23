@@ -62,10 +62,46 @@ export function DeckSlide({
         overflow: "hidden",
       }}
     >
+      {layout.backgroundTexture ? <GrainOverlay /> : null}
       {layout.primitives.map((p, i) => (
         <Primitive key={i} p={p} scale={scale} workspaceId={workspaceId} />
       ))}
     </div>
+  );
+}
+
+/**
+ * Preview stand-in for the paper grain the pptx writer bakes in as a generated
+ * PNG. Encoding that PNG needs node:zlib, so the two renderers necessarily
+ * differ here; both are low-amplitude monochrome noise over the same surface,
+ * and at preview scale the grain is close to invisible either way. This is an
+ * acknowledged approximation, like text wrapping - see the deck-generation
+ * spec.
+ */
+const GRAIN_SVG =
+  "data:image/svg+xml;utf8," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120">' +
+      '<filter id="g"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2"/>' +
+      '<feColorMatrix type="saturate" values="0"/></filter>' +
+      '<rect width="120" height="120" filter="url(#g)"/></svg>',
+  );
+
+function GrainOverlay() {
+  return (
+    <div
+      aria-hidden
+      style={{
+        position: "absolute",
+        inset: 0,
+        backgroundImage: `url("${GRAIN_SVG}")`,
+        // Matches the writer's +/-3/255 amplitude closely enough to read as
+        // texture rather than as a visible pattern.
+        opacity: 0.05,
+        mixBlendMode: "multiply",
+        pointerEvents: "none",
+      }}
+    />
   );
 }
 
@@ -172,7 +208,7 @@ function Primitive({
             cy={Number(s.height) / 2}
             rx={Math.max(Number(s.width) / 2 - strokePx / 2, 0.5)}
             ry={Math.max(Number(s.height) / 2 - strokePx / 2, 0.5)}
-            fill={hex(p.fill)}
+            fill={p.fill ? hex(p.fill) : "none"}
             stroke={p.outline ? hex(p.outline.color) : undefined}
             strokeWidth={strokePx || undefined}
           />

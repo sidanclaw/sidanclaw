@@ -130,7 +130,8 @@ export type DeckPrimitive =
       transparencyPct?: number;
     }
   | { kind: 'lineSeg'; x1: number; y1: number; x2: number; y2: number; color: string; widthPt: number }
-  | { kind: 'ellipse'; box: DeckBox; fill: string; outline?: { color: string; widthPt: number } }
+  /** `fill` omitted = outline only (the `arc` motif's concentric rings). */
+  | { kind: 'ellipse'; box: DeckBox; fill?: string; outline?: { color: string; widthPt: number } }
   | {
       kind: 'pieArc';
       box: DeckBox;
@@ -160,6 +161,19 @@ export interface DeckSlideLayout {
   background: string;
   primitives: DeckPrimitive[];
   notes?: string;
+  /**
+   * Lay a paper grain over `background` before any primitive.
+   *
+   * A slide-level surface treatment, NOT a primitive — the same category as
+   * `background` itself, which each renderer already realises its own way. It
+   * has to be: the grain is a generated PNG (OOXML has no noise fill) and
+   * encoding one needs `node:zlib`, which cannot live in this module because
+   * app-web bundles it for the browser. So core generates a real PNG and the
+   * preview approximates with an SVG noise overlay — an acknowledged
+   * approximation, in the same class as text wrapping, and invisible at
+   * preview scale by design (±3/255 amplitude).
+   */
+  backgroundTexture?: boolean;
 }
 
 export function layoutDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] {
@@ -203,7 +217,54 @@ export function layoutDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] 
     if (slide.notes) out.notes = slide.notes;
     slides.push(out);
   });
+  if (style.texture) for (const s of slides) s.backgroundTexture = true;
   return slides;
+}
+
+// ---------------------------------------------------------------------------
+// Decorative motifs — a corner mark on the title and section slides only
+// ---------------------------------------------------------------------------
+
+const SUNBURST_RAYS = 9;
+
+/** Radiating half-fan, anchored on a baseline. */
+function sunburst(color: string, cx: number, cy: number, radius: number): DeckPrimitive[] {
+  const rays: DeckPrimitive[] = [];
+  for (let i = 0; i < SUNBURST_RAYS; i++) {
+    const angle = Math.PI + (Math.PI * i) / (SUNBURST_RAYS - 1);
+    rays.push({
+      kind: 'lineSeg',
+      x1: cx + Math.cos(angle) * radius * 0.18,
+      y1: cy + Math.sin(angle) * radius * 0.18,
+      x2: cx + Math.cos(angle) * radius,
+      y2: cy + Math.sin(angle) * radius,
+      color,
+      widthPt: 0.75,
+    });
+  }
+  rays.push({ kind: 'lineSeg', x1: cx - radius, y1: cy, x2: cx + radius, y2: cy, color, widthPt: 1 });
+  return rays;
+}
+
+/** Thin concentric rings, quieter than the sunburst. */
+function arcRings(color: string, cx: number, cy: number, radius: number): DeckPrimitive[] {
+  return [1, 0.72, 0.44].map((scale) => {
+    const r = radius * scale;
+    return {
+      kind: 'ellipse' as const,
+      box: { x: cx - r, y: cy - r, w: r * 2, h: r * 2 },
+      outline: { color, widthPt: 0.75 },
+    };
+  });
+}
+
+function motif(style: DeckStyle, color: string): DeckPrimitive[] {
+  const radius = 1.15;
+  const cx = DECK_PAGE_W - MARGIN - radius;
+  const cy = DECK_PAGE_H - MARGIN - 0.15;
+  if (style.motif === 'sunburst') return sunburst(color, cx, cy, radius);
+  if (style.motif === 'arc') return arcRings(color, cx, cy - radius * 0.55, radius * 0.75);
+  return [];
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +321,8 @@ function bulletBlock(style: DeckStyle, bullets: string[], box: DeckBox, fontSize
 
 function layoutTitleSlide(spec: DeckSpec, style: DeckStyle): DeckSlideLayout {
   const primitives: DeckPrimitive[] = [
+    // Motif first: it is a background mark, so the headline sits over it.
+    ...motif(style, style.accent),
     { kind: 'rect', box: { x: MARGIN, y: 2.35, w: 1.1, h: 0.14 }, fill: style.accent },
     plainText(spec.title, style.text, { x: MARGIN, y: 2.65, w: BODY_W, h: 1.9 }, {
       fontFace: style.headingFont,
@@ -357,6 +420,8 @@ function layoutImage(image: DeckImage, style: DeckStyle, box: DeckBox): DeckPrim
 
 function layoutSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const primitives: DeckPrimitive[] = [
+    // Inverted slide, so the mark takes the background colour to stay legible.
+    ...motif(style, style.background),
     plainText(slide.title, style.background, { x: MARGIN, y: 2.75, w: BODY_W, h: 1.6 }, {
       fontFace: style.headingFont,
       fontSizePt: TYPE.section,

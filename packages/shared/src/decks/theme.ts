@@ -1,4 +1,4 @@
-import type { DeckTheme } from './spec.js';
+import type { DeckFontPair, DeckMotif, DeckTheme } from './spec.js';
 
 /**
  * Deck styling — preset themes + reference-style derivation.
@@ -23,9 +23,34 @@ export interface DeckStyle {
   chartCategorical: string[];
   headingFont: string;
   bodyFont: string;
+  /**
+   * Decorative corner mark on title and section slides. Optional because a
+   * style extracted before motifs existed has no value for it; treated as
+   * 'none'.
+   */
+  motif?: DeckMotif;
+  /**
+   * Paper grain behind every slide. Optional for the same reason, and OFF by
+   * default even on `paper`: it re-embeds ~28KB per slide (data URIs are not
+   * deduped), so a 50-slide deck grows from ~435KB to ~1.85MB against the
+   * sendFile size gates. Measured, not estimated.
+   * Opt in per deck with `texture: true`.
+   */
+  texture?: boolean;
 }
 
 const DEFAULT_FONT = 'Arial';
+
+/**
+ * Only core web fonts present on both Windows and macOS. pptxgenjs cannot embed
+ * font files, so a missing face is silently substituted by the viewer — which
+ * reflows every box sized against the metrics in text-metrics.ts.
+ */
+export const DECK_FONT_PAIRS: Record<DeckFontPair, { heading: string; body: string }> = {
+  editorial: { heading: 'Georgia', body: 'Arial' },
+  neutral: { heading: 'Arial', body: 'Arial' },
+  geometric: { heading: 'Trebuchet MS', body: 'Arial' },
+};
 
 /** Preset palettes ported from sidanclaw-pptx-mcp (CVD + contrast validated). */
 export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
@@ -65,10 +90,66 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
     headingFont: DEFAULT_FONT,
     bodyFont: DEFAULT_FONT,
   },
+  paper: {
+    background: 'F5F3EE',
+    text: '1F1D1A',
+    muted: '736E64',
+    accent: '8C3A28',
+    accentAlt: '1F5673',
+    panel: 'EBE7DE',
+    grid: 'DAD4C8',
+    chartCategorical: ['2A78D6', 'EB6834', '1BAF7A', '4A3AA7', 'EDA100', 'E87BA4'],
+    headingFont: 'Georgia',
+    bodyFont: 'Arial',
+    motif: 'sunburst',
+  },
 };
 
-export function resolveDeckStyle(theme: DeckTheme | undefined, style: DeckStyle | null | undefined): DeckStyle {
-  return style ?? DECK_PRESET_STYLES[theme ?? 'light'];
+/** Spec-level look choices that are not part of an extracted style. */
+export interface DeckStyleOverrides {
+  fontPair?: DeckFontPair;
+  motif?: DeckMotif;
+  texture?: boolean;
+}
+
+/**
+ * Resolve the style a deck renders with: an extracted style overrides the theme
+ * preset, key by key.
+ *
+ * The merge is not cosmetic. A deck's style is persisted as jsonb, so a style
+ * extracted before a token existed is missing that key forever — and the deck
+ * stays editable, so a slide using the new token can be added to it later.
+ * (`accentAlt` shipped with the comparison layout: an older extracted style has
+ * none, and a comparison slide added to that deck would have rendered an
+ * undefined colour.) Filling gaps from the preset keeps old decks renderable
+ * without a data migration, and every future token gets the same protection.
+ */
+export function resolveDeckStyle(
+  theme: DeckTheme | undefined,
+  style: DeckStyle | null | undefined,
+  overrides?: DeckStyleOverrides,
+): DeckStyle {
+  const preset = DECK_PRESET_STYLES[theme ?? 'light'];
+  const base: DeckStyle = style ? { ...preset, ...stripUndefined(style) } : preset;
+
+  // `fontPair` is part of the theme layer, so an extracted style outranks it:
+  // asking to match a reference deck means matching its typography too.
+  // `motif` and `texture` are not extractable from a reference at all, so the
+  // spec always wins for those.
+  const fonts =
+    overrides?.fontPair && !style ? DECK_FONT_PAIRS[overrides.fontPair] : undefined;
+  if (!fonts && overrides?.motif === undefined && overrides?.texture === undefined) return base;
+
+  return {
+    ...base,
+    ...(fonts ? { headingFont: fonts.heading, bodyFont: fonts.body } : {}),
+    ...(overrides?.motif !== undefined ? { motif: overrides.motif } : {}),
+    ...(overrides?.texture !== undefined ? { texture: overrides.texture } : {}),
+  };
+}
+
+function stripUndefined(style: DeckStyle): Partial<DeckStyle> {
+  return Object.fromEntries(Object.entries(style).filter(([, v]) => v !== undefined)) as Partial<DeckStyle>;
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import {
   type DeckSpec,
   type DeckStyle,
 } from '@use-brian/shared/decks';
+import { grainDataUri } from './grain.js';
 
 // ESM/CJS interop guard: depending on the loader (node, vitest, tsx) the
 // default import is either the PptxGenJS class itself or a namespace whose
@@ -40,15 +41,33 @@ export async function writeDeckPptx(
   style: DeckStyle | null | undefined,
   images: ResolvedImages = new Map(),
 ): Promise<Buffer> {
-  const resolved = resolveDeckStyle(spec.theme, style);
+  const resolved = resolveDeckStyle(spec.theme, style, {
+    fontPair: spec.fontPair,
+    motif: spec.motif,
+    texture: spec.texture,
+  });
   const pptx = new PptxGenJS();
   pptx.defineLayout({ name: 'WIDE', width: DECK_PAGE_W, height: DECK_PAGE_H });
   pptx.layout = 'WIDE';
   pptx.title = spec.title;
 
+  // One tile per surface colour, reused across slides. pptxgenjs still
+  // re-embeds it per placement (it dedupes by file path, and this is a data
+  // URI) — the cache only saves regenerating the PNG.
+  const grain = new Map<string, string>();
+
   for (const slideLayout of layoutDeck(spec, resolved)) {
     const slide = pptx.addSlide();
     slide.background = { color: slideLayout.background };
+    if (slideLayout.backgroundTexture) {
+      let uri = grain.get(slideLayout.background);
+      if (!uri) {
+        uri = grainDataUri(slideLayout.background);
+        grain.set(slideLayout.background, uri);
+      }
+      // First, so every primitive sits on top of it.
+      slide.addImage({ data: uri, x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H });
+    }
     for (const primitive of slideLayout.primitives) {
       writePrimitive(slide, primitive, images);
     }
@@ -120,7 +139,8 @@ function writePrimitive(slide: Slide, p: DeckPrimitive, images: ResolvedImages):
         y: p.box.y,
         w: p.box.w,
         h: p.box.h,
-        fill: { color: p.fill },
+        // No fill = outline only (the `arc` motif's concentric rings).
+        fill: p.fill ? { color: p.fill } : { type: 'none' },
         line: p.outline ? { color: p.outline.color, width: p.outline.widthPt } : { type: 'none' },
       });
       return;

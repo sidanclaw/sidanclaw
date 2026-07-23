@@ -94,7 +94,9 @@ const LAYOUT_MANUAL =
   "use 'statement' or 'section' for title-only slides. One idea per slide. Vary the layouts across a deck. " +
   'Each layout renders only its own fields and rejects the rest, and titles are capped per layout ' +
   "(48 chars on most, 65 on 'statement', 42 on 'hero') because oversized text silently scales to unreadable — keep them short. " +
-  'Images: prefer `image.path` (a workspace file); `image.url` must be a public http(s) png/jpeg/gif (max 10MB, 10 per deck).'
+  'Images: prefer `image.path` (a workspace file); `image.url` must be a public http(s) png/jpeg/gif (max 10MB, 10 per deck). ' +
+  "Look: `theme` ('light' default, 'dark', 'brand' navy+teal, 'paper' warm editorial), `fontPair` ('editorial' Georgia headings, 'neutral' all Arial, 'geometric'), " +
+  "`motif` ('sunburst'/'arc' corner mark on title and section slides). `texture: true` adds paper grain but costs ~28KB per slide — leave it off unless the deck is short and the look matters."
 
 function preview(appOrigin: string | undefined, workspaceId: string, deckId: string): string | undefined {
   return appOrigin ? `${appOrigin.replace(/\/$/, '')}/w/${workspaceId}/decks/${deckId}` : undefined

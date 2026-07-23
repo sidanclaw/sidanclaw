@@ -61,7 +61,14 @@ export default function DeckPreviewPage({
   const layouts = useMemo(() => {
     if (!deck) return [];
     try {
-      return layoutDeck(deck.spec, resolveDeckStyle(deck.spec.theme, deck.style));
+      return layoutDeck(
+        deck.spec,
+        resolveDeckStyle(deck.spec.theme, deck.style, {
+          fontPair: deck.spec.fontPair,
+          motif: deck.spec.motif,
+          texture: deck.spec.texture,
+        }),
+      );
     } catch {
       return [];
     }

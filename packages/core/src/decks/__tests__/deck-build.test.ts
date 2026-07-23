@@ -4,6 +4,7 @@ import { deckSpecSchema, DECK_PRESET_STYLES } from '@use-brian/shared/decks';
 import { isPrivateAddress } from '../image-resolve.js';
 import { writeDeckPptx } from '../pptx-writer.js';
 import { extractDeckStyle, parseThemeScheme } from '../style-extract.js';
+import { grainDataUri } from '../grain.js';
 
 const baseSpec = deckSpecSchema.parse({
   title: 'Quarterly Review',
@@ -232,5 +233,50 @@ describe('[COMP:decks/builder] Phase-2 layouts build portable pptx', () => {
     const srcRect = xml.match(/<a:srcRect[^/]*\/>/)?.[0] ?? '';
     expect(srcRect).not.toBe('');
     expect(srcRect).toMatch(/(t|b|l|r)="[1-9]/); // a real crop, not all zeroes
+  });
+});
+
+describe('[COMP:decks/grain] Paper grain', () => {
+  it('emits a valid PNG and is deterministic per surface colour', () => {
+    const a = grainDataUri('F5F3EE');
+    expect(a.startsWith('data:image/png;base64,')).toBe(true);
+    const bytes = Buffer.from(a.split(',')[1], 'base64');
+    expect(bytes.subarray(1, 4).toString('ascii')).toBe('PNG');
+    // Rebuilding a deck must not churn the binary.
+    expect(grainDataUri('F5F3EE')).toBe(a);
+    expect(grainDataUri('111827')).not.toBe(a);
+  });
+
+  it('texture is off by default and costs real bytes when on', async () => {
+    const spec = (texture?: boolean) =>
+      deckSpecSchema.parse({
+        title: 'Paper',
+        theme: 'paper',
+        texture,
+        slides: Array.from({ length: 5 }, (_, i) => ({ title: `S${i}`, bullets: ['x'] })),
+      });
+    const plain = await writeDeckPptx(spec(), null);
+    const grained = await writeDeckPptx(spec(true), null);
+    expect(grained.length).toBeGreaterThan(plain.length);
+    // The reason texture is opt-in: data URIs are not deduped, so the tile
+    // re-embeds per slide. Assert the per-slide cost is real, not incidental.
+    const perSlide = (grained.length - plain.length) / 6; // 5 + auto title slide
+    expect(perSlide).toBeGreaterThan(10_000);
+  });
+
+  it('paper theme and font pairs build without an extracted style', async () => {
+    for (const fontPair of ['editorial', 'neutral', 'geometric'] as const) {
+      const buffer = await writeDeckPptx(
+        deckSpecSchema.parse({
+          title: 'T',
+          theme: 'paper',
+          fontPair,
+          motif: 'arc',
+          slides: [{ title: 'Part', layout: 'section' }],
+        }),
+        null,
+      );
+      expect(buffer.subarray(0, 2).toString('ascii')).toBe('PK');
+    }
   });
 });
