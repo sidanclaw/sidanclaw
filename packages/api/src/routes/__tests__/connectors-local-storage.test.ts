@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -33,7 +33,9 @@ function makeApp(over: { isAdmin?: boolean; existing?: { id: string } | null } =
 
 describe('[COMP:api/connectors-route] local directory storage', () => {
   it('connects an existing writable directory as a workspace storage instance', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'brian-files-'))
+    // realpath: the route canonicalizes the path, and on macOS tmpdir() (/tmp)
+    // is a symlink to /private/tmp — assert against the canonical form.
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'brian-files-')))
     try {
       const { app, createWorkspaceInstance } = makeApp()
       const res = await request(app).post('/api/connectors/local/connect').send({ workspaceId: WS, path: dir })
