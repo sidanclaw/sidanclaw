@@ -23,6 +23,7 @@ import {
   dragRect,
   isAreaSelectDrag,
   needsBandResync,
+  pressStartsDefiniteAreaSelect,
 } from "../block-area-select";
 import type {
   AreaSelectEvent,
@@ -207,6 +208,8 @@ describe("[COMP:app-web/block-area-select] Area select drag reducer", () => {
       selectionIsNodeRange: () => (
         calls.selectionIsNodeRange++, over.selectionIsNodeRange?.() ?? true
       ),
+      // Pane not scrolled unless a test says so — the scroll-anchor cases override it.
+      scrollTop: () => over.scrollTop?.() ?? 0,
     };
     return { probe, calls };
   }
@@ -402,6 +405,80 @@ describe("[COMP:app-web/block-area-select] Area select drag reducer", () => {
     ]);
     expect(ticks[2].clearSelection).toBe(false);
     expect(state).toEqual(AREA_SELECT_IDLE);
+  });
+
+  // --- Regression: the browser's own selection gesture (2026-07-23) -----------
+  // Confirmed in a real browser: clearing the DOM selection each move and
+  // cancelling `selectstart` both LOSE. The browser re-extends its selection
+  // AFTER our mousemove handler, PM's observer derives a TextSelection from it,
+  // and every dispatched NodeRangeSelection is clobbered before it can paint —
+  // so a margin drag showed 758 native chars and zero bands. mousedown is the
+  // only point at which the gesture can still be stopped.
+  it("a margin press asks to cancel the browser's selection gesture at mousedown", () => {
+    const { probe } = makeProbe({ bandInY: anyBand });
+    const r = areaSelectReducer(AREA_SELECT_IDLE, press(40, 100), probe);
+    expect(r.suppressNativeGesture).toBe(true);
+  });
+
+  it("a press over empty space also cancels it", () => {
+    const { probe } = makeProbe({ bandInY: () => null });
+    const r = areaSelectReducer(AREA_SELECT_IDLE, press(300, 900, true), probe);
+    expect(r.suppressNativeGesture).toBe(true);
+  });
+
+  it("a press on a block's own text does NOT cancel it", () => {
+    // Undecidable at mousedown: this stays a native text selection unless and
+    // until it crosses a block boundary. Cancelling here would break ordinary
+    // word-level selection, which is the whole regression risk of this gesture.
+    const { probe } = makeProbe({ bandInY: anyBand, posAt: () => 4 });
+    const r = areaSelectReducer(AREA_SELECT_IDLE, press(700, 100, true), probe);
+    expect(r.suppressNativeGesture).toBe(false);
+  });
+
+  it("pressStartsDefiniteAreaSelect: margin or empty space, never on-text", () => {
+    expect(pressStartsDefiniteAreaSelect({ startInEditor: false, startOnBlockRow: true })).toBe(true);
+    expect(pressStartsDefiniteAreaSelect({ startInEditor: true, startOnBlockRow: false })).toBe(true);
+    expect(pressStartsDefiniteAreaSelect({ startInEditor: true, startOnBlockRow: true })).toBe(false);
+  });
+
+  // --- Regression: the anchor is content-space, not screen-space (2026-07-23) --
+  it("keeps the blocks it started on while the page scrolls under the drag", () => {
+    // The reported symptom: drag down, the page auto-scrolls, and the blocks
+    // already banded at the TOP silently drop out. In the browser the band's
+    // `from` climbed 528 -> 1321 -> 2252 -> 2518 as the pane scrolled, because
+    // the band's far edge stayed pinned to a stale viewport row.
+    let scrollTop = 0;
+    const BLOCK_H = 100;
+    const probe: AreaSelectProbe = {
+      posAt: () => null,
+      // Blocks laid out down the document; a client-space band maps back through
+      // the current scroll offset, exactly like getBoundingClientRect does.
+      bandInY: (yMin, yMax) => {
+        const docMin = yMin + scrollTop;
+        const docMax = yMax + scrollTop;
+        const first = Math.max(0, Math.floor(docMin / BLOCK_H));
+        const last = Math.max(first, Math.floor(docMax / BLOCK_H));
+        return { from: first * BLOCK_H, to: (last + 1) * BLOCK_H };
+      },
+      crossesBlocks: () => false,
+      selectionIsNodeRange: () => true,
+      scrollTop: () => scrollTop,
+    };
+    let state = AREA_SELECT_IDLE;
+    const step = (ev: AreaSelectEvent) => {
+      const r = areaSelectReducer(state, ev, probe);
+      state = r.state;
+      return r;
+    };
+    step(press(40, 50)); // press on block 0 (doc y 50), pane unscrolled
+    expect(step(move(44, 150)).band).toEqual({ from: 0, to: 200 });
+    // The pane auto-scrolls a full 5 blocks while the cursor stays put.
+    scrollTop = 500;
+    const r = step(move(44, 150));
+    // Block 0 must STILL be the start of the band: the anchor rides the content.
+    expect(r.band?.from).toBe(0);
+    // ...and the band now reaches further down the document, not less far.
+    expect(r.band!.to).toBeGreaterThan(200);
   });
 
   it("a move with the primary button released ends the gesture", () => {

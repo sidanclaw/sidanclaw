@@ -18,25 +18,32 @@
  *      geometry** (which top-level blocks the drag's Y-band covers) — stable and
  *      independent of the horizontal position, so it works from any margin.
  *
- * Suppressing that native selection has to happen on EVERY move, not once at
- * engage. All three of the obvious one-shot levers are no-ops against a
- * selection gesture the browser has already begun: `user-select: none` is
- * consulted when a selection *starts*, so flipping it mid-drag doesn't abort the
- * live one; a single `removeAllRanges()` is undone by the very next mousemove;
- * and `preventDefault()` on **mousemove** doesn't cancel selection extension
- * (only `mousedown` / `selectstart` do). `view.focus()` made it actively worse —
- * prosemirror-view's `focus()` runs `selectionToDOM()`, writing a DOM selection
- * back for the still-live gesture to extend from — so we focus `view.dom`
- * directly instead and keep the keyboard-delete prerequisite without re-seeding a
- * range. Left unfixed the two selections rendered at once (a `::selection`
- * highlight racing the marquee) and, worse, ProseMirror's DOM observer re-derived
- * a `TextSelection` from the live DOM selection every frame and clobbered each
- * dispatched `NodeRangeSelection` — so the block bands never rendered, the
- * inline toolbar popped up mid-area-drag, and a drag across six blocks gave no
- * selection feedback at all beyond the rubber band. The band dispatch is
- * therefore also **self-healing** (`needsBandResync`): it re-asserts the range
- * whenever the state selection is no longer a `NodeRangeSelection`, not only when
- * the covered band changes.
+ * **The native selection must be cancelled at MOUSEDOWN. Nothing later works.**
+ * Measured in a real browser (2026-07-23): clearing the DOM selection on every
+ * move AND cancelling `selectstart` still left 758 native chars selected and
+ * ZERO bands painted. The trace showed why — each move cleared the selection and
+ * dispatched the band successfully (`selIsNodeRange` true right after), but the
+ * browser re-extended its selection *after* our mousemove handler returned,
+ * ProseMirror's DOM observer re-derived a `TextSelection` from it, and the band
+ * was clobbered before it could paint. Every frame. `selectstart` cannot help:
+ * it does not re-fire mid-drag. `user-select: none` cannot help: it is consulted
+ * when a selection *starts*. `preventDefault()` on mousemove cannot help: it does
+ * not cancel selection extension. And `view.focus()` actively hurts —
+ * prosemirror-view's `focus()` runs `selectionToDOM()`, re-seeding a range for
+ * the live gesture to extend.
+ *
+ * So the gesture calls `preventDefault()` on the **mousedown** itself, for the
+ * presses already known to be an area select (`pressStartsDefiniteAreaSelect` —
+ * the margin, or empty space). The browser then never starts a selection gesture
+ * at all. A press on a block's own text is undecidable at mousedown and is left
+ * alone, so ordinary word-level selection is untouched; the every-move clear and
+ * `needsBandResync` remain as the defense for that one case, where the drag can
+ * still convert to an area select by crossing a block boundary.
+ *
+ * Cancelling the browser's gesture also cancels the **auto-scroll** that used to
+ * ride along with it, so the gesture drives its own (`autoScrollTick`) on a frame
+ * loop — a cursor parked at the edge emits no further mousemoves, so the scroll
+ * has to keep running while the pointer is still.
  *
  * A drag that starts on text and stays inside one block is left to the native
  * text selection (`crossesBlocks`); a drag starting in the margin, over **empty
@@ -67,6 +74,12 @@
  * never pushed, so an in-block text drag (which must stay a native selection)
  * pays the per-block `getBoundingClientRect` sweep once, at the press, and never
  * again per move.
+ *
+ * The drag anchor lives in **content space**, not screen space (`startScrollTop`).
+ * A band measured from a fixed `startY` progressively drops the very blocks the
+ * drag began on as the page scrolls under it — observed as the band's `from`
+ * climbing 528 -> 1321 -> 2252 -> 2518 during one auto-scrolling drag, leaving
+ * only the last four blocks selected out of twenty-three.
  */
 
 import { Extension } from "@tiptap/core";
@@ -148,6 +161,11 @@ export type AreaSelectState = {
   phase: "idle" | "pending" | "engaged";
   startX: number;
   startY: number;
+  /** Scroll offset of the pane when the press landed. The anchor is stored in
+   *  CONTENT space, not screen space: `startY` alone is a viewport row, and the
+   *  page scrolls under the cursor mid-drag (auto-scroll at the edge), so a band
+   *  measured from a fixed `startY` silently drops the blocks the drag began on. */
+  startScrollTop: number;
   startInEditor: boolean;
   startPos: number | null;
   startOnBlockRow: boolean;
@@ -159,6 +177,7 @@ export const AREA_SELECT_IDLE: AreaSelectState = Object.freeze({
   phase: "idle",
   startX: 0,
   startY: 0,
+  startScrollTop: 0,
   startInEditor: false,
   startPos: null,
   startOnBlockRow: false,
@@ -189,6 +208,9 @@ export type AreaSelectProbe = {
   crossesBlocks: (a: number, b: number) => boolean;
   /** Whether the editor's current selection is still a `NodeRangeSelection`. */
   selectionIsNodeRange: () => boolean;
+  /** Current scroll offset of the editor's scroll pane. Read every move so the
+   *  anchor can be kept in content space while the page scrolls under the drag. */
+  scrollTop: () => number;
 };
 
 /** The next state, plus the effects the adapter must apply this tick — in order:
@@ -202,6 +224,10 @@ export type AreaSelectResult = {
   focusEditor: boolean;
   band: BlockBand | null;
   marquee: ViewportRect | null;
+  /** Cancel the browser's own selection gesture at its source (`preventDefault`
+   *  on mousedown). Emitted on the press tick when the press is ALREADY known to
+   *  be an area select. See `pressStartsDefiniteAreaSelect`. */
+  suppressNativeGesture: boolean;
 };
 
 const NO_EFFECTS: Omit<AreaSelectResult, "state"> = {
@@ -210,7 +236,28 @@ const NO_EFFECTS: Omit<AreaSelectResult, "state"> = {
   focusEditor: false,
   band: null,
   marquee: null,
+  suppressNativeGesture: false,
 };
+
+/** Whether a press is ALREADY, at mousedown, known to be an area select — i.e.
+ *  the two `isAreaSelectDrag` clauses that need no movement to decide: a press
+ *  in the margin (outside the editable) or over empty space (no block on the
+ *  press row). Only a press on a block's own text is undecidable at mousedown,
+ *  because it stays a native text selection until it crosses a block boundary.
+ *
+ *  This is the ONLY point at which the browser's selection gesture can still be
+ *  stopped. Once the press is through, the browser extends its selection on every
+ *  mousemove AFTER our handler runs, and ProseMirror's DOM observer re-derives a
+ *  `TextSelection` from it and clobbers the dispatched `NodeRangeSelection` — so
+ *  the block bands never survive to paint. `selectstart` cannot save it (it does
+ *  not re-fire mid-drag), and neither can clearing the selection each move (the
+ *  browser simply re-extends after the clear). Pure/testable. */
+export function pressStartsDefiniteAreaSelect(opts: {
+  startInEditor: boolean;
+  startOnBlockRow: boolean;
+}): boolean {
+  return !opts.startOnBlockRow || !opts.startInEditor;
+}
 
 /** The whole gesture as a pure state machine. Composes the predicates above:
  *  `isAreaSelectDrag` decides engagement, `needsBandResync` decides re-dispatch,
@@ -227,22 +274,30 @@ export function areaSelectReducer(
   probe: AreaSelectProbe,
 ): AreaSelectResult {
   if (event.type === "press") {
+    const startOnBlockRow = probe.bandInY(event.y, event.y) !== null;
     return {
       state: {
         phase: "pending",
         startX: event.x,
         startY: event.y,
+        startScrollTop: probe.scrollTop(),
         startInEditor: event.inEditor,
         startPos: event.inEditor ? probe.posAt(event.x, event.y) : null,
         // Whether a block actually sits on the press row. When none does — the
         // empty tail padding, a blank page, the white space beside an empty
         // region — the drag is a pure area select over emptiness: it still
         // engages and rubber-bands like a desktop sweep.
-        startOnBlockRow: probe.bandInY(event.y, event.y) !== null,
+        startOnBlockRow,
         lastFrom: -1,
         lastTo: -1,
       },
       ...NO_EFFECTS,
+      // The one chance to stop the browser's selection gesture. Skipped for a
+      // press on a block's own text, which must stay a normal text selection.
+      suppressNativeGesture: pressStartsDefiniteAreaSelect({
+        startInEditor: event.inEditor,
+        startOnBlockRow,
+      }),
     };
   }
 
@@ -285,10 +340,12 @@ export function areaSelectReducer(
     focusEditor = true;
   }
 
-  const band = probe.bandInY(
-    Math.min(next.startY, event.y),
-    Math.max(next.startY, event.y),
-  );
+  // The anchor in CURRENT screen space: where the press row has been carried to
+  // by any scrolling since. Without this the band's far edge stays pinned to a
+  // stale viewport row, so an auto-scrolling drag progressively drops the very
+  // blocks it started on (they slide past the fixed `startY`).
+  const anchorY = next.startY - (probe.scrollTop() - next.startScrollTop);
+  const band = probe.bandInY(Math.min(anchorY, event.y), Math.max(anchorY, event.y));
   let dispatch: BlockBand | null = null;
   if (
     band &&
@@ -308,7 +365,8 @@ export function areaSelectReducer(
     clearSelection: true,
     focusEditor,
     band: dispatch,
-    marquee: dragRect(next.startX, next.startY, event.x, event.y),
+    marquee: dragRect(next.startX, anchorY, event.x, event.y),
+    suppressNativeGesture: false,
   };
 }
 
@@ -396,6 +454,7 @@ export const BlockAreaSelect = Extension.create({
             bandInY: (yMin, yMax) => blockRangeInBand(view, yMin, yMax),
             crossesBlocks: (a, b) => crossesBlocks(view.state.doc, a, b),
             selectionIsNodeRange: () => isNodeRangeSelection(view.state.selection),
+            scrollTop: () => pane.scrollTop,
           };
 
           /** Drop whatever native selection the browser has grown. The reducer
@@ -482,6 +541,52 @@ export const BlockAreaSelect = Extension.create({
             d.removeEventListener("mousemove", onMove, true);
             d.removeEventListener("mouseup", onUp, true);
             d.removeEventListener("selectstart", onSelectStart, true);
+            stopAutoScroll();
+          };
+
+          /** Edge auto-scroll. The gesture has to drive this ITSELF: cancelling the
+           *  browser's selection gesture at mousedown (the only way to stop it
+           *  clobbering the band — see `pressStartsDefiniteAreaSelect`) also
+           *  cancels the auto-scroll that used to come free with it, and without
+           *  scrolling a selection can never extend past one screenful.
+           *
+           *  It runs on a frame loop rather than off `mousemove`, because a cursor
+           *  parked at the edge stops emitting moves — the scroll has to keep
+           *  going while the pointer is still. Each frame re-applies a move at the
+           *  LAST cursor point so the band recomputes against the new scroll
+           *  offset (the reducer's content-space anchor does the compensating). */
+          const EDGE_ZONE_PX = 48;
+          const EDGE_SPEED_PX = 16;
+          let lastX = 0;
+          let lastY = 0;
+          let autoScrollRaf = 0;
+
+          const stopAutoScroll = () => {
+            if (autoScrollRaf) cancelAnimationFrame(autoScrollRaf);
+            autoScrollRaf = 0;
+          };
+
+          const autoScrollTick = () => {
+            autoScrollRaf = 0;
+            if (state.phase !== "engaged") return;
+            const r = pane.getBoundingClientRect();
+            let dy = 0;
+            if (lastY > r.bottom - EDGE_ZONE_PX) dy = EDGE_SPEED_PX;
+            else if (lastY < r.top + EDGE_ZONE_PX) dy = -EDGE_SPEED_PX;
+            if (dy !== 0) {
+              const before = pane.scrollTop;
+              pane.scrollTop += dy;
+              // Only re-band if the pane actually moved — at either end of the
+              // document this is a no-op and re-dispatching would just churn.
+              if (pane.scrollTop !== before) {
+                apply({ type: "move", x: lastX, y: lastY, primaryButton: true });
+              }
+            }
+            autoScrollRaf = requestAnimationFrame(autoScrollTick);
+          };
+
+          const startAutoScroll = () => {
+            if (!autoScrollRaf) autoScrollRaf = requestAnimationFrame(autoScrollTick);
           };
 
           /** Run one gesture event through the reducer and apply what it asks for.
@@ -502,11 +607,14 @@ export const BlockAreaSelect = Extension.create({
             if (r.marquee) paintMarquee(r.marquee);
             else clearMarquee();
             if (wasEngaged && !r.engaged) setSuppressed(false);
+            if (r.focusEditor) startAutoScroll(); // engage tick
             if (state.phase === "idle") untrackPointer();
             return r;
           };
 
           function onMove(e: MouseEvent) {
+            lastX = e.clientX;
+            lastY = e.clientY;
             const r = apply({
               type: "move",
               x: e.clientX,
@@ -522,18 +630,25 @@ export const BlockAreaSelect = Extension.create({
 
           function onDown(e: MouseEvent) {
             if (e.button !== 0 || !view.editable || isInteractiveTarget(e.target)) return;
-            apply({
+            const r = apply({
               type: "press",
               x: e.clientX,
               y: e.clientY,
               inEditor: view.dom.contains(e.target as Node),
             });
+            // Stop the browser starting a text-selection gesture at all. This is
+            // the only moment it can be stopped; every later lever loses the race
+            // (see `pressStartsDefiniteAreaSelect`). Focus is normally a
+            // side-effect of mousedown, so the gesture takes it explicitly on
+            // engage — the keyboard-delete prerequisite still holds.
+            if (r.suppressNativeGesture) e.preventDefault();
             trackPointer();
           }
 
           pane.addEventListener("mousedown", onDown, true);
           return {
             destroy() {
+              stopAutoScroll();
               clearMarquee();
               pane.removeEventListener("mousedown", onDown, true);
               untrackPointer();
