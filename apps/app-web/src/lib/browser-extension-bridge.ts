@@ -75,6 +75,54 @@ export async function detectExtension(opts: {
   return response?.ok === true;
 }
 
+/**
+ * Ask the extension to open its browser-control permission window.
+ *
+ * A web page can never raise Chrome's permission prompt itself:
+ * `chrome.permissions.request()` is extension-only and must run inside a user
+ * gesture in an extension context. So this asks the extension to open the one
+ * page with a button that can. The user still clicks Allow there and then
+ * accepts Chrome's own dialog; sending this grants nothing on its own.
+ *
+ * `already_granted` is kept distinct from `prompted` on purpose - telling
+ * someone to go and allow something they already allowed is how a working
+ * feature reads as broken.
+ */
+export type ControlPromptResult = "prompted" | "already_granted" | "not_installed";
+
+export async function requestBrowserControl(opts: {
+  extensionId?: string;
+  send: ExtensionMessenger | null;
+}): Promise<ControlPromptResult> {
+  const extensionId = opts.extensionId ?? EXTENSION_ID;
+  if (!extensionId || !opts.send) return "not_installed";
+  const response = (await ask(opts.send, extensionId, { type: "request-control" })) as
+    | { ok?: boolean; hasControl?: boolean }
+    | null;
+  if (response === null || response.ok !== true) return "not_installed";
+  return response.hasControl === true ? "already_granted" : "prompted";
+}
+
+/**
+ * Whether the extension currently holds the browser-control grant. `null` when
+ * nothing answered — a caller must not read "no answer" as "not granted" and
+ * start nagging about an install that is not there.
+ */
+export async function extensionHasControl(opts: {
+  extensionId?: string;
+  send: ExtensionMessenger | null;
+}): Promise<boolean | null> {
+  const extensionId = opts.extensionId ?? EXTENSION_ID;
+  if (!extensionId || !opts.send) return null;
+  const response = (await ask(opts.send, extensionId, { type: "status" })) as
+    | { ok?: boolean; hasControl?: boolean }
+    | null;
+  if (response === null || response.ok !== true) return null;
+  // An older extension build has no `hasControl` and held the permission from
+  // install, so absence means granted — never "missing".
+  return response.hasControl !== false;
+}
+
 export async function pairViaExtension(opts: {
   extensionId?: string;
   relayUrl: string;

@@ -5653,6 +5653,8 @@ export const zh: Dictionary = {
         connected: "我的瀏覽器",
         connectedBadge: "已連接",
         connectAria: "將你自己的 Chrome 連接到 Use Brian",
+        allow: "允許操作瀏覽器",
+        allowAria: "允許 Use Brian 操作這個瀏覽器",
         manageAria: "管理我的瀏覽器連接",
       },
     },

@@ -5931,6 +5931,8 @@ export const en = {
         connected: "My Browser",
         connectedBadge: "Connected",
         connectAria: "Connect your own Chrome to Use Brian",
+        allow: "Allow browser control",
+        allowAria: "Allow Use Brian to manage this browser",
         manageAria: "Manage the My Browser connection",
       },
     },

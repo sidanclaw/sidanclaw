@@ -33,7 +33,9 @@ import { useT } from "@/lib/i18n/client";
 import { openWorkspaceSettings } from "@/components/settings-modal/settings-modal";
 import {
   chromeMessenger,
+  extensionHasControl,
   pairViaExtension,
+  requestBrowserControl,
 } from "@/lib/browser-extension-bridge";
 import {
   getBrowserExtensionStatus,
@@ -54,13 +56,29 @@ export function ConnectBrowserRow({ workspaceId }: { workspaceId: string }) {
   const c = useT().computer.connectBrowser.sidebarRow;
 
   const [status, setStatus] = useState<BrowserExtensionStatus | null>(null);
+  /**
+   * Whether the extension holds the optional `debugger` grant. `null` means no
+   * extension answered, which is NOT the same as "not granted" — nagging a user
+   * to allow something on a machine with no extension installed is worse than
+   * saying nothing, so only an explicit `false` shows the allow state.
+   */
+  const [hasControl, setHasControl] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   // Survives the await in `onConnect` — an unmount mid-pair must not set state.
   const alive = useRef(true);
 
   const refreshStatus = useCallback(async () => {
     const next = await getBrowserExtensionStatus();
-    if (alive.current) setStatus(next);
+    if (!alive.current) return;
+    setStatus(next);
+    // Only worth asking the extension once the relay says this user has one
+    // connected; off that path the probe is a guaranteed null.
+    if (!next.connected) {
+      setHasControl(null);
+      return;
+    }
+    const control = await extensionHasControl({ send: chromeMessenger() });
+    if (alive.current) setHasControl(control);
   }, []);
 
   useEffect(() => {
@@ -77,9 +95,26 @@ export function ConnectBrowserRow({ workspaceId }: { workspaceId: string }) {
   }, [refreshStatus]);
 
   const connected = status?.connected === true;
+  // Paired, but the user has not granted browser control. Only an explicit
+  // `false` counts — see `hasControl`.
+  const needsControl = connected && hasControl === false;
 
   const onClick = useCallback(async () => {
     if (busy) return;
+    // Paired but not allowed to drive: the one thing worth doing is asking for
+    // the permission. Chrome will not let a web page raise its own prompt, so
+    // the extension opens the window that can and the user clicks Allow there.
+    if (needsControl) {
+      setBusy(true);
+      const result = await requestBrowserControl({ send: chromeMessenger() });
+      if (alive.current) setBusy(false);
+      // `not_installed` here means the extension stopped answering between the
+      // probe and the click. The panel is the honest fallback: it owns the
+      // install CTA, which is the actual remedy.
+      if (result === "not_installed") openWorkspaceSettings("ws-browser-profiles");
+      else await refreshStatus();
+      return;
+    }
     // Connected: nothing to pair, so the click is "let me look at this" —
     // hand it to the panel, which owns profiles + disconnect.
     if (connected || !workspaceId) {
@@ -108,7 +143,7 @@ export function ConnectBrowserRow({ workspaceId }: { workspaceId: string }) {
     // Not installed, wrong build id, or refused: the panel has the install CTA
     // and the copy fields, and the token we just minted is still valid there.
     openWorkspaceSettings("ws-browser-profiles");
-  }, [busy, connected, workspaceId, refreshStatus]);
+  }, [busy, connected, needsControl, workspaceId, refreshStatus]);
 
   // No relay on this deployment (OSS, or unconfigured) — and nothing rendered
   // until the first probe answers, so the label never flips under the cursor.
@@ -120,15 +155,23 @@ export function ConnectBrowserRow({ workspaceId }: { workspaceId: string }) {
         type="button"
         onClick={() => void onClick()}
         disabled={busy}
-        aria-label={connected ? c.manageAria : c.connectAria}
-        title={connected ? c.manageAria : c.connectAria}
+        aria-label={
+          needsControl ? c.allowAria : connected ? c.manageAria : c.connectAria
+        }
+        title={needsControl ? c.allowAria : connected ? c.manageAria : c.connectAria}
         className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-foreground disabled:opacity-60"
       >
         <Globe className="size-[15px] shrink-0" />
         <span className="min-w-0 flex-1 truncate">
-          {busy ? c.connecting : connected ? c.connected : c.connect}
+          {busy
+            ? c.connecting
+            : needsControl
+              ? c.allow
+              : connected
+                ? c.connected
+                : c.connect}
         </span>
-        {connected && !busy ? (
+        {connected && !needsControl && !busy ? (
           <span className="flex shrink-0 items-center gap-1 text-[10px] font-medium text-muted-foreground">
             <span className="size-1.5 rounded-full bg-primary" aria-hidden />
             {c.connectedBadge}

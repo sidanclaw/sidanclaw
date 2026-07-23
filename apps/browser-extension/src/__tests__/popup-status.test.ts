@@ -34,6 +34,25 @@ describe('[COMP:ext/agent] Popup status line', () => {
     )
   })
 
+  it('outranks a healthy socket when browser control has not been granted', () => {
+    // The exact lie this status line exists to stop telling: the relay is up so
+    // the socket reads "Connected", while every task refuses.
+    const line = statusLine({ state: 'ready', hasControl: false })
+    expect(line).not.toContain('Connected.')
+    expect(line.toLowerCase()).toContain('not allowed to manage this browser')
+    // It outranks the stopped label too — a grant the user never gave is the
+    // thing they have to fix first.
+    expect(statusLine({ state: 'ready', stopped: true, hasControl: false })).toBe(line)
+  })
+
+  it('treats an older background with no hasControl field as granted', () => {
+    // The field is absent when the popup is newer than the service worker
+    // mid-upgrade. Inventing a permission warning there would send the user
+    // hunting for a button to grant something they already have.
+    expect(statusLine({ state: 'ready' })).toContain('Connected.')
+    expect(statusLine({ state: 'ready', hasControl: true })).toContain('Connected.')
+  })
+
   it('falls back to the raw state rather than rendering nothing', () => {
     expect(statusLine({ state: 'some-future-state' })).toContain('some-future-state')
     expect(statusLine({})).toContain('Not paired')

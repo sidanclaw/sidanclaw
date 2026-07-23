@@ -21,9 +21,13 @@ vi.mock("@/lib/api/computer", () => ({
 }));
 
 const pairViaExtension = vi.fn();
+const extensionHasControl = vi.fn();
+const requestBrowserControl = vi.fn();
 vi.mock("@/lib/browser-extension-bridge", () => ({
   chromeMessenger: () => null,
   pairViaExtension: (...a: unknown[]) => pairViaExtension(...a),
+  extensionHasControl: (...a: unknown[]) => extensionHasControl(...a),
+  requestBrowserControl: (...a: unknown[]) => requestBrowserControl(...a),
 }));
 
 const openWorkspaceSettings = vi.fn();
@@ -70,6 +74,8 @@ describe("[COMP:app-web/connect-browser-row] My Browser sidebar row", () => {
     vi.clearAllMocks();
     pairBrowserExtension.mockResolvedValue(PAIRING);
     pairViaExtension.mockResolvedValue("paired");
+    extensionHasControl.mockResolvedValue(true);
+    requestBrowserControl.mockResolvedValue("prompted");
   });
 
   it("renders nothing where the deployment has no relay configured", async () => {
@@ -131,6 +137,44 @@ describe("[COMP:app-web/connect-browser-row] My Browser sidebar row", () => {
 
     expect(pairViaExtension).not.toHaveBeenCalled();
     expect(openWorkspaceSettings).toHaveBeenCalledWith("ws-browser-profiles");
+  });
+
+  it("asks for browser control when the extension is paired but not allowed", async () => {
+    getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: true });
+    extensionHasControl.mockResolvedValue(false);
+    const { el } = await mount();
+
+    expect(el.textContent).toContain(c.allow);
+    // "Connected" would be a lie here: the socket is up but nothing can run.
+    expect(el.textContent).not.toContain(c.connectedBadge);
+
+    await click(el);
+
+    expect(requestBrowserControl).toHaveBeenCalled();
+    expect(pairBrowserExtension).not.toHaveBeenCalled();
+    expect(openWorkspaceSettings).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the panel if the extension stops answering before the allow click", async () => {
+    getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: true });
+    extensionHasControl.mockResolvedValue(false);
+    requestBrowserControl.mockResolvedValue("not_installed");
+    const { el } = await mount();
+
+    await click(el);
+
+    expect(openWorkspaceSettings).toHaveBeenCalledWith("ws-browser-profiles");
+  });
+
+  it("never shows the allow state when no extension answered the control probe", async () => {
+    // `null` is "we could not ask", not "not granted" — nagging someone to
+    // allow something on a machine with no extension is worse than silence.
+    getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: true });
+    extensionHasControl.mockResolvedValue(null);
+    const { el } = await mount();
+
+    expect(el.textContent).not.toContain(c.allow);
+    expect(el.textContent).toContain(c.connectedBadge);
   });
 
   it("opens the panel to manage an already-connected browser instead of re-pairing", async () => {
