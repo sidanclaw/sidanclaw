@@ -27,12 +27,12 @@ export async function probeRecordingDuration(input: string): Promise<number> {
 }
 
 export async function extractRecordingAudio(input: string): Promise<{ buffer: Buffer; mime: string }> {
-  const outPath = join(tmpdir(), `recording-${randomUUID()}.aac`)
+  const outPath = join(tmpdir(), `recording-${randomUUID()}.m4a`)
   try {
     try {
       await execFileAsync('ffmpeg', [
         '-v', 'error', '-y', '-i', input, '-vn', '-ac', '1', '-ar', '16000',
-        '-c:a', 'aac', '-b:a', '24k', '-f', 'adts', outPath,
+        '-c:a', 'aac', '-b:a', '24k', '-movflags', '+faststart', '-f', 'mp4', outPath,
       ], { timeout: 900_000, maxBuffer: 1 << 20 })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -40,7 +40,7 @@ export async function extractRecordingAudio(input: string): Promise<{ buffer: Bu
     }
     const buffer = await readFile(outPath)
     if (buffer.length === 0) throw new Error('ffmpeg produced an empty audio track')
-    return { buffer, mime: 'audio/aac' }
+    return { buffer, mime: 'audio/mp4' }
   } finally {
     await unlink(outPath).catch(() => {})
   }

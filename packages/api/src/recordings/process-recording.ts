@@ -44,13 +44,34 @@ export async function processOpenRecording(
   if (durationMs > 180 * 60 * 1000) throw new Error('recording exceeds the 180 minute limit')
   const audio = await (deps.extract ?? extractRecordingAudio)(readUrl)
   const recording = await (deps.getRecording ?? getRecordingSystem)(job.recordingId)
-  const transcription = await deps.transcriber.transcribe({
-    buffer: audio.buffer,
-    mime: audio.mime,
-    durationMs,
-    sourceUrl: readUrl,
-    displayName: recording?.title ?? recording?.fileName ?? undefined,
-  })
+  // URL-submit providers cannot reliably treat the original video container as
+  // audio. For local storage, stage the already-extracted 16 kHz M4A track behind
+  // the public signed endpoint, then remove it as soon as transcription settles.
+  const stagedKey = source.storageUri?.startsWith('file://')
+    ? `${source.gcsKey}.transcription.m4a`
+    : null
+  let transcriptionUrl = readUrl
+  if (stagedKey) {
+    await storage.writeBlob(stagedKey, audio.buffer, {
+      workspaceId: episode.workspaceId,
+      createdByUserId: job.actingUserId,
+      mime: audio.mime,
+    })
+    transcriptionUrl = await storage.signedReadUrl(stagedKey, 3600)
+  }
+
+  let transcription: Awaited<ReturnType<RecordingTranscriber['transcribe']>>
+  try {
+    transcription = await deps.transcriber.transcribe({
+      buffer: audio.buffer,
+      mime: audio.mime,
+      durationMs,
+      sourceUrl: transcriptionUrl,
+      displayName: recording?.title ?? recording?.fileName ?? undefined,
+    })
+  } finally {
+    if (stagedKey) await storage.deleteBlob(stagedKey).catch(() => {})
+  }
   if (transcription.utterances.length === 0) throw new Error('transcriber returned an empty transcript')
 
   const segments = segmentTranscript(transcription.utterances)
