@@ -5925,6 +5925,14 @@ export const en = {
       copy: "Copy",
       copied: "Copied",
       refresh: "Refresh status",
+      sidebarRow: {
+        connect: "Connect my browser",
+        connecting: "Connecting...",
+        connected: "My Browser",
+        connectedBadge: "Connected",
+        connectAria: "Connect your own Chrome to Use Brian",
+        manageAria: "Manage the My Browser connection",
+      },
     },
     profiles: {
       title: "Browser profiles",
