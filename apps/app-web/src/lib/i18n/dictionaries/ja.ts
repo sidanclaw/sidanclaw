@@ -5712,6 +5712,8 @@ export const ja: Dictionary = {
         connected: "マイブラウザ",
         connectedBadge: "接続済み",
         connectAria: "自分の Chrome を Use Brian に接続します",
+        allow: "ブラウザの操作を許可",
+        allowAria: "Use Brian にこのブラウザの操作を許可します",
         manageAria: "マイブラウザの接続を管理します",
       },
     },

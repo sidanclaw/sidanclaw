@@ -14,7 +14,9 @@ const manifest = JSON.parse(
   readFileSync(fileURLToPath(new URL('../../static/manifest.json', import.meta.url)), 'utf8'),
 ) as {
   permissions?: string[]
+  optional_permissions?: string[]
   host_permissions?: string[]
+  optional_host_permissions?: string[]
   externally_connectable?: { matches?: string[] }
   content_scripts?: unknown[]
 }
@@ -24,17 +26,50 @@ describe('[COMP:ext/agent] Manifest — narrow permissions (my-browser.md §6)',
     expect(manifest.host_permissions ?? []).toEqual([])
   })
 
+  it('requests no OPTIONAL host permissions either', () => {
+    // An optional host grant is still a host grant once accepted, and it would
+    // be asked for at the moment a user is most inclined to say yes to
+    // anything. The §6 refusal has to cover both lists or it covers neither.
+    expect(manifest.optional_host_permissions ?? []).toEqual([])
+  })
+
   it('never grants <all_urls> in any permission list', () => {
-    const all = [...(manifest.permissions ?? []), ...(manifest.host_permissions ?? [])]
+    const all = [
+      ...(manifest.permissions ?? []),
+      ...(manifest.optional_permissions ?? []),
+      ...(manifest.host_permissions ?? []),
+      ...(manifest.optional_host_permissions ?? []),
+    ]
     expect(all).not.toContain('<all_urls>')
   })
 
   it('keeps only the narrow permission set', () => {
-    expect(new Set(manifest.permissions)).toEqual(new Set(['debugger', 'tabs', 'storage']))
+    expect(new Set(manifest.permissions)).toEqual(new Set(['tabs', 'storage']))
   })
 
   it('declares no content scripts', () => {
     expect(manifest.content_scripts ?? []).toEqual([])
+  })
+})
+
+/**
+ * Browser control is asked for, not assumed. `debugger` is the capability that
+ * actually drives the browser, so it is the one a user should grant
+ * deliberately, be able to refuse while keeping the extension, and take back
+ * from chrome://extensions without losing their pairing. At install it bought
+ * them nothing to accept — nothing works until they pair anyway — while making
+ * the scariest grant the price of entry.
+ *
+ * Locks both halves: `debugger` stays out of the install-time set, and the
+ * optional list does not quietly become a second place grants accumulate.
+ */
+describe('[COMP:ext/browser-control-permission] Manifest — debugger is opt-in', () => {
+  it('does not take browser control at install time', () => {
+    expect(manifest.permissions ?? []).not.toContain('debugger')
+  })
+
+  it('offers browser control as the only optional permission', () => {
+    expect(new Set(manifest.optional_permissions)).toEqual(new Set(['debugger']))
   })
 })
 
