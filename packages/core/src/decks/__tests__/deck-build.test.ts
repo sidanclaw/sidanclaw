@@ -172,3 +172,65 @@ describe('[COMP:decks/image-resolve] SSRF private-address detection', () => {
     }
   });
 });
+
+describe('[COMP:decks/builder] Phase-2 layouts build portable pptx', () => {
+  const PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+
+  it('renders all five new layouts, one slide each, no native tables or charts', async () => {
+    const spec = deckSpecSchema.parse({
+      title: 'Everything',
+      slides: [
+        { title: 'Ship it', layout: 'hero', image: { path: 'hero.png' }, subtext: 'Q3' },
+        {
+          title: 'Before / After',
+          layout: 'comparison',
+          columns: [
+            { heading: 'Before', bullets: ['slow', 'manual'] },
+            { heading: 'After', bullets: ['fast'] },
+          ],
+        },
+        { title: 'Roadmap', layout: 'timeline', steps: [{ label: 'Q1', detail: 'build' }, { label: 'Q2' }] },
+        { title: 'Agenda', layout: 'agenda', bullets: ['One', 'Two', 'Three', 'Four', 'Five', 'Six'] },
+        {
+          title: 'Pricing',
+          layout: 'table',
+          table: { headers: ['Plan', 'Price'], rows: [['Free', '$0'], ['Pro', '$20']] },
+        },
+      ],
+    });
+    const buffer = await writeDeckPptx(
+      spec,
+      null,
+      new Map([['hero.png', { data: `image/png;base64,${PNG.toString('base64')}`, width: 2, height: 1 }]]),
+    );
+    expect(buffer.subarray(0, 2).toString('ascii')).toBe('PK');
+    expect(countSlides(buffer)).toBe(6);
+    // Keynote drops both embedded chart parts and (visually) mishandles nothing
+    // here because the table is shapes, not a native OOXML table.
+    expect(buffer.includes('ppt/charts/chart')).toBe(false);
+    expect(buffer.includes('<a:tbl>')).toBe(false);
+  });
+
+  it('hero image is cropped to cover, not stretched (non-zero srcRect)', async () => {
+    // pptxgenjs reads the source ratio off w/h and only then applies `sizing`;
+    // passing the frame for both yields a zero srcRect and silently stretches.
+    const spec = deckSpecSchema.parse({
+      title: 'Hero',
+      slides: [{ title: 'Wide', layout: 'hero', image: { path: 'hero.png' } }],
+    });
+    const buffer = await writeDeckPptx(
+      spec,
+      null,
+      // A 1:1 source in a 16:9 frame must crop vertically.
+      new Map([['hero.png', { data: `image/png;base64,${PNG.toString('base64')}`, width: 100, height: 100 }]]),
+    );
+    const zip = await JSZip.loadAsync(buffer);
+    const xml = (await zip.file('ppt/slides/slide2.xml')?.async('string')) ?? '';
+    const srcRect = xml.match(/<a:srcRect[^/]*\/>/)?.[0] ?? '';
+    expect(srcRect).not.toBe('');
+    expect(srcRect).toMatch(/(t|b|l|r)="[1-9]/); // a real crop, not all zeroes
+  });
+});

@@ -1,5 +1,14 @@
-import type { DeckChart, DeckImage, DeckSlide, DeckSpec, DeckStat } from './spec.js';
-import { fitOneLine } from './text-metrics.js';
+import type {
+  DeckChart,
+  DeckColumn,
+  DeckImage,
+  DeckSlide,
+  DeckSpec,
+  DeckStat,
+  DeckStep,
+  DeckTable,
+} from './spec.js';
+import { TEXT_INSET, fitOneLine, widthInEm } from './text-metrics.js';
 import type { DeckStyle } from './theme.js';
 
 /**
@@ -38,7 +47,8 @@ export const TYPE = {
   deckSubtitle: 15,
   statement: 60,
   section: 56,
-  /** Supporting line under a display headline (section / statement). */
+  hero: 56,
+  /** Supporting line under a display headline (section / statement / hero). */
   displaySub: 14,
   header: 30,
   body: 17,
@@ -53,11 +63,29 @@ export const TYPE = {
   quote: 28,
   quoteAttr: 14,
   quoteMark: 120,
+  columnHeading: 19,
+  stepLabel: 17,
+  stepDetail: 12,
+  agendaNum: 16,
+  agendaItem: 16,
+  tableCell: 13,
   chartValue: 10,
   chartLabel: 11,
   caption: 12,
   footer: 9,
 } as const;
+
+/** Body area under the header rule, shared by every header-bearing layout. */
+const BODY_TOP = 1.85;
+const BODY_H = DECK_PAGE_H - BODY_TOP - 0.75;
+
+// Hero text sits over an arbitrary photo, so its scrim and text are fixed
+// rather than themed — a light theme's dark-on-light would vanish over a
+// dark image.
+const HERO_SCRIM = '000000';
+const HERO_SCRIM_TRANSPARENCY = 55;
+const HERO_TEXT = 'FFFFFF';
+const HERO_SUBTEXT = 'E5E7EB';
 
 export interface DeckBox {
   x: number;
@@ -93,7 +121,14 @@ export type DeckPrimitive =
       paraSpaceAfterPt?: number;
       bulletIndentPt?: number;
     }
-  | { kind: 'rect'; box: DeckBox; fill: string; radiusIn?: number }
+  | {
+      kind: 'rect';
+      box: DeckBox;
+      fill: string;
+      radiusIn?: number;
+      /** 0-100. pptx `transparency`; the preview maps it to the same alpha. */
+      transparencyPct?: number;
+    }
   | { kind: 'lineSeg'; x1: number; y1: number; x2: number; y2: number; color: string; widthPt: number }
   | { kind: 'ellipse'; box: DeckBox; fill: string; outline?: { color: string; widthPt: number } }
   | {
@@ -109,9 +144,16 @@ export type DeckPrimitive =
     }
   | {
       kind: 'image';
-      /** The frame to center-fit the image into (aspect preserved). */
+      /** The frame to fit the image into. */
       frame: DeckBox;
       source: { url?: string; path?: string };
+      /**
+       * `contain` (default) centre-fits inside the frame, preserving aspect and
+       * leaving letterbox gaps. `cover` fills the frame and crops the overflow —
+       * required for full-bleed hero backgrounds, where letterboxing would show
+       * the slide background through.
+       */
+      fit?: 'contain' | 'cover';
     };
 
 export interface DeckSlideLayout {
@@ -137,6 +179,23 @@ export function layoutDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] 
         break;
       case 'quote':
         out = withFooter(layoutQuoteSlide(slide, style), style, spec.title, pageNum);
+        break;
+      case 'hero':
+        // No footer: it would sit on the photo, and the scrim is tuned for the
+        // headline block, not for legible 9pt text at the page edge.
+        out = layoutHeroSlide(slide, style);
+        break;
+      case 'comparison':
+        out = withFooter(layoutComparisonSlide(slide, style), style, spec.title, pageNum);
+        break;
+      case 'timeline':
+        out = withFooter(layoutTimelineSlide(slide, style), style, spec.title, pageNum);
+        break;
+      case 'agenda':
+        out = withFooter(layoutAgendaSlide(slide, style), style, spec.title, pageNum);
+        break;
+      case 'table':
+        out = withFooter(layoutTableSlide(slide, style), style, spec.title, pageNum);
         break;
       default:
         out = withFooter(layoutContentSlide(slide, style), style, spec.title, pageNum);
@@ -253,8 +312,8 @@ function withFooter(slide: DeckSlideLayout, style: DeckStyle, deckTitle: string,
 
 function layoutContentSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const primitives = header(style, slide.title);
-  const top = 1.85;
-  const bodyH = DECK_PAGE_H - top - 0.75;
+  const top = BODY_TOP;
+  const bodyH = BODY_H;
   const hasBullets = !!slide.bullets?.length;
   const sideBox: DeckBox = { x: 6.6, y: top, w: DECK_PAGE_W - 6.6 - MARGIN, h: bodyH };
   const fullBox: DeckBox = { x: MARGIN, y: top, w: BODY_W, h: bodyH };
@@ -383,6 +442,246 @@ function layoutStatsSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
     primitives.push(
       bulletBlock(style, slide.bullets, { x: MARGIN, y: tileY + tileH + 0.35, w: BODY_W, h: 1.4 }, TYPE.statSupport),
     );
+  }
+  return { background: style.background, primitives };
+}
+
+/**
+ * Full-bleed image with the headline over it. The scrim is what makes the text
+ * legible over an arbitrary photo, so it is not optional.
+ */
+function layoutHeroSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [];
+  if (slide.image) {
+    primitives.push({
+      kind: 'image',
+      frame: { x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H },
+      source: { url: slide.image.url, path: slide.image.path },
+      fit: 'cover',
+    });
+  }
+  primitives.push(
+    {
+      kind: 'rect',
+      box: { x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H },
+      fill: HERO_SCRIM,
+      transparencyPct: HERO_SCRIM_TRANSPARENCY,
+    },
+    { kind: 'rect', box: { x: MARGIN, y: DECK_PAGE_H - 3.25, w: 1.1, h: 0.14 }, fill: style.accent },
+    plainText(slide.title, HERO_TEXT, { x: MARGIN, y: DECK_PAGE_H - 2.95, w: BODY_W - 1.5, h: 1.9 }, {
+      fontFace: style.headingFont,
+      fontSizePt: TYPE.hero,
+      bold: true,
+      shrinkToFit: true,
+    }),
+  );
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, HERO_SUBTEXT, { x: MARGIN, y: DECK_PAGE_H - 1.0, w: BODY_W - 1.5, h: 0.6 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: TYPE.displaySub,
+      }),
+    );
+  }
+  return { background: style.background, primitives };
+}
+
+/** Two side-by-side panels. The headings take different accents so the two sides read as opposed, not sequential. */
+function layoutComparisonSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const primitives = header(style, slide.title);
+  const columns: DeckColumn[] = slide.columns ?? [];
+  const gap = 0.5;
+  const colW = (BODY_W - gap) / 2;
+  const headingColors = [style.accent, style.accentAlt];
+
+  columns.forEach((column, i) => {
+    const x = MARGIN + i * (colW + gap);
+    primitives.push(
+      { kind: 'rect', box: { x, y: BODY_TOP, w: colW, h: BODY_H }, fill: style.panel, radiusIn: 0.06 },
+      plainText(column.heading, headingColors[i], { x: x + 0.35, y: BODY_TOP + 0.3, w: colW - 0.7, h: 0.6 }, {
+        fontFace: style.headingFont,
+        fontSizePt: TYPE.columnHeading,
+        bold: true,
+        shrinkToFit: true,
+      }),
+      {
+        kind: 'lineSeg',
+        x1: x + 0.35,
+        y1: BODY_TOP + 0.95,
+        x2: x + colW - 0.35,
+        y2: BODY_TOP + 0.95,
+        color: style.grid,
+        widthPt: 1,
+      },
+      bulletBlock(
+        style,
+        column.bullets,
+        { x: x + 0.35, y: BODY_TOP + 1.15, w: colW - 0.7, h: BODY_H - 1.5 },
+        TYPE.bodyTight,
+      ),
+    );
+  });
+  return { background: style.background, primitives };
+}
+
+/** 2-6 steps along a horizontal axis: label above the node, detail below. */
+function layoutTimelineSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const primitives = header(style, slide.title);
+  const steps: DeckStep[] = slide.steps ?? [];
+  const axisY = BODY_TOP + BODY_H / 2 - 0.2;
+  const slotW = BODY_W / steps.length;
+  const node = 0.24;
+
+  primitives.push({
+    kind: 'lineSeg',
+    x1: MARGIN + slotW / 2,
+    y1: axisY,
+    x2: MARGIN + BODY_W - slotW / 2,
+    y2: axisY,
+    color: style.grid,
+    widthPt: 2,
+  });
+
+  steps.forEach((step, i) => {
+    const cx = MARGIN + slotW * (i + 0.5);
+    primitives.push(
+      plainText(step.label, style.text, { x: cx - slotW / 2, y: axisY - 1.0, w: slotW, h: 0.6 }, {
+        fontFace: style.headingFont,
+        fontSizePt: TYPE.stepLabel,
+        bold: true,
+        align: 'center',
+        valign: 'bottom',
+        shrinkToFit: true,
+      }),
+      {
+        kind: 'ellipse',
+        box: { x: cx - node / 2, y: axisY - node / 2, w: node, h: node },
+        fill: style.accent,
+        // Surface-coloured ring so the node reads as sitting ON the axis.
+        outline: { color: style.background, widthPt: 2 },
+      },
+    );
+    if (step.detail) {
+      primitives.push(
+        plainText(step.detail, style.muted, { x: cx - slotW / 2 + 0.12, y: axisY + 0.35, w: slotW - 0.24, h: 1.1 }, {
+          fontFace: style.bodyFont,
+          fontSizePt: TYPE.stepDetail,
+          align: 'center',
+        }),
+      );
+    }
+  });
+  return { background: style.background, primitives };
+}
+
+/** Numbered list; splits into two columns past 5 items so it never runs off the page. */
+function layoutAgendaSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const primitives = header(style, slide.title);
+  const items = slide.bullets ?? [];
+  const twoCol = items.length > 5;
+  const perCol = twoCol ? Math.ceil(items.length / 2) : items.length;
+  const colGap = 0.7;
+  const colW = twoCol ? (BODY_W - colGap) / 2 : BODY_W;
+  const rowH = Math.min(0.78, BODY_H / perCol);
+  const numW = 0.55;
+
+  items.forEach((item, i) => {
+    const col = twoCol && i >= perCol ? 1 : 0;
+    const row = col === 1 ? i - perCol : i;
+    const x = MARGIN + col * (colW + colGap);
+    const y = BODY_TOP + row * rowH;
+    primitives.push(
+      plainText(String(i + 1).padStart(2, '0'), style.accent, { x, y, w: numW, h: rowH }, {
+        fontFace: style.headingFont,
+        fontSizePt: TYPE.agendaNum,
+        bold: true,
+        valign: 'middle',
+      }),
+      plainText(item, style.text, { x: x + numW, y, w: colW - numW, h: rowH }, {
+        fontFace: style.bodyFont,
+        fontSizePt: TYPE.agendaItem,
+        valign: 'middle',
+        shrinkToFit: true,
+      }),
+      { kind: 'lineSeg', x1: x, y1: y + rowH, x2: x + colW, y2: y + rowH, color: style.grid, widthPt: 1 },
+    );
+  });
+  return { background: style.background, primitives };
+}
+
+/**
+ * A grid drawn from rects + text, NOT pptxgenjs `addTable`.
+ *
+ * A native table computes its own row heights inside PowerPoint, which the
+ * preview cannot see — the two would disagree the moment a cell wrapped, which
+ * is exactly the drift the display list exists to prevent. (The connector also
+ * had to pass `autoPage: false` to stop a native table silently spilling onto
+ * extra slides and desyncing the footer page numbers.) Row heights here are
+ * derived from measured text width, so both renderers get the same grid.
+ */
+function layoutTableSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const primitives = header(style, slide.title);
+  const table: DeckTable = slide.table ?? { headers: [], rows: [] };
+  const cols = table.headers.length;
+  if (!cols) return { background: style.background, primitives };
+
+  const colW = BODY_W / cols;
+  const padX = 0.12;
+  const usableW = colW - 2 * padX - 2 * TEXT_INSET;
+  const lineH = (TYPE.tableCell * 1.25) / 72; // inches per rendered line
+  const minRowH = 0.42;
+
+  /** Lines a cell wraps to at tableCell size, from the same metrics fitOneLine uses. */
+  const linesFor = (text: string, fontFace: string): number => {
+    const widthIn = (widthInEm(text, fontFace) * TYPE.tableCell) / 72;
+    return Math.max(1, Math.ceil(widthIn / usableW));
+  };
+  const rowHeight = (cells: readonly string[], fontFace: string): number =>
+    Math.max(minRowH, Math.max(...cells.map((c) => linesFor(c, fontFace))) * lineH + 0.2);
+
+  const bands: { cells: readonly string[]; head: boolean; h: number }[] = [
+    { cells: table.headers, head: true, h: rowHeight(table.headers, style.headingFont) },
+    ...table.rows.map((r) => ({ cells: r, head: false, h: rowHeight(r, style.bodyFont) })),
+  ];
+
+  // The metrics tables cover numerals, so letters are charged the widest
+  // capital — deliberately conservative, but at the schema's maximum (8 rows of
+  // 50-char cells) the estimate exceeds the body box. Scale the grid to fit
+  // rather than running off the page; cell text keeps shrinkToFit as the net.
+  const total = bands.reduce((sum, b) => sum + b.h, 0);
+  if (total > BODY_H) {
+    const k = BODY_H / total;
+    for (const band of bands) band.h *= k;
+  }
+
+  let y = BODY_TOP;
+  for (const band of bands) {
+    if (band.head) {
+      primitives.push({ kind: 'rect', box: { x: MARGIN, y, w: BODY_W, h: band.h }, fill: style.panel });
+    }
+    band.cells.forEach((cell, c) => {
+      primitives.push(
+        plainText(cell, style.text, { x: MARGIN + c * colW + padX, y, w: colW - 2 * padX, h: band.h }, {
+          fontFace: band.head ? style.headingFont : style.bodyFont,
+          fontSizePt: TYPE.tableCell,
+          bold: band.head,
+          valign: 'middle',
+          // Net for the scaled-grid case above only.
+          shrinkToFit: true,
+        }),
+      );
+    });
+    // Rule under every band, so the grid closes on the last row too.
+    primitives.push({
+      kind: 'lineSeg',
+      x1: MARGIN,
+      y1: y + band.h,
+      x2: MARGIN + BODY_W,
+      y2: y + band.h,
+      color: style.grid,
+      widthPt: 1,
+    });
+    y += band.h;
   }
   return { background: style.background, primitives };
 }

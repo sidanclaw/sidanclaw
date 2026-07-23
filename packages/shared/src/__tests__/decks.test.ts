@@ -354,3 +354,175 @@ describe('[COMP:decks/layout] Stat tile sizing', () => {
     }
   });
 });
+
+describe('[COMP:decks/layout] Phase-2 layouts', () => {
+  const style = DECK_PRESET_STYLES.light;
+
+  function render(slide: Record<string, unknown>): DeckPrimitive[] {
+    const spec = deckSpecSchema.parse({ title: 'T', slides: [slide] });
+    return layoutDeck(spec, style)[1].primitives;
+  }
+  const kinds = (ps: DeckPrimitive[]) => ps.map((p) => p.kind);
+  const texts = (ps: DeckPrimitive[]) =>
+    ps
+      .filter((p): p is Extract<DeckPrimitive, { kind: 'text' }> => p.kind === 'text')
+      .flatMap((p) => p.paragraphs.flatMap((para) => para.runs.map((r) => r.text)));
+
+  it('hero: full-bleed cover image UNDER a scrim, headline over both', () => {
+    const ps = render({ title: 'Ship it', layout: 'hero', image: { path: 'a.png' }, subtext: 'Q3' });
+    const img = ps.find((p) => p.kind === 'image') as Extract<DeckPrimitive, { kind: 'image' }>;
+    // cover, not contain: letterboxing a full-bleed photo would show the slide
+    // background through the gaps.
+    expect(img.fit).toBe('cover');
+    expect(img.frame).toEqual({ x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H });
+    const scrim = ps.find((p) => p.kind === 'rect' && p.transparencyPct !== undefined);
+    expect(scrim).toBeDefined();
+    // DOM order = paint order: image, then scrim, then text.
+    expect(kinds(ps).indexOf('image')).toBeLessThan(ps.indexOf(scrim!));
+    expect(ps.indexOf(scrim!)).toBeLessThan(kinds(ps).indexOf('text'));
+    expect(texts(ps)).toContain('Ship it');
+  });
+
+  it('hero carries no footer — it would sit on the photo', () => {
+    const spec = deckSpecSchema.parse({
+      title: 'Deck',
+      slides: [{ title: 'H', layout: 'hero', image: { path: 'a.png' } }],
+    });
+    expect(texts(layoutDeck(spec, style)[1].primitives)).not.toContain('2');
+  });
+
+  it('comparison: two panels whose headings take DIFFERENT accents', () => {
+    const ps = render({
+      title: 'Before / After',
+      layout: 'comparison',
+      columns: [
+        { heading: 'Before', bullets: ['slow'] },
+        { heading: 'After', bullets: ['fast'] },
+      ],
+    });
+    const headings = ps.filter(
+      (p): p is Extract<DeckPrimitive, { kind: 'text' }> =>
+        p.kind === 'text' && ['Before', 'After'].includes(p.paragraphs[0].runs[0].text),
+    );
+    expect(headings).toHaveLength(2);
+    const colors = headings.map((h) => h.paragraphs[0].runs[0].color);
+    expect(colors[0]).toBe(style.accent);
+    expect(colors[1]).toBe(style.accentAlt);
+    expect(colors[0]).not.toBe(colors[1]); // opposed, not sequential
+  });
+
+  it('timeline: one axis plus a node per step, nodes ON the axis', () => {
+    const ps = render({
+      title: 'Roadmap',
+      layout: 'timeline',
+      steps: [{ label: 'Q1', detail: 'build' }, { label: 'Q2' }, { label: 'Q3' }],
+    });
+    const nodes = ps.filter(
+      (p): p is Extract<DeckPrimitive, { kind: 'ellipse' }> => p.kind === 'ellipse',
+    );
+    expect(nodes).toHaveLength(3);
+    const axis = ps.find(
+      (p): p is Extract<DeckPrimitive, { kind: 'lineSeg' }> => p.kind === 'lineSeg' && p.widthPt === 2,
+    )!;
+    for (const n of nodes) {
+      expect(n.box.y + n.box.h / 2).toBeCloseTo(axis.y1, 5);
+      expect(n.outline?.color).toBe(style.background); // ring reads as sitting on the axis
+    }
+    expect(texts(ps)).toContain('build');
+  });
+
+  it('agenda: single column to 5 items, two columns past that', () => {
+    const five = render({ title: 'A', layout: 'agenda', bullets: ['a', 'b', 'c', 'd', 'e'] });
+    const xs5 = new Set(
+      five.filter((p) => p.kind === 'text' && /^\d\d$/.test(p.paragraphs[0].runs[0].text)).map((p) => (p as never as { box: { x: number } }).box.x),
+    );
+    expect(xs5.size).toBe(1);
+
+    const six = render({ title: 'A', layout: 'agenda', bullets: ['a', 'b', 'c', 'd', 'e', 'f'] });
+    const xs6 = new Set(
+      six.filter((p) => p.kind === 'text' && /^\d\d$/.test(p.paragraphs[0].runs[0].text)).map((p) => (p as never as { box: { x: number } }).box.x),
+    );
+    expect(xs6.size).toBe(2);
+    expect(texts(six)).toContain('01');
+    expect(texts(six)).toContain('06');
+  });
+
+  it('table: drawn from primitives, never a native table, and it closes on the last row', () => {
+    const ps = render({
+      title: 'Pricing',
+      layout: 'table',
+      table: { headers: ['Plan', 'Price'], rows: [['Free', '$0'], ['Pro', '$20']] },
+    });
+    // No primitive kind may encode a native pptx table — PowerPoint would size
+    // its own rows and the preview could not follow.
+    expect(new Set(kinds(ps))).toEqual(new Set(['text', 'rect', 'lineSeg']));
+    expect(texts(ps)).toEqual(expect.arrayContaining(['Plan', 'Price', 'Free', '$0', 'Pro', '$20']));
+    // one rule per band (header + 2 rows), so the grid is closed at the bottom
+    expect(ps.filter((p) => p.kind === 'lineSeg')).toHaveLength(3);
+  });
+
+  it('table rows grow with wrapped content instead of overlapping', () => {
+    const ps = render({
+      title: 'Wide',
+      layout: 'table',
+      table: {
+        headers: ['A', 'B'],
+        rows: [['short', 'x'], ['a much longer cell that must wrap to two lines', 'y']],
+      },
+    });
+    const rules = ps
+      .filter((p): p is Extract<DeckPrimitive, { kind: 'lineSeg' }> => p.kind === 'lineSeg')
+      .map((p) => p.y1);
+    const heights = rules.map((y, i) => (i === 0 ? y : y - rules[i - 1]));
+    expect(heights[2]).toBeGreaterThan(heights[1]); // the wrapping row is taller
+  });
+
+  it('every layout stays on the page', () => {
+    const slides: Record<string, unknown>[] = [
+      { title: 'H', layout: 'hero', image: { path: 'a.png' } },
+      { title: 'C', layout: 'comparison', columns: [{ heading: 'A', bullets: ['x'] }, { heading: 'B', bullets: ['y'] }] },
+      { title: 'T', layout: 'timeline', steps: [{ label: 'Q1' }, { label: 'Q2' }] },
+      { title: 'A', layout: 'agenda', bullets: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] },
+      { title: 'G', layout: 'table', table: { headers: ['a', 'b'], rows: [['1', '2']] } },
+    ];
+    for (const slide of slides) {
+      for (const p of render(slide)) {
+        const box = p.kind === 'image' ? p.frame : p.kind === 'lineSeg' ? null : p.box;
+        if (!box) continue;
+        expect(box.x, `${slide.layout} x`).toBeGreaterThanOrEqual(0);
+        expect(box.y, `${slide.layout} y`).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.w, `${slide.layout} right`).toBeLessThanOrEqual(DECK_PAGE_W + 0.001);
+        expect(box.y + box.h, `${slide.layout} bottom`).toBeLessThanOrEqual(DECK_PAGE_H + 0.001);
+      }
+    }
+  });
+});
+
+describe('[COMP:decks/layout] Table grid fits the body box', () => {
+  it('scales the grid at the schema maximum instead of running off the page', () => {
+    // 8 rows x 5 columns x 50 chars: the worst case the schema admits.
+    const cell = 'x'.repeat(50);
+    const spec = deckSpecSchema.parse({
+      title: 'T',
+      slides: [
+        {
+          title: 'Max',
+          layout: 'table',
+          table: {
+            headers: ['a', 'b', 'c', 'd', 'e'],
+            rows: Array.from({ length: 8 }, () => Array(5).fill(cell)),
+          },
+        },
+      ],
+    });
+    for (const p of layoutDeck(spec, DECK_PRESET_STYLES.light)[1].primitives) {
+      const bottom =
+        p.kind === 'lineSeg'
+          ? Math.max(p.y1, p.y2)
+          : p.kind === 'image'
+            ? p.frame.y + p.frame.h
+            : p.box.y + p.box.h;
+      expect(bottom).toBeLessThanOrEqual(DECK_PAGE_H + 0.001);
+    }
+  });
+});

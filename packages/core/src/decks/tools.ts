@@ -83,10 +83,17 @@ const STYLE_SCOPE_NOTE =
 
 const LAYOUT_MANUAL =
   "Slide layouts: 'content' (title + bullets and/or a chart or image), 'statement' (one big centered claim), " +
-  "'stats' (row of 1-4 big-number tiles), 'quote' (testimonial), 'section' (divider). A title slide is added automatically. " +
+  "'stats' (row of 1-4 big-number tiles), 'quote' (testimonial), 'section' (divider), " +
+  "'hero' (full-bleed image with the headline over it — requires `image`), " +
+  "'comparison' (two side-by-side panels — requires `columns`, exactly 2), " +
+  "'timeline' (2-6 steps along an axis — requires `steps`), " +
+  "'agenda' (numbered list — requires `bullets`, splits to two columns past 5), " +
+  "'table' (grid — requires `table` with 2-5 headers and up to 8 rows). A title slide is added automatically. " +
   "Charts (bar/line for trends, pie/doughnut for shares) go on 'content' slides via `chart`. " +
   "Every 'content' slide MUST have `bullets`, `chart` and/or `image` — body text goes in `bullets` (there is no 'content'/'body' field); " +
-  "use 'statement' or 'section' for title-only slides. One idea per slide. " +
+  "use 'statement' or 'section' for title-only slides. One idea per slide. Vary the layouts across a deck. " +
+  'Each layout renders only its own fields and rejects the rest, and titles are capped per layout ' +
+  "(48 chars on most, 65 on 'statement', 42 on 'hero') because oversized text silently scales to unreadable — keep them short. " +
   'Images: prefer `image.path` (a workspace file); `image.url` must be a public http(s) png/jpeg/gif (max 10MB, 10 per deck).'
 
 function preview(appOrigin: string | undefined, workspaceId: string, deckId: string): string | undefined {

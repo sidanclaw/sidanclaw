@@ -130,6 +130,9 @@ function Primitive({
             ...boxStyle(p.box, scale),
             background: hex(p.fill),
             borderRadius: p.radiusIn ? p.radiusIn * scale : undefined,
+            // pptx `transparency` is percent-transparent; CSS opacity is
+            // percent-opaque. Same visual result, inverted scale.
+            opacity: p.transparencyPct === undefined ? undefined : 1 - p.transparencyPct / 100,
           }}
         />
       );
@@ -192,7 +195,7 @@ function Primitive({
       );
     }
     case "image": {
-      const style: CSSProperties = { ...boxStyle(p.frame, scale), objectFit: "contain" };
+      const style: CSSProperties = { ...boxStyle(p.frame, scale), objectFit: p.fit ?? "contain" };
       if (p.source.url) {
         return (
           // eslint-disable-next-line @next/next/no-img-element

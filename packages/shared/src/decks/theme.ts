@@ -15,6 +15,8 @@ export interface DeckStyle {
   text: string;
   muted: string;
   accent: string;
+  /** Second emphasis color: the right-hand comparison heading, highlighted bars. */
+  accentAlt: string;
   panel: string; // subtle tile/panel fill
   grid: string; // recessive chart gridlines
   /** Categorical chart palette, contrast-checked against `background`. */
@@ -32,6 +34,7 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
     text: '111827',
     muted: '6B7280',
     accent: '2563EB',
+    accentAlt: 'B45309',
     panel: 'F3F4F6',
     grid: 'E5E7EB',
     chartCategorical: ['2A78D6', '1BAF7A', 'EDA100', '4A3AA7', 'E34948', 'EB6834'],
@@ -43,6 +46,7 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
     text: 'F9FAFB',
     muted: '9CA3AF',
     accent: '60A5FA',
+    accentAlt: 'D97706',
     panel: '1F2937',
     grid: '374151',
     chartCategorical: ['3987E5', '199E70', 'C98500', '9085E9', 'E66767', 'D95926'],
@@ -54,6 +58,7 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
     text: 'FFFFFF',
     muted: '8DA9C4',
     accent: '2DD4BF',
+    accentAlt: 'D97706',
     panel: '13315C',
     grid: '1E3A5F',
     chartCategorical: ['0D9488', '3987E5', 'C98500', '9085E9', 'E66767', 'D95926'],
@@ -102,6 +107,16 @@ export function deriveDeckStyle(scheme: ExtractedThemeScheme): DeckStyle {
   let accent = accents.find((c) => contrastRatio(background, c) >= 2) ?? accents[0] ?? fallback.accent;
   accent = nudgeForContrast(accent, background, 2);
 
+  // The second emphasis colour must read as a *different* mark, not a shade of
+  // the first, so take the next distinct accent rather than accents[1] blindly
+  // (schemes often repeat or near-repeat a hue). Falls back to the preset pair,
+  // which is validated, rather than inventing one.
+  const accentAlt = nudgeForContrast(
+    accents.find((c) => c !== accent && contrastRatio(background, c) >= 2) ?? fallback.accentAlt,
+    background,
+    2,
+  );
+
   const chartCategorical = (accents.length >= 3 ? accents : fallback.chartCategorical).map((c) =>
     nudgeForContrast(c, background, 2),
   );
@@ -111,6 +126,7 @@ export function deriveDeckStyle(scheme: ExtractedThemeScheme): DeckStyle {
     text,
     muted: mix(background, text, 0.55),
     accent,
+    accentAlt,
     panel: mix(background, text, 0.07),
     grid: mix(background, text, 0.15),
     chartCategorical,

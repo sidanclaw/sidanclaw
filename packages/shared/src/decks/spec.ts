@@ -15,7 +15,18 @@ export type DeckTheme = (typeof DECK_THEMES)[number];
 export const DECK_CHART_TYPES = ['bar', 'line', 'pie', 'doughnut'] as const;
 export type DeckChartType = (typeof DECK_CHART_TYPES)[number];
 
-export const DECK_LAYOUTS = ['content', 'section', 'statement', 'stats', 'quote'] as const;
+export const DECK_LAYOUTS = [
+  'content',
+  'section',
+  'statement',
+  'stats',
+  'quote',
+  'hero',
+  'comparison',
+  'timeline',
+  'agenda',
+  'table',
+] as const;
 export type DeckLayout = (typeof DECK_LAYOUTS)[number];
 
 const statSchema = z.object({
@@ -64,6 +75,31 @@ const chartSchema = z.object({
     .describe("Optional unit prefix/suffix hint shown in labels, e.g. '$' or 'users'"),
 });
 
+const columnSchema = z.object({
+  heading: z.string().min(1).max(80).describe("Column heading, e.g. 'Before' or 'Our approach'"),
+  bullets: z
+    .array(z.string().min(1).max(90))
+    .min(1)
+    .max(5)
+    .describe('1-5 points, max 90 chars each (15pt in a half-width panel)'),
+});
+
+const stepSchema = z.object({
+  label: z.string().min(1).max(40).describe("Step label, e.g. 'Q1' or 'Launch'"),
+  detail: z.string().max(120).optional().describe('One short line describing the step'),
+});
+
+const tableSchema = z.object({
+  headers: z.array(z.string().min(1).max(60)).min(2).max(5).describe('Column headers (2-5 columns)'),
+  rows: z
+    .array(z.array(z.string().max(50)).min(2).max(5))
+    .min(1)
+    .max(8)
+    .describe(
+      'Body rows (max 8, max 50 chars per cell); each row must have exactly as many cells as there are headers',
+    ),
+});
+
 export const deckSlideSchema = z
   .object({
     title: z
@@ -88,6 +124,18 @@ export const deckSlideSchema = z
       .optional()
       .describe("Big-number tiles; required when layout is 'stats' (1-4 tiles)"),
     quote: quoteSchema.optional().describe("Required when layout is 'quote'"),
+    columns: z
+      .array(columnSchema)
+      .length(2)
+      .optional()
+      .describe("Exactly 2 side-by-side panels; required when layout is 'comparison'"),
+    steps: z
+      .array(stepSchema)
+      .min(2)
+      .max(6)
+      .optional()
+      .describe("2-6 points along a horizontal axis; required when layout is 'timeline'"),
+    table: tableSchema.optional().describe("Required when layout is 'table'"),
     chart: chartSchema
       .optional()
       .describe('Optional chart rendered on a content slide (beside bullets, or full-width without them)'),
@@ -99,7 +147,8 @@ export const deckSlideSchema = z
       .enum(DECK_LAYOUTS)
       .optional()
       .describe(
-        "'content' (default) = title + bullets and/or chart; 'section' = divider; 'statement' = one big centered claim; 'stats' = row of big-number tiles; 'quote' = testimonial",
+        "'content' (default) = title + bullets and/or chart; 'section' = divider; 'statement' = one big centered claim; 'stats' = row of big-number tiles; 'quote' = testimonial; " +
+          "'hero' = full-bleed image with the headline over it; 'comparison' = two side-by-side panels; 'timeline' = 2-6 steps along an axis; 'agenda' = numbered list; 'table' = grid",
       ),
   })
   // strict: silently dropping unknown fields (e.g. `content`, `body`) produces
@@ -111,6 +160,34 @@ export const deckSlideSchema = z
     }
     if (slide.layout === 'quote' && !slide.quote) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "layout 'quote' requires a `quote` object" });
+    }
+    if (slide.layout === 'comparison' && !slide.columns) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "layout 'comparison' requires a `columns` array of exactly 2" });
+    }
+    if (slide.layout === 'timeline' && !slide.steps?.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "layout 'timeline' requires a `steps` array (2-6)" });
+    }
+    if (slide.layout === 'table' && !slide.table) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "layout 'table' requires a `table` object" });
+    }
+    if (slide.layout === 'agenda' && !slide.bullets?.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "layout 'agenda' requires `bullets` (the agenda items)" });
+    }
+    if (slide.layout === 'hero' && !slide.image) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "layout 'hero' requires an `image` — it is a full-bleed photo with the headline over it",
+      });
+    }
+    if (slide.table) {
+      const width = slide.table.headers.length;
+      const bad = slide.table.rows.findIndex((r) => r.length !== width);
+      if (bad >= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `table row ${bad} has ${slide.table.rows[bad].length} cells but there are ${width} headers — every row must match the header count`,
+        });
+      }
     }
     if (slide.chart && slide.image) {
       ctx.addIssue({
@@ -164,9 +241,14 @@ export const deckSlideSchema = z
 const LAYOUT_LIMITS: Record<DeckLayout, { title: number; bullets?: { max: number; chars: number } }> = {
   statement: { title: 65 }, // 60pt Georgia, 23 ch/line, 3 lines in a 2.0in box
   section: { title: 48 }, // 56pt centred, 2 lines in a 1.6in box
+  hero: { title: 42 }, // 56pt in a 10.0in box beside the scrim edge, 2 lines
   content: { title: 48, bullets: { max: 5, chars: 100 } }, // 30pt header, 1 line; body 17pt
+  agenda: { title: 48, bullets: { max: 8, chars: 50 } }, // 16pt, two columns past 5 items
   stats: { title: 48, bullets: { max: 2, chars: 120 } }, // 12pt supporting line
   quote: { title: 48 },
+  comparison: { title: 48 },
+  timeline: { title: 48 },
+  table: { title: 48 },
 };
 
 /**
@@ -181,12 +263,27 @@ const LAYOUT_FIELDS: Record<DeckLayout, readonly string[]> = {
   content: ['bullets', 'chart', 'image'],
   section: ['subtext'],
   statement: ['subtext'],
+  hero: ['subtext', 'image'],
   stats: ['stats', 'bullets'],
   quote: ['quote'],
+  comparison: ['columns'],
+  timeline: ['steps'],
+  agenda: ['bullets'],
+  table: ['table'],
 };
 
 /** Content-bearing fields; `title`, `layout` and `notes` are valid everywhere. */
-const CONTENT_FIELDS = ['bullets', 'subtext', 'stats', 'quote', 'chart', 'image'] as const;
+const CONTENT_FIELDS = [
+  'bullets',
+  'subtext',
+  'stats',
+  'quote',
+  'columns',
+  'steps',
+  'table',
+  'chart',
+  'image',
+] as const;
 
 /**
  * The slide schema the TOOLS accept: everything deckSlideSchema enforces, plus
@@ -278,6 +375,9 @@ export const deckSpecInputSchema = z.object(deckSpecInputShape).superRefine(asse
 export type DeckStat = z.infer<typeof statSchema>;
 export type DeckImage = z.infer<typeof imageSchema>;
 export type DeckQuote = z.infer<typeof quoteSchema>;
+export type DeckColumn = z.infer<typeof columnSchema>;
+export type DeckStep = z.infer<typeof stepSchema>;
+export type DeckTable = z.infer<typeof tableSchema>;
 export type DeckChart = z.infer<typeof chartSchema>;
 export type DeckSlide = z.infer<typeof deckSlideSchema>;
 export type DeckSpec = z.infer<typeof deckSpecSchema>;

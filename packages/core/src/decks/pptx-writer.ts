@@ -95,7 +95,7 @@ function writePrimitive(slide: Slide, p: DeckPrimitive, images: ResolvedImages):
         y: p.box.y,
         w: p.box.w,
         h: p.box.h,
-        fill: { color: p.fill },
+        fill: { color: p.fill, transparency: p.transparencyPct },
         line: { type: 'none' },
         rectRadius: p.radiusIn,
       });
@@ -142,6 +142,21 @@ function writePrimitive(slide: Slide, p: DeckPrimitive, images: ResolvedImages):
       const key = p.source.url ?? p.source.path;
       const image = key ? images.get(key) : undefined;
       if (!image) return; // resolution failures surface earlier, at fetch/read time
+      if (p.fit === 'cover') {
+        // pptxgenjs never decodes the image: it reads the SOURCE aspect ratio
+        // off the w/h passed here, and only then applies `sizing` as the
+        // visible box. Passing the frame for both yields a zero srcRect and
+        // silently STRETCHES the image — w/h must describe the source.
+        slide.addImage({
+          data: image.data,
+          x: p.frame.x,
+          y: p.frame.y,
+          w: 1,
+          h: image.height / image.width,
+          sizing: { type: 'cover', w: p.frame.w, h: p.frame.h },
+        });
+        return;
+      }
       // center-fit inside the frame preserving intrinsic aspect ratio
       const scale = Math.min(p.frame.w / image.width, p.frame.h / image.height);
       const w = image.width * scale;
