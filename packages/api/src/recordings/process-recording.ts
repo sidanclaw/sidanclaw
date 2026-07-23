@@ -1,18 +1,33 @@
 // [COMP:recordings/open-process-recording] - generic OSS recording processor.
 
-import type { RecordingTranscriber } from '@use-brian/core'
+import type { FilesApi, RecordingTranscriber } from '@use-brian/core'
 import { getEpisodeByIdSystem } from '../db/episodes-store.js'
-import { getRecordingSystem } from '../db/recordings-store.js'
-import { insertTranscriptSegments, segmentTranscript } from '../db/transcript-segments-store.js'
+import { getRecordingSystem, updateRecording } from '../db/recordings-store.js'
+import {
+  insertTranscriptSegments,
+  linkTranscriptSegmentsFile,
+  segmentTranscript,
+} from '../db/transcript-segments-store.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
+import type { RecordingSynthesizeFn } from '../synthesis/recording-synthesizer.js'
 import { extractRecordingAudio, probeRecordingDuration } from './ffmpeg.js'
+import {
+  createTranscriptArtifactWriter,
+  type PersistTranscriptInput,
+  type PersistedTranscript,
+} from './transcript-artifact.js'
 
 export type OpenRecordingProcessResult = { truncated: boolean; segmentsInserted: number; durationMs: number }
 
 export async function processOpenRecording(
-  job: { recordingId: string; actingUserId: string },
+  job: {
+    recordingId: string
+    actingUserId: string
+    blueprintSlug?: string | null
+    parentPageId?: string | null
+  },
   deps: {
     filesResolver: FilesClientResolver
     fallbackStorage: GcsFilesClient
@@ -23,6 +38,10 @@ export async function processOpenRecording(
     probe?: typeof probeRecordingDuration
     extract?: typeof extractRecordingAudio
     insertSegments?: typeof insertTranscriptSegments
+    filesApi?: FilesApi
+    persistTranscript?: (input: PersistTranscriptInput) => Promise<PersistedTranscript | null>
+    linkTranscriptFile?: (recordingId: string, transcriptFileId: string) => Promise<void>
+    synthesize?: RecordingSynthesizeFn
   },
 ): Promise<OpenRecordingProcessResult> {
   if (!deps.transcriber) {
@@ -83,6 +102,36 @@ export async function processOpenRecording(
     sensitivity: episode.sensitivity,
     segments,
   })
+
+  // Hosted parity step 3.5: the durable transcript is additive and isolated.
+  // transcript_segments remains the retrieval substrate, so the file is marked
+  // as deliberately unindexed by the shared artifact writer.
+  const persistTranscript = deps.persistTranscript ?? (deps.filesApi
+    ? createTranscriptArtifactWriter({ filesApi: deps.filesApi })
+    : undefined)
+  if (persistTranscript) {
+    try {
+      const artifact = await persistTranscript({
+        recordingId: episode.id,
+        workspaceId: episode.workspaceId,
+        actingUserId: job.actingUserId,
+        assistantId: episode.assistantId,
+        sensitivity: episode.sensitivity,
+        utterances: transcription.utterances,
+        title: recording?.title ?? recording?.fileName ?? null,
+      })
+      if (artifact) {
+        const linkTranscriptFile = deps.linkTranscriptFile ?? (async (recordingId, transcriptFileId) => {
+          await updateRecording(recordingId, { transcriptFileId })
+          await linkTranscriptSegmentsFile(recordingId, transcriptFileId)
+        })
+        await linkTranscriptFile(episode.id, artifact.fileId)
+      }
+    } catch (err) {
+      console.error('[process-recording] transcript artifact failed (non-fatal):', err)
+    }
+  }
+
   const text = transcription.utterances
     .map((utterance) => `${utterance.speaker ? `${utterance.speaker}: ` : ''}${utterance.text}`)
     .join('\n')
@@ -98,5 +147,25 @@ export async function processOpenRecording(
     parentEpisodeId: episode.id,
     sensitivity: episode.sensitivity,
   })
+
+  // Blueprint synthesis is opt-in, additive to Pipeline B, and never runs over
+  // a partial transcript. Its failure cannot turn successful ingestion into a
+  // failed/retried recording job.
+  const blueprintSlug = job.blueprintSlug?.trim()
+  if (blueprintSlug && deps.synthesize && !transcription.truncated) {
+    try {
+      await deps.synthesize({
+        recordingId: episode.id,
+        workspaceId: episode.workspaceId,
+        userId: job.actingUserId,
+        assistantId: episode.assistantId ?? '',
+        sensitivity: episode.sensitivity,
+        blueprintSlug,
+        parentPageId: job.parentPageId ?? null,
+      })
+    } catch (err) {
+      console.error(`[process-recording] synthesis failed for ${episode.id} (non-fatal):`, err)
+    }
+  }
   return { truncated: transcription.truncated, segmentsInserted, durationMs }
 }

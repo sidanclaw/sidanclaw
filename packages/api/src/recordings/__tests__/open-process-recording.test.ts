@@ -88,4 +88,110 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
     }))
     expect(storage.deleteBlob).toHaveBeenCalledWith(stagedKey)
   })
+
+  it('persists and links the transcript before brain ingest, then runs requested synthesis', async () => {
+    const order: string[] = []
+    const persistTranscript = vi.fn(async () => {
+      order.push('persist')
+      return { fileId: 'transcript-1', path: '/recordings/call.md', bytes: 42 }
+    })
+    const linkTranscriptFile = vi.fn(async () => {
+      order.push('link')
+    })
+    const brainIngestor = vi.fn(async () => {
+      order.push('brain')
+      return {} as never
+    })
+    const synthesize = vi.fn(async () => {
+      order.push('synthesize')
+      return { pageId: 'page-brief' }
+    })
+
+    await processOpenRecording(
+      {
+        recordingId: 'rec-1',
+        actingUserId: 'owner-1',
+        blueprintSlug: '  sales-call  ',
+        parentPageId: 'page-parent',
+      },
+      {
+        filesResolver: { forUri: vi.fn(), forWorkspace: vi.fn() },
+        fallbackStorage: { signedReadUrl: vi.fn(async () => 'https://signed.example/media') } as never,
+        transcriber: {
+          name: 'test',
+          transcribe: vi.fn(async () => ({
+            utterances: [{ startMs: 0, endMs: 1000, speaker: 'A', text: 'hello brain' }],
+            usages: [], windows: 1, truncated: false, degenerateWindows: 0,
+          })),
+        },
+        brainIngestor,
+        getEpisode: vi.fn(async () => ({
+          id: 'rec-1', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
+          sensitivity: 'confidential', sourceRef: { gcsKey: 'ws-1/recordings/id' },
+        }) as never),
+        getRecording: vi.fn(async () => ({ title: 'Sales call', fileName: 'call.m4a' }) as never),
+        probe: vi.fn(async () => 1000),
+        extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
+        insertSegments: vi.fn(async () => {
+          order.push('segments')
+          return 1
+        }),
+        persistTranscript,
+        linkTranscriptFile,
+        synthesize,
+      },
+    )
+
+    expect(order).toEqual(['segments', 'persist', 'link', 'brain', 'synthesize'])
+    expect(persistTranscript).toHaveBeenCalledWith(expect.objectContaining({
+      recordingId: 'rec-1',
+      sensitivity: 'confidential',
+      title: 'Sales call',
+    }))
+    expect(linkTranscriptFile).toHaveBeenCalledWith('rec-1', 'transcript-1')
+    expect(synthesize).toHaveBeenCalledWith(expect.objectContaining({
+      blueprintSlug: 'sales-call',
+      parentPageId: 'page-parent',
+      sensitivity: 'confidential',
+    }))
+  })
+
+  it('keeps artifact and brain ingestion but skips synthesis for a truncated transcript', async () => {
+    const persistTranscript = vi.fn(async () => ({
+      fileId: 'transcript-1', path: '/recordings/call.md', bytes: 42,
+    }))
+    const synthesize = vi.fn(async () => ({ pageId: 'page-brief' }))
+    const brainIngestor = vi.fn(async () => ({}) as never)
+
+    await processOpenRecording(
+      { recordingId: 'rec-1', actingUserId: 'owner-1', blueprintSlug: 'sales-call' },
+      {
+        filesResolver: { forUri: vi.fn(), forWorkspace: vi.fn() },
+        fallbackStorage: { signedReadUrl: vi.fn(async () => 'https://signed.example/media') } as never,
+        transcriber: {
+          name: 'test',
+          transcribe: vi.fn(async () => ({
+            utterances: [{ startMs: 0, endMs: 1000, speaker: null, text: 'partial' }],
+            usages: [], windows: 1, truncated: true, degenerateWindows: 0,
+          })),
+        },
+        brainIngestor,
+        getEpisode: vi.fn(async () => ({
+          id: 'rec-1', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
+          sensitivity: 'internal', sourceRef: { gcsKey: 'ws-1/recordings/id' },
+        }) as never),
+        getRecording: vi.fn(async () => null),
+        probe: vi.fn(async () => 1000),
+        extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
+        insertSegments: vi.fn(async () => 1),
+        persistTranscript,
+        linkTranscriptFile: vi.fn(async () => {}),
+        synthesize,
+      },
+    )
+
+    expect(persistTranscript).toHaveBeenCalled()
+    expect(brainIngestor).toHaveBeenCalled()
+    expect(synthesize).not.toHaveBeenCalled()
+  })
 })

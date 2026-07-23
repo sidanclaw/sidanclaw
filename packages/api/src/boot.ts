@@ -143,7 +143,7 @@ import { localSessionRoutes, isOssEdition } from './routes/local-session.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
 import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
-import { menuForClass } from '@use-brian/shared/model-registry'
+import { menuForClass, registryRow } from '@use-brian/shared/model-registry'
 import { BACKGROUND_MODEL, ensureServableModel } from './model-resolution.js'
 import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
@@ -3669,6 +3669,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
       enqueueJob: enqueueRecordingJob,
       hasProcessed: hasCompletedRecordingJob,
+      resolvePageWorkspace: async (userId, pageId) =>
+        (await savedViewStore.getById(userId, pageId))?.workspaceId ?? null,
     }))
   }
 
@@ -4994,6 +4996,32 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (runWorkers && fileIngestWorker) fileIngestWorker.start()
 
   // ── Recording worker ──
+  // Structural synthesis uses the already-resolved extraction model rather than
+  // assuming Gemini. This keeps the hosted callback reusable in OSS and allows
+  // Qwen-only deployments when their configured model supports tool calls.
+  const synthesisModelRow = registryRow(extractionModel)
+  const synthesisModel = synthesisModelRow?.capabilities.tools && configuredProviders.has(synthesisModelRow.provider)
+    ? extractionModel
+    : undefined
+  const recordingSynthesize: RecordingSynthesizeFn | undefined = synthesisModel
+    ? createRecordingSynthesizer({
+        provider,
+        model: synthesisModel,
+        savedViewStore,
+        docPageStore: createDbDocPageStore(),
+        crmStore,
+        taskStore,
+        memoryStore,
+        workflowRunStore,
+        workspaceDirectory: workspaceDirectoryStore,
+        embedder: sharedEmbedder,
+        usageStore,
+        pageTemplateStore,
+        blueprintRecordStore,
+        computeCostUsd: (model, usage) => calculateCost(model, usage),
+      })
+    : undefined
+
   // Always construct the drain when storage exists. If ffmpeg/ffprobe or a
   // transcriber is unavailable, the claimed job is retried then parked FAILED
   // with that explicit prerequisite error instead of remaining pending forever.
@@ -5009,7 +5037,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     : recordingTranscribers.length === 1
       ? recordingTranscribers[0]
       : withTranscriberFallback(recordingTranscribers[0], ...recordingTranscribers.slice(1))
-  const recordingProcessWorker = filesResolver && filesBlobClient
+  const recordingProcessWorker = filesResolver && filesBlobClient && filesApi
     ? createOpenRecordingProcessWorker({
         claim: claimNextRecordingJob,
         process: async (job) => {
@@ -5020,6 +5048,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             fallbackStorage: filesBlobClient,
             transcriber: recordingTranscriber,
             brainIngestor: brainEpisodeIngestor,
+            filesApi,
+            synthesize: recordingSynthesize,
           })
           await updateRecording(job.recordingId, {
             status: 'processed',
@@ -5203,30 +5233,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         .catch((err) => console.error('[worker-runs] cleanup sweep failed:', err))
     }, 24 * 60 * 60 * 1000)
   }
-
-  // Structural-synthesis callback for the recording path (blueprint → brief page
-  // + guided capture). Built here where the doc/CRM/task/directory stores live;
-  // the closed recording factory only holds the reference. Undefined without a
-  // Gemini key (the searchRecording vector arm needs the embedder). See
-  // docs/architecture/brain/structural-synthesis.md → "The first source".
-  const recordingSynthesize: RecordingSynthesizeFn | undefined = env.GEMINI_API_KEY
-    ? createRecordingSynthesizer({
-        provider,
-        model: 'gemini-flash',
-        savedViewStore,
-        docPageStore: createDbDocPageStore(),
-        crmStore,
-        taskStore,
-        memoryStore,
-        workflowRunStore,
-        workspaceDirectory: workspaceDirectoryStore,
-        embedder: sharedEmbedder,
-        usageStore,
-        pageTemplateStore,
-        blueprintRecordStore,
-        computeCostUsd: (model, usage) => calculateCost(model, usage),
-      })
-    : undefined
 
   // ════════════════════════════════════════════════════════════════
   // BootContext
