@@ -7,16 +7,20 @@
  * work end-to-end without GCS — otherwise the whole file primitive is silently
  * disabled locally and the model can't actually save an uploaded file.
  *
- * Production use requires `LOCAL_FILES_DIR` to point at a durable mounted
- * volume. Without an explicit path, boot only uses the ephemeral `/tmp`
- * fallback off Cloud Run; Cloud Run remains fail-closed.
+ * Signed reads and writes use a short-lived API transfer URL when `apiUrl` and
+ * `signingSecret` are configured. That keeps browser recording uploads,
+ * connector media streams, public previews, and Range playback working without
+ * exposing a `file://` path. Production use requires `LOCAL_FILES_DIR` to point
+ * at a durable mounted volume. Without an explicit path, boot only uses the
+ * ephemeral `/tmp` fallback off Cloud Run; Cloud Run remains fail-closed.
  */
 
-import { createWriteStream, mkdirSync, promises as fs, writeFileSync } from 'node:fs'
-import type { Writable } from 'node:stream'
+import { createReadStream, createWriteStream, mkdirSync, promises as fs, writeFileSync } from 'node:fs'
+import type { Readable, Writable } from 'node:stream'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import type { GcsBlob, GcsFilesClient, GcsObjectMetadata } from './gcs-client.js'
+import { buildLocalFileTransferUrl } from './local-files-signing.js'
 
 const DEFAULT_META: GcsObjectMetadata = { workspaceId: '', mime: 'application/octet-stream' }
 
@@ -24,12 +28,39 @@ export function resolveLocalFilesBaseDir(configured?: string): string {
   return path.resolve(configured?.trim() || path.join(tmpdir(), 'sidanclaw-files'))
 }
 
-export function createLocalFilesClient(opts: { baseDir: string }): GcsFilesClient {
-  const { baseDir } = opts
-  const blobPath = (key: string): string => path.join(baseDir, key)
-  const metaPath = (key: string): string => `${path.join(baseDir, key)}.meta.json`
+export type LocalFilesClient = GcsFilesClient & {
+  openReadStream(key: string, range?: { start: number; end: number }): Readable
+}
 
-  const client: GcsFilesClient = {
+export function createLocalFilesClient(opts: {
+  baseDir: string
+  apiUrl?: string
+  signingSecret?: string
+}): LocalFilesClient {
+  const baseDir = path.resolve(opts.baseDir)
+  const blobPath = (key: string): string => {
+    const resolved = path.resolve(baseDir, key)
+    if (resolved !== baseDir && !resolved.startsWith(`${baseDir}${path.sep}`)) {
+      throw new Error('local files: key escapes storage directory')
+    }
+    return resolved
+  }
+  const metaPath = (key: string): string => `${blobPath(key)}.meta.json`
+  const transferUrl = (action: 'read' | 'write', key: string, ttlSec: number, mime?: string): string | null => {
+    if (!opts.apiUrl || !opts.signingSecret) return null
+    return buildLocalFileTransferUrl({
+      apiUrl: opts.apiUrl,
+      secret: opts.signingSecret,
+      grant: {
+        action,
+        key,
+        expires: Math.floor(Date.now() / 1000) + ttlSec,
+        ...(mime ? { mime } : {}),
+      },
+    })
+  }
+
+  const client: LocalFilesClient = {
     async writeBlob(key, bytes, metadata) {
       const p = blobPath(key)
       await fs.mkdir(path.dirname(p), { recursive: true })
@@ -82,17 +113,16 @@ export function createLocalFilesClient(opts: { baseDir: string }): GcsFilesClien
       await fs.rm(metaPath(key), { force: true })
     },
 
-    async signedReadUrl(key) {
-      // No signing locally. The workspace-file tools never call this (they read
-      // via readBlob); it exists only to satisfy the interface for the
-      // doc-block preview path, which is GCS-only anyway.
-      return `file://${blobPath(key)}`
+    async signedReadUrl(key, ttlSec = 3600) {
+      return transferUrl('read', key, ttlSec) ?? `file://${blobPath(key)}`
     },
 
-    async signedWriteUrl(key) {
-      // No signed PUT locally — the recording upload flow is GCS-only. Returned
-      // for interface parity; a local caller should writeBlob directly instead.
-      return `file://${blobPath(key)}`
+    async signedWriteUrl(key, signedOpts) {
+      return transferUrl('write', key, signedOpts?.ttlSec ?? 3600, signedOpts?.contentType) ?? `file://${blobPath(key)}`
+    },
+
+    openReadStream(key, range) {
+      return createReadStream(blobPath(key), range)
     },
 
     writeStream(key, opts): Writable {

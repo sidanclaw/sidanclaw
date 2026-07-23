@@ -80,4 +80,28 @@ describe('[COMP:files/local-client] createLocalFilesClient', () => {
     expect(blob?.bytes.length).toBe(bytes.length)
     expect(blob?.bytes.equals(bytes)).toBe(true)
   })
+
+  it('mints signed HTTP transfer URLs when the API signing context is configured', async () => {
+    const c = createLocalFilesClient({
+      baseDir,
+      apiUrl: 'http://127.0.0.1:4000',
+      signingSecret: 'test-secret',
+    })
+    const read = new URL(await c.signedReadUrl('ws1/recording', 60))
+    const write = new URL(await c.signedWriteUrl('ws1/recording', { contentType: 'audio/mp4', ttlSec: 60 }))
+
+    expect(read.origin + read.pathname).toBe('http://127.0.0.1:4000/api/local-files')
+    expect(read.searchParams.get('action')).toBe('read')
+    expect(read.searchParams.get('signature')).toBeTruthy()
+    expect(write.searchParams.get('action')).toBe('write')
+    expect(write.searchParams.get('mime')).toBe('audio/mp4')
+    expect(write.searchParams.get('signature')).toBeTruthy()
+  })
+
+  it('rejects keys that escape the configured storage directory', async () => {
+    await expect(client().writeBlob('../escape', Buffer.from('no'), {
+      workspaceId: 'ws1',
+      mime: 'text/plain',
+    })).rejects.toThrow('key escapes storage directory')
+  })
 })
