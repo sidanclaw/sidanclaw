@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { normalizeGeminiContents, resolveGeminiThinkingLevel, resolveStopReason, stripLeadingRoleToken, stripNonInputParts } from '../gemini.js'
+import { normalizeGeminiContents, resolveGeminiThinkingLevel, resolveStopReason, stripLeadingEnvelopeLeak, stripLeadingRoleToken, stripNonInputParts } from '../gemini.js'
 
 type GeminiContent = Parameters<typeof normalizeGeminiContents>[0][number]
 
@@ -244,6 +244,48 @@ describe('[COMP:providers/gemini-role-leak] stripLeadingRoleToken', () => {
   it('does not strip the word when it is not on its own opening line', () => {
     expect(stripLeadingRoleToken('model is a noun')).toBe('model is a noun')
     expect(stripLeadingRoleToken('models\nare plural')).toBe('models\nare plural')
+  })
+})
+
+describe('[COMP:providers/gemini-envelope-leak] stripLeadingEnvelopeLeak', () => {
+  it('strips the leaked `\\n"}` serialized-JSON tail (the exact prod shape)', () => {
+    // Real captured leak: cb76ea5d.content[0].text opened with the 4 literal
+    // chars \ n " } then a newline, glued ahead of the Cantonese body.
+    const leaked = '\\n"}\n去自助機（申請證件服務站）辦理，你只需要帶以下幾樣嘢：'
+    expect(stripLeadingEnvelopeLeak(leaked)).toBe(
+      '去自助機（申請證件服務站）辦理，你只需要帶以下幾樣嘢：',
+    )
+  })
+
+  it('strips other orphaned envelope-tail shapes on their own opening line', () => {
+    expect(stripLeadingEnvelopeLeak('"}\nHello')).toBe('Hello')
+    expect(stripLeadingEnvelopeLeak('"]\nHello')).toBe('Hello')
+    expect(stripLeadingEnvelopeLeak('  \\n" }\r\nHello')).toBe('Hello')
+  })
+
+  it('composes after stripLeadingRoleToken for a combined `model\\n\\n"}` leak', () => {
+    expect(stripLeadingEnvelopeLeak(stripLeadingRoleToken('model\n\\n"}\nBody'))).toBe('Body')
+  })
+
+  it('leaves real prose untouched even when it opens with a quote or brace', () => {
+    // A leading quotation mark alone lacks the "}/"] / escape signature.
+    expect(stripLeadingEnvelopeLeak('"Hello," she said.\nMore.')).toBe('"Hello," she said.\nMore.')
+    // A lone `{` opener is not a close-tail.
+    expect(stripLeadingEnvelopeLeak('{ a diagram\nnext line')).toBe('{ a diagram\nnext line')
+    // The word "model" is the role-token strip's job, not this one.
+    expect(stripLeadingEnvelopeLeak('The JSON ends with "}.\nThat closes it.')).toBe(
+      'The JSON ends with "}.\nThat closes it.',
+    )
+  })
+
+  it('does not touch a first line that carries real content alongside structure', () => {
+    // Signature present, but the opening line is not PURE structure → left alone.
+    expect(stripLeadingEnvelopeLeak('done"}\nrest')).toBe('done"}\nrest')
+  })
+
+  it('never nulls a bare orphan with no following body', () => {
+    expect(stripLeadingEnvelopeLeak('\\n"}')).toBe('\\n"}')
+    expect(stripLeadingEnvelopeLeak('"}')).toBe('"}')
   })
 })
 
