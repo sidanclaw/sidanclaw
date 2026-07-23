@@ -2,7 +2,7 @@
 
 /**
  * "My Browser" — connect, allow, or reconnect the local browser extension
- * from the persistent chrome, without going through Settings.
+ * without going through Settings.
  *
  * The pairing machinery already exists (`connect-browser-panel.tsx` +
  * `lib/browser-extension-bridge.ts`, my-browser.md P1); what it lacked was a
@@ -11,12 +11,12 @@
  * actually matter: connecting the first time, and reconnecting after Chrome
  * has been restarted and the relay socket is gone. Both are one click here.
  *
- * **Shape.** A 28px icon square in the operator app-bar strip, sitting after
- * the apps — same square, same hover wash, same glyph weight, so the browser
- * reads as one more thing the sidebar can take you to rather than a band of
- * chrome bolted under the strip. It was a full-width labelled row first; that
- * added a second horizontal band under an icon strip that had been through
- * four iterations specifically to stay one fixed-height row.
+ * **Shape.** A 28px icon square in the **Browsers operator surface's top bar**
+ * (`browsers-surface-shell.tsx`, the `right` slot, next to the live-session
+ * count) — the browser controls sit where the browser lives. It began as a
+ * square trailing the global operator app-bar, which put a browser affordance
+ * on every surface; it moved onto the Browsers surface once Browsers became a
+ * first-class operator app (doc.md → "Home operator app-bar").
  *
  * State lives in the glyph, since an icon has no room for a label: a primary
  * dot when connected, an amber dot when paired but not yet allowed to drive,
@@ -56,11 +56,11 @@ import {
 } from "@/lib/api/computer";
 
 /**
- * The row is mounted for the whole session on every surface, so it polls far
- * more slowly than the Settings panel (5s) — a socket that dropped is not
- * urgent until someone looks. A window focus re-checks immediately, which is
- * the moment that actually matters: the user has just come back from the
- * extension popup or from restarting Chrome.
+ * Mounted only on the Browsers surface (the shell unmounts when you leave), so
+ * it polls far more slowly than the Settings panel (5s) — a socket that dropped
+ * is not urgent until someone looks. A window focus re-checks immediately,
+ * which is the moment that actually matters: the user has just come back from
+ * the extension popup or from restarting Chrome.
  */
 const STATUS_POLL_MS = 60_000;
 

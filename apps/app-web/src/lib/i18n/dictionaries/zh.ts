@@ -37,6 +37,12 @@ export const zh: Dictionary = {
     errorTitle: "登入未完成",
     errorBody: "請回到 Use Brian 重新登入。",
   },
+  desktopConnectorConnected: {
+    title: "已連接整合",
+    body: "您可以關閉此分頁，回到 Use Brian。",
+    errorTitle: "連接未完成",
+    errorBody: "請回到 Use Brian 重新嘗試連接。",
+  },
   workspace: {
         brain: {
       knowledgeTitle: "知識來源",
@@ -59,24 +65,6 @@ export const zh: Dictionary = {
       enabledLabel: "對此助手啟用",
       enabledHelp: "關閉後，此助手將不再參考此來源的知識。其他助手與共用知識庫不受影響。",
       enablementFailed: "無法更新此來源，請稍後再試。",
-    },
-    home: {
-      open: "開啟",
-      comingSoon: "即將推出",
-      proBadge: "Pro",
-      alphaBadge: "內測",
-      contactForTrial: "聯絡我們申請試用",
-      trialEmailSubject: "試用申請：{app}",
-      miniApps: {
-        distribution: {
-          label: "Feed",
-          description: "協助你經營社群帳號，集中管理 X 與 Threads 帳號。",
-        },
-        views: {
-          label: "Doc",
-          description: "以大腦為底層的 Notion 風頁面，並能儲存任務、CRM 與工作流程紀錄的表格與看板檢視。",
-        },
-      },
     },
   },
   planGate: {
@@ -180,6 +168,10 @@ export const zh: Dictionary = {
     },
     confirmationApprove: "核准",
     confirmationDeny: "拒絕",
+    confirmationDenyWithComment: "拒絕並附註",
+    confirmationCommentPlaceholder: "留下說明讓助手可以修改（選填）",
+    confirmationCommentSubmit: "送出拒絕",
+    confirmationCommentCancel: "取消",
     confirmationApproving: "執行中…",
     confirmationDone: "已完成，已執行 {label}。",
     confirmationFailed: "失敗，{label} 未能完成。",
@@ -1534,12 +1526,15 @@ export const zh: Dictionary = {
         errGeneric: "無法連接該目錄。請確認路徑存在且伺服器具有寫入權限。",
       },
       shopify: {
-        formHelp: "輸入商店的 myshopify.com 網域。可透過 Shopify 連接，或貼上自訂應用程式的 Admin API 存取權杖。",
-        domainPlaceholder: "mystore.myshopify.com",
+        formHelp: "輸入商店的網站或 myshopify.com 網域。可透過 Shopify 連接，或貼上自訂應用程式的 Admin API 存取權杖。",
+        domainPlaceholder: "yourstore.com",
+        detecting: "正在確認你的商店網域...",
+        resolvedPrefix: "偵測到商店: ",
+        resolveHint: "無法自動偵測。請輸入你的 myshopify.com 網域（可在 Shopify 管理後台的「設定」>「網域」中找到）。",
         oauthBtn: "前往 Shopify 繼續",
         orPasteToken: "或貼上 Admin API 存取權杖:",
         tokenPlaceholder: "shpat_...",
-        errDomain: "請輸入有效的商店網域，例如 mystore.myshopify.com。",
+        errDomain: "請輸入商店的網站，或類似 yourstore.myshopify.com 的網域。",
         errSave: "無法連接商店。請檢查網域與權杖後再試一次。",
       },
       imap: {
@@ -2048,7 +2043,18 @@ export const zh: Dictionary = {
       staged_write: "代理變更請求",
       staged_skill_creation: "新技能",
       staged_skill_update: "技能更新",
+      workflow_refinement: "工作流程改進",
       browser_skill_send: "瀏覽器送出",
+    },
+    refinement: {
+      step: "步驟 {step}",
+      workflowMissing: "目標工作流程已不存在於此工作區。此提案只能被拒絕。",
+      stepMissing: "目標步驟已不存在於工作流程中。此提案只能被拒絕。",
+    },
+    attachOffer: {
+      label: "同時讓「{workflow}」中學到此技能的步驟可以使用它",
+      pickStep: "選擇步驟",
+      stepRequired: "請選擇步驟, 或取消勾選以直接核准而不附加。",
     },
     browserSkillSend: {
       deny: "拒絕",
@@ -2328,6 +2334,9 @@ export const zh: Dictionary = {
     detail: {
       backToList: "所有工作流程",
       notFound: "找不到此工作流程",
+      learnedSkillsTitle: "從此工作流程學到的技能",
+      learnedSkillsHint:
+        "由此工作流程的執行紀錄提煉而成。要在這裡使用, 請將它加入步驟的技能欄位。",
     },
     board: {
       triggerLabel: "觸發條件",
@@ -2787,6 +2796,7 @@ export const zh: Dictionary = {
     taskStatus: {
       todo: "待辦",
       in_progress: "進行中",
+      in_review: "審核中",
       blocked: "受阻",
       done: "已完成",
       archived: "已封存",
@@ -3042,6 +3052,8 @@ export const zh: Dictionary = {
       rederivations: "重新推導次數",
       blueprintLabel: "藍圖",
       blueprintView: "查看",
+      learnedFromWorkflowLabel: "學習來源工作流程",
+      learnedFromWorkflowView: "查看工作流程",
       verifiedAt: "確認時間",
       notVerified: "尚未確認",
       lastUsedLabel: "最近使用",
@@ -3153,6 +3165,7 @@ export const zh: Dictionary = {
         detailsUnavailable: "沒有其他詳細資料。",
         openSkill: "開啟技能",
         skillWhenToUse: "使用時機",
+        skillContent: "技能內容",
         skillActive: "已啟用",
         skillSuggested: "建議中",
         kinds: {
@@ -3164,6 +3177,7 @@ export const zh: Dictionary = {
           knowledge: "知識",
           skill: "技能",
           assistant: "助理",
+          workflow: "工作流程",
         },
       },
     },
@@ -3204,7 +3218,7 @@ export const zh: Dictionary = {
         },
         talkToAssistants: {
           title: "與你的助理對話",
-          body: "四種讓大腦運作的方式",
+          body: "三種讓大腦運作的方式",
           channel: {
             title: "頻道",
             body: "直接在 Telegram、Slack、Discord 對話中召喚助理",
@@ -3212,10 +3226,6 @@ export const zh: Dictionary = {
           api: {
             title: "Assistant API",
             body: "輕鬆把訓練好的 AI 嵌進自家應用",
-          },
-          miniApp: {
-            title: "迷你應用",
-            body: "為特定場景而生的應用，建構於大腦之上",
           },
           workflow: {
             title: "工作流程",
@@ -3646,6 +3656,7 @@ export const zh: Dictionary = {
     tasks: "任務",
     feed: "Feed",
     crm: "CRM",
+    browsers: "瀏覽器",
   },
   crmPage: {
     title: "CRM",
@@ -4496,7 +4507,6 @@ export const zh: Dictionary = {
     sectionsAriaLabel: "工作室導覽",
     sections: {
       assistants: "助理",
-      miniApps: "迷你應用程式",
       connectors: "連接器",
       programmaticAccess: "程式化存取",
       skills: "技能",
@@ -5629,6 +5639,17 @@ export const zh: Dictionary = {
       active: "即時瀏覽器執行中",
       watch: "觀看",
       unnamedTask: "瀏覽器任務",
+    },
+    // Browsers operator surface: the left session rail + its index prompt.
+    sessions: {
+      railTitle: "即時工作階段",
+      railEmpty: "尚無即時工作階段",
+      liveCount: "{count} 個執行中",
+      selectTitle: "觀看即時瀏覽器",
+      selectHint: "在左側選擇一個工作階段來觀看或接管，或等待助理開啟瀏覽器。",
+      statusRunning: "執行中",
+      statusPaused: "已暫停",
+      unnamed: "瀏覽器工作階段",
     },
     connectBrowser: {
       title: "我的瀏覽器",

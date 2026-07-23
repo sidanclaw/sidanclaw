@@ -142,10 +142,10 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     oauth_required: false,
     enabled: true,
     tags: ['email', 'productivity'],
-    // One mailbox per user (D11 — the Gmail v1 boundary). Multi-account is a
-    // later, deliberate change: drop this flag AND consume the extras in
-    // injectMailboxTools (the github/google injector pattern).
-    single_instance: true,
+    // Multi-account: a user connects several corporate mailboxes; the tools
+    // are ONE set with an optional `account` (the AgentMail router pattern in
+    // injectMailboxTools). D11 (one mailbox per user) is retired. NOT
+    // single_instance — "Add another" is meaningful here.
   },
   {
     id: 'agentmail',

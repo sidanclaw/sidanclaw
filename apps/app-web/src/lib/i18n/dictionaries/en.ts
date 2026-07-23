@@ -52,6 +52,12 @@ export const en = {
     errorTitle: "Sign-in didn't finish",
     errorBody: "Head back to Use Brian and start sign-in again.",
   },
+  desktopConnectorConnected: {
+    title: "Connector connected",
+    body: "You can close this tab and return to Use Brian.",
+    errorTitle: "Connection didn't finish",
+    errorBody: "Head back to Use Brian and try connecting again.",
+  },
   workspace: {
         brain: {
       knowledgeTitle: "Knowledge Sources",
@@ -74,28 +80,6 @@ export const en = {
       enabledLabel: "Active for this assistant",
       enabledHelp: "When off, this assistant won't draw on this source's knowledge. Other assistants and the shared knowledge base are unaffected.",
       enablementFailed: "Couldn't update this source. Please try again.",
-    },
-    /** Per-workspace sidebar — workspace identity + nav. */
-    // Mini-apps gallery copy consumed by the Studio mini-apps store.
-    // Ported verbatim from apps/web's `workspace.home` subtree (only the
-    // keys the mini-apps page reads).
-    home: {
-      open: "Open",
-      comingSoon: "Coming soon",
-      proBadge: "Pro",
-      alphaBadge: "Alpha",
-      contactForTrial: "Contact us for trial",
-      trialEmailSubject: "Trial request: {app}",
-      miniApps: {
-        distribution: {
-          label: "Feed",
-          description: "Helps you manage socials. Manage X and Threads accounts.",
-        },
-        views: {
-          label: "Doc",
-          description: "Notion-style pages backed by your brain. Saved table and board views over your tasks, CRM, and workflow runs.",
-        },
-      },
     },
   },
   planGate: {
@@ -222,6 +206,11 @@ export const en = {
     // Tool-confirmation card (used when a tool needs explicit approval).
     confirmationApprove: "Approve",
     confirmationDeny: "Deny",
+    confirmationDenyWithComment: "Deny with comment",
+    confirmationCommentPlaceholder:
+      "Add a note so the assistant can revise (optional)",
+    confirmationCommentSubmit: "Send denial",
+    confirmationCommentCancel: "Cancel",
     confirmationApproving: "Approving…",
     confirmationDone: "Done. {label} completed.",
     confirmationFailed: "Failed. {label} did not complete.",
@@ -1728,12 +1717,15 @@ export const en = {
         errGeneric: "Could not connect that directory. Check that the path exists and is writable by the server.",
       },
       shopify: {
-        formHelp: "Enter your store's myshopify.com domain. Connect with Shopify, or paste an Admin API access token from a custom app.",
-        domainPlaceholder: "mystore.myshopify.com",
+        formHelp: "Enter your store's website or its myshopify.com domain. Connect with Shopify, or paste an Admin API access token from a custom app.",
+        domainPlaceholder: "yourstore.com",
+        detecting: "Checking your store domain...",
+        resolvedPrefix: "Store detected: ",
+        resolveHint: "Could not detect it automatically. Enter your myshopify.com domain (find it in Shopify admin under Settings, Domains).",
         oauthBtn: "Continue to Shopify",
         orPasteToken: "Or paste an Admin API access token:",
         tokenPlaceholder: "shpat_...",
-        errDomain: "Enter a valid store domain like mystore.myshopify.com.",
+        errDomain: "Enter your store's website or a domain like yourstore.myshopify.com.",
         errSave: "Could not connect the store. Check the domain and token, then try again.",
       },
       imap: {
@@ -2254,7 +2246,20 @@ export const en = {
       staged_write: "Agent change request",
       staged_skill_creation: "New skill",
       staged_skill_update: "Skill update",
+      workflow_refinement: "Workflow improvement",
       browser_skill_send: "Browser send",
+    },
+    refinement: {
+      step: "Step {step}",
+      workflowMissing:
+        "The target workflow no longer exists in this workspace. This proposal can only be rejected.",
+      stepMissing:
+        "The target step no longer exists in the workflow. This proposal can only be rejected.",
+    },
+    attachOffer: {
+      label: "Also make this skill available to the step of \"{workflow}\" it was learned from",
+      pickStep: "Pick a step",
+      stepRequired: "Pick a step, or untick to approve without attaching.",
     },
     browserSkillSend: {
       deny: "Deny",
@@ -2550,6 +2555,9 @@ export const en = {
     detail: {
       backToList: "All workflows",
       notFound: "Workflow not found",
+      learnedSkillsTitle: "Skills learned from this workflow",
+      learnedSkillsHint:
+        "Distilled from this workflow's runs. To use one here, add it to a step's Skills field.",
     },
     board: {
       triggerLabel: "Trigger",
@@ -3015,6 +3023,7 @@ export const en = {
     taskStatus: {
       todo: "To do",
       in_progress: "In progress",
+      in_review: "In review",
       blocked: "Blocked",
       done: "Done",
       archived: "Archived",
@@ -3276,6 +3285,8 @@ export const en = {
       rederivations: "Re-derivations",
       blueprintLabel: "Blueprint",
       blueprintView: "View",
+      learnedFromWorkflowLabel: "Learned from workflow",
+      learnedFromWorkflowView: "View workflow",
       verifiedAt: "Verified",
       notVerified: "Not verified yet",
       lastUsedLabel: "Last used",
@@ -3391,6 +3402,7 @@ export const en = {
         detailsUnavailable: "No additional details.",
         openSkill: "Open skill",
         skillWhenToUse: "When to use",
+        skillContent: "Skill content",
         skillActive: "Active",
         skillSuggested: "Suggested",
         kinds: {
@@ -3402,6 +3414,7 @@ export const en = {
           knowledge: "Knowledge",
           skill: "Skill",
           assistant: "Assistant",
+          workflow: "Workflow",
         },
       },
     },
@@ -3442,7 +3455,7 @@ export const en = {
         },
         talkToAssistants: {
           title: "Talk to your assistant",
-          body: "Four ways to put the brain to work.",
+          body: "Three ways to put the brain to work.",
           channel: {
             title: "Channel",
             body: "Simply talk to your assistant in Telegram, Slack, or Discord.",
@@ -3450,10 +3463,6 @@ export const en = {
           api: {
             title: "Assistant API",
             body: "Wire the trained AI into your own app with ease.",
-          },
-          miniApp: {
-            title: "Mini app",
-            body: "Purpose-built applications on top of your brain.",
           },
           workflow: {
             title: "Workflow",
@@ -3890,6 +3899,7 @@ export const en = {
     tasks: "Tasks",
     feed: "Feed",
     crm: "CRM",
+    browsers: "Browsers",
   },
   // ── CRM operator surface ([COMP:app-web/crm-surface]) ──
   crmPage: {
@@ -4746,7 +4756,6 @@ export const en = {
     sectionsAriaLabel: "Studio sections",
     sections: {
       assistants: "Assistants",
-      miniApps: "Mini-apps",
       connectors: "Connectors",
       programmaticAccess: "Programmatic access",
       skills: "Skills",
@@ -5903,6 +5912,18 @@ export const en = {
       active: "Live browser running",
       watch: "Watch",
       unnamedTask: "Browser task",
+    },
+    // Browsers operator surface: the left session rail + its index prompt.
+    sessions: {
+      railTitle: "Live sessions",
+      railEmpty: "No live sessions yet",
+      liveCount: "{count} live",
+      selectTitle: "Watch a live browser",
+      selectHint:
+        "Pick a session on the left to watch or take over, or wait for an assistant to open one.",
+      statusRunning: "Running",
+      statusPaused: "Paused",
+      unnamed: "Browser session",
     },
     connectBrowser: {
       title: "My Browser",

@@ -39,6 +39,7 @@ import type { Sensitivity } from '../../security/sensitivity.js'
 
 import {
   processEpisode,
+  sourceKindCreatesTasks,
   splitContentByTokenLimit,
   mergeExtractionOutputs,
   type ExtractionOutput,
@@ -1044,6 +1045,85 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(taskRows[0].sourceEpisodeId).toBe('ep-1')
     expect(memories.created).toHaveLength(1)
     expect(result.ephemeralCount).toBe(0)
+  })
+
+  it('drops extracted tasks from retrospective code-history sources (github_sync) but keeps knowledge', async () => {
+    // A push-to-`main` batch narrates work already DONE, so reifying its
+    // imperative text ("Review PR #242") into a `todo` is slop — on
+    // 2026-07-23 push batches alone produced 314 open todos in one
+    // workspace, 98% never closed. The retrospective lane must extract
+    // knowledge (entities/memories) but never mint tasks. Reconcile + create
+    // are the forward-looking paths (docs/plans/github-task-extraction-fix.md).
+    const world = makeWorld()
+    const crm = spyCrm(world)
+    const entities = spyEntities(world)
+    const links = spyLinks()
+    const memories = spyMemories()
+    const episodes = spyEpisodes()
+
+    const taskRows: Array<{ title: string }> = []
+    const tasks = {
+      create: async (params: { title: string }) => {
+        taskRows.push({ title: params.title })
+        return { id: `task-${taskRows.length}`, title: params.title }
+      },
+    } as unknown as PipelineBDeps['tasks']
+
+    const extraction = JSON.stringify({
+      summary: 'A series of commits merged PR #242.',
+      entities: [
+        { kind: 'project', display_name: 'Brian Platform', canonical_id: null, attributes: null },
+      ],
+      edges: null,
+      // The LLM still emits a task; the lane gate drops it on write.
+      tasks: [{ text: 'Review PR #242', due_iso: null, assignee_ref: null }],
+      memories: [
+        {
+          scope: null,
+          summary: 'PR #242 introduced the WeChat channel.',
+          detail: null,
+          tags: null,
+          why_not_entity: 'event, not a subject',
+          why_not_task: 'already merged',
+        },
+      ],
+      ephemeral: null,
+      tags: null,
+    })
+    const classification = JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' })
+
+    const provider = sequencedProvider([extraction, classification])
+    const deps = makeDeps({
+      provider,
+      crm: crm.store,
+      entities: entities.store,
+      entityLinks: links.store,
+      memories: memories.store,
+      episodes: episodes.port,
+      tasks,
+    })
+
+    const result = await processEpisode(
+      baseEpisode({ sourceKind: 'github_sync' }),
+      'A series of commits merged PR #242 into use-brian/brian-platform',
+      deps,
+    )
+
+    expect(result.extracted).toBe(true)
+    // No task written despite the LLM emitting one — the retrospective gate.
+    expect(taskRows).toHaveLength(0)
+    expect(result.tasksWritten).toHaveLength(0)
+    // Knowledge extraction is unaffected: entities + memories still land.
+    expect(entities.created).toHaveLength(1)
+    expect(memories.created).toHaveLength(1)
+  })
+
+  it('sourceKindCreatesTasks gates only retrospective code-history kinds', () => {
+    expect(sourceKindCreatesTasks('github_sync')).toBe(false)
+    // Every conversational / recording / prospective source still creates.
+    expect(sourceKindCreatesTasks('web_chat')).toBe(true)
+    expect(sourceKindCreatesTasks('recording')).toBe(true)
+    expect(sourceKindCreatesTasks('connector_action')).toBe(true)
   })
 
   it('retries once with the validation error when the first extraction output fails to parse', async () => {

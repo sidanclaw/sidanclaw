@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 /**
- * [COMP:app-web/connect-browser-button] "My Browser" sidebar button.
+ * [COMP:app-web/connect-browser-button] "My Browser" connect control
+ * (Browsers surface top bar).
  *
- * The row's whole value is that it never dead-ends: it hides where no relay
+ * The control's whole value is that it never dead-ends: it hides where no relay
  * exists, pairs in one click where the extension answers, and hands off to the
  * Settings panel in every other case. Those branches are what is asserted here
  * — jsdom (not the SSR shape the panel test uses), because all of them live
@@ -83,7 +84,7 @@ function dotOf(el: HTMLElement): "primary" | "amber" | null {
   return dot.className.includes("bg-amber") ? "amber" : "primary";
 }
 
-describe("[COMP:app-web/connect-browser-button] My Browser sidebar button", () => {
+describe("[COMP:app-web/connect-browser-button] My Browser connect control", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     pairBrowserExtension.mockResolvedValue(PAIRING);

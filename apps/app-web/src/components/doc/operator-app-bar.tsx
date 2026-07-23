@@ -5,9 +5,9 @@
  *
  * Rendered by `DocSidebar` between the top icon row and the surface body
  * whenever the active surface belongs to an operator app (Page / Tasks /
- * Feed) — the sidebar owns navigation in this design language, so the app
- * switcher lives here rather than as an extra chrome band over the content
- * pane.
+ * CRM / Feed / Browsers) — the sidebar owns navigation in this design
+ * language, so the app switcher lives here rather than as an extra chrome
+ * band over the content pane.
  *
  * UI/UX (founder redesign 2026-07-22, settled after four iterations): a
  * **dock-style icon strip** — ONE fixed-height row of 28px icon squares
@@ -41,12 +41,12 @@ import {
   FileText,
   Users,
   Megaphone,
+  MonitorPlay,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { Tooltip } from "@/components/ui/tooltip";
-import { ConnectBrowserButton } from "./connect-browser-button";
 import {
   OPERATOR_APP_KEYS,
   operatorAppPath,
@@ -62,6 +62,7 @@ export const APP_ICON: Record<OperatorAppKey, LucideIcon> = {
   tasks: CheckSquare,
   feed: Megaphone,
   crm: Users,
+  browsers: MonitorPlay,
 };
 
 export function OperatorAppBar({
@@ -72,10 +73,9 @@ export function OperatorAppBar({
   workspaceId: string;
   /**
    * The operator app the current route belongs to, or `null` off the family
-   * (Brain / Studio / Workflow). The app SWITCHER stays scoped to the family —
-   * offering Page/Tasks/CRM/Feed from Studio would claim a relationship the
-   * routes do not have — but the strip itself still renders, because "My
-   * Browser" is workspace-wide chrome that belongs on every surface.
+   * (Brain / Studio / Workflow) — where the bar renders nothing at all. The
+   * switcher stays scoped to the family: offering Page/Tasks/CRM/Feed from
+   * Studio would claim a relationship the routes do not have.
    */
   active: OperatorAppKey | null;
   /** Whether the Feed app is available for this workspace. */
@@ -87,11 +87,17 @@ export function OperatorAppBar({
     tasks: t.tasks,
     feed: t.feed,
     crm: t.crm,
+    browsers: t.browsers,
   };
   const apps =
     active === null
       ? []
       : OPERATOR_APP_KEYS.filter((key) => key !== "feed" || feedEnabled);
+  // Off the operator family (Brain / Studio / Workflow) there is nothing to
+  // switch between, so the bar renders nothing. The browser connect/reconnect
+  // affordance that once kept an empty strip alive now lives in the Browsers
+  // surface's own top bar (computer-use.md §5).
+  if (apps.length === 0) return null;
   return (
     <nav
       aria-label={t.aria}
@@ -128,14 +134,6 @@ export function OperatorAppBar({
           </Tooltip>
         );
       })}
-      {/* "My Browser" — same square, same hover wash, trailing the apps. It is
-          chrome rather than an operator app (it navigates nowhere; it connects
-          a browser), so it sits after them and takes no active state, but it
-          shares the strip because a second labelled band under a strip built
-          across four iterations to stay ONE fixed-height row is exactly what
-          that design was avoiding. Hides itself where no relay is configured,
-          which is what keeps the strip from ending in a dead square. */}
-      <ConnectBrowserButton workspaceId={workspaceId} />
     </nav>
   );
 }

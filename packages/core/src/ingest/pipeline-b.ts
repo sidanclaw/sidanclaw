@@ -336,6 +336,36 @@ const extractedTaskSchema = z.object({
   assignee_ref: z.string().nullish().transform(emptyToUndef),
 })
 
+// ── Task-creation lane policy ─────────────────────────────────────────
+//
+// Some source kinds are RETROSPECTIVE records of work already completed
+// (code history), not sources of new action items. Pipeline B still mines
+// them for entities / edges / memories (knowledge), but must NOT mint tasks:
+// a merged/pushed commit narrates work that is already DONE, so reifying its
+// imperative-sounding text ("Fix X", "Add @Y", "Review PR #Z") into `todo`s
+// is slop. On 2026-07-23 this produced 314 open todos in one workspace, 98%
+// never closed, from push-to-`main` batches alone.
+//
+// `github_sync` = push-to-default-branch batches (ingest/adapters/github/
+// envelope.ts `pickSourceKind`). Reconciling EXISTING tasks against a merge
+// (`Closes #N` → done) and CREATING tasks from prospective events
+// (`issue.opened`) are separate, forward-looking paths — see
+// docs/plans/github-task-extraction-fix.md.
+//
+// Denylist, not allowlist: every other source (chat, slack, recording,
+// whatsapp, connector_action, …) legitimately creates tasks, so the default
+// is "creates tasks" and only retrospective kinds are gated out. Graded by
+// `pnpm check` (`invariants/no-task-extraction-from-code-history`).
+// Spec: docs/architecture/brain/ingest-pipeline.md → "Retrospective sources".
+const RETROSPECTIVE_SOURCE_KINDS: ReadonlySet<SourceKind> = new Set<SourceKind>([
+  'github_sync',
+])
+
+/** False for retrospective code-history sources that must not mint tasks. */
+export function sourceKindCreatesTasks(sourceKind: SourceKind): boolean {
+  return !RETROSPECTIVE_SOURCE_KINDS.has(sourceKind)
+}
+
 // v2 — explicit drop-with-reason slot. Persisted to analytics only
 // (NOT written to `memories`), so the LLM has a non-empty target for
 // status updates / ack noise / per-cycle counters that otherwise rot
@@ -1254,7 +1284,11 @@ export async function processEpisode(
   //     actor). Assignee resolution (assignee_ref → workspace_members.id)
   //     is deferred to a follow-up; v1 lands tasks unassigned.
   const tasksWritten: { id: string }[] = []
-  if (deps.tasks) {
+  // Retrospective sources (code history) extract knowledge but never mint
+  // tasks — see RETROSPECTIVE_SOURCE_KINDS. This is the enforcement point
+  // graded by `invariants/no-task-extraction-from-code-history`.
+  const createsTasks = sourceKindCreatesTasks(episode.sourceKind)
+  if (deps.tasks && createsTasks) {
     for (const ex of payload.tasks) {
       try {
         let due: Date | null = null
@@ -1285,7 +1319,11 @@ export async function processEpisode(
     }
   } else if (payload.tasks.length > 0) {
     console.warn(
-      `[pipeline-b] ${payload.tasks.length} extracted task(s) dropped for episode ${episode.id} — deps.tasks not wired`,
+      `[pipeline-b] ${payload.tasks.length} extracted task(s) dropped for episode ${episode.id} — ${
+        !createsTasks
+          ? `source_kind '${episode.sourceKind}' is retrospective (no task creation)`
+          : 'deps.tasks not wired'
+      }`,
     )
   }
 

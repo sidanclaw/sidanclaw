@@ -148,6 +148,7 @@ import { BACKGROUND_MODEL, ensureServableModel } from './model-resolution.js'
 import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
 import { setGlobalMailboxArchiveDeps } from './mailbox/archive-search-tool.js'
+import { setGlobalMailboxSyncDeps } from './mailbox/sync-tool.js'
 import { resolveIngestPlaceholders } from './ingest/placeholder-resolver.js'
 import { createMeteredProfileStore } from './db/metered-profile-store.js'
 import { createWorkspaceModelDefaultsStore } from './db/workspace-model-defaults-store.js'
@@ -333,7 +334,11 @@ import {
 import { createApprovalDeliveryDispatcher } from './workflow/approval-deliveries.js'
 import { workflowApprovalsRoutes } from './routes/workflow-approvals.js'
 import { approvalsRoutes } from './routes/approvals.js'
-import { workflowsRoutes } from './routes/workflows.js'
+import {
+  workflowsRoutes,
+  createValidatedDefinitionEditor,
+  type ValidatedDefinitionEditor,
+} from './routes/workflows.js'
 import { modelMenuRoutes } from './routes/model-menu.js'
 import { pageActionsRoutes } from './routes/page-actions.js'
 import { workflowWebhookRoutes } from './routes/workflow-webhooks.js'
@@ -3833,6 +3838,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     assistantConnectorGrantsStore,
   }))
 
+  // Late-bound (origin-aware induction): the validated definition editor is
+  // assembled with the workflows route options further down this function;
+  // this router mounts earlier (it must out-rank the bare `/api/skills`
+  // mount), so the wrapper defers resolution to request time — by which the
+  // assignment below has run.
+  let applyWorkflowDefinitionEdit: ValidatedDefinitionEditor | undefined
   app.use('/api/skills/approvals', requireAuth(env.JWT_SECRET), skillApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,
     workspaceStore,
@@ -3840,6 +3851,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     fileStore: workspaceSkillFilesStore,
     enablementStore: workspaceSkillEnablementStore,
     entityLinks: entityLinksStore,
+    workflowStore,
+    applyDefinitionEdit: (params) =>
+      applyWorkflowDefinitionEdit
+        ? applyWorkflowDefinitionEdit(params)
+        : Promise.resolve({ ok: false as const, error: 'Workflow edit path not initialized' }),
   }))
   app.use('/api/skills', requireAuth(env.JWT_SECRET), skillRoutes({
     skillStore,
@@ -4070,7 +4086,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     estimateMeteredTurn: ports.meteredBilling?.estimateMeteredTurn,
   }))
 
-  app.use('/api', requireAuth(env.JWT_SECRET), workflowsRoutes({
+  const workflowsRouteOptions: Parameters<typeof workflowsRoutes>[0] = {
     workflowStore,
     runStore: workflowRunStore,
     workspaceStore,
@@ -4092,7 +4108,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     listButtonBindings: (actorUserId, workspaceId, workflowId) =>
       pageActionsStore.listForWorkflow(actorUserId, workspaceId, workflowId),
-  }))
+  }
+  app.use('/api', requireAuth(env.JWT_SECRET), workflowsRoutes(workflowsRouteOptions))
+  // Resolves the late-bound editor the skill-approvals mount above wraps —
+  // refinement applies + attach-offer writes now share the builder's exact
+  // validation bar (schema, page anchors, dependency preflight).
+  applyWorkflowDefinitionEdit = createValidatedDefinitionEditor(workflowsRouteOptions)
 
   // Page-action buttons: bindings CRUD + per-page resolve + invoke dispatch
   // (workflow runs stamped trigger_kind='button', inline-advanced; goal kind
@@ -4246,6 +4267,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     pendingClassificationStore: ports.pendingClassificationStore,
     filesApi,
     entityLinks: entityLinksStore,
+    workspaceSkillStore,
   }))
   app.use('/api/home', requireAuth(env.JWT_SECRET), homeRoutes())
   app.use('/api/home-dock', requireAuth(env.JWT_SECRET), homeDockRoutes({
@@ -4694,6 +4716,29 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     approvalsStore: pendingApprovalsStore,
     analyticsStore,
     reviewLLM: skillReviewLLM,
+    // Origin-aware induction: the workflow read port gives workflow-origin
+    // review cycles their source definition (deviation objective +
+    // refinement staging) and the active-workflow subsumption corpus.
+    workflowPort: {
+      async getWorkflowForReview(userId, workspaceId, workflowId) {
+        const wf = await workflowStore.getById(userId, workflowId)
+        if (!wf || wf.workspaceId !== workspaceId) return null
+        return {
+          id: wf.id,
+          name: wf.name,
+          description: wf.description ?? null,
+          steps: wf.definition.steps.map((s) => ({
+            id: s.id,
+            kind: s.type,
+            prompt: s.type === 'assistant_call' ? s.prompt : null,
+          })),
+        }
+      },
+      async listActiveWorkflows(userId, workspaceId) {
+        const rows = await workflowStore.list(userId, workspaceId)
+        return rows.map((w) => ({ id: w.id, name: w.name }))
+      },
+    },
     leaseHolderId: skillReviewLeaseHolderId,
     enabled: env.SKILLS_AUTO_GEN_ENABLED ?? false,
     onEvent: (event) => {
@@ -5153,6 +5198,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) mailboxSyncWorker.start()
+  // Arm the on-demand sync seam in EVERY process (not just the workers
+  // service): the connect route's sync-on-connect and the `syncMailboxNow`
+  // tool both run in the API process, and single-instance sync needs no
+  // running poll timer. See mailbox-imap.md §Phase 2 → "On-demand sync".
+  setGlobalMailboxSyncDeps({ syncInstanceById: (id) => mailboxSyncWorker.syncInstanceById(id) })
 
   // ── External-sink relay (ingest outbox → ub.ingest.append.v1) ──
   // Drains ingest_outbox to each attached external sink; the sink cursor

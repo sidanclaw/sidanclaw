@@ -190,6 +190,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'imapGetMessage', description: 'Read a specific email from the company mailbox', classification: 'read', defaultPolicy: 'allow' },
     { name: 'imapSendMessage', description: "Send an email from the user's company mailbox", classification: 'write', defaultPolicy: 'ask' },
     { name: 'searchEmailArchive', description: 'Semantic search across the synced mailbox archive', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'syncMailboxNow', description: 'Pull new mail into the searchable archive now', classification: 'read', defaultPolicy: 'allow' },
   ],
   // Workspace Files — Q3 / company-brain §10. Note: this row is for
   // governance display (Settings ▸ Connectors, Assistant ▸ Tools) only.

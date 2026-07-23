@@ -38,6 +38,12 @@ export const ja: Dictionary = {
     errorTitle: "サインインが完了しませんでした",
     errorBody: "Use Brian に戻り、もう一度サインインをお試しください。",
   },
+  desktopConnectorConnected: {
+    title: "コネクターを接続しました",
+    body: "このタブを閉じて Use Brian に戻ってください。",
+    errorTitle: "接続が完了しませんでした",
+    errorBody: "Use Brian に戻り、もう一度接続をお試しください。",
+  },
   workspace: {
         brain: {
       knowledgeTitle: "ナレッジ ソース",
@@ -59,24 +65,6 @@ export const ja: Dictionary = {
       enabledLabel: "このアシスタントで有効",
       enabledHelp: "オフにすると、このアシスタントはこのソースの知識を参照しなくなります。他のアシスタントや共有ナレッジベースには影響しません。",
       enablementFailed: "このソースを更新できませんでした。もう一度お試しください。",
-    },
-    home: {
-      open: "開く",
-      comingSoon: "近日公開",
-      proBadge: "Pro",
-      alphaBadge: "α版",
-      contactForTrial: "トライアルはお問い合わせください",
-      trialEmailSubject: "トライアル申請: {app}",
-      miniApps: {
-        distribution: {
-          label: "フィード",
-          description: "SNS運用をサポート。X と Threads のアカウントをまとめて管理。",
-        },
-        views: {
-          label: "キャンバス",
-          description: "ブレインを土台にした Notion 風ページ。タスク・CRM・ワークフロー実行を見渡すテーブル/ボードビューも保存可能。",
-        },
-      },
     },
   },
   planGate: {
@@ -184,6 +172,10 @@ export const ja: Dictionary = {
     },
     confirmationApprove: "承認",
     confirmationDeny: "拒否",
+    confirmationDenyWithComment: "コメントを付けて拒否",
+    confirmationCommentPlaceholder: "アシスタントが修正できるようメモを追加（任意）",
+    confirmationCommentSubmit: "拒否を送信",
+    confirmationCommentCancel: "キャンセル",
     confirmationApproving: "実行中…",
     confirmationDone: "完了しました。{label} を実行しました。",
     confirmationFailed: "失敗しました。{label} を完了できませんでした。",
@@ -1549,12 +1541,15 @@ export const ja: Dictionary = {
         errGeneric: "ディレクトリに接続できませんでした。パスが存在し、サーバーから書き込み可能か確認してください。",
       },
       shopify: {
-        formHelp: "ストアの myshopify.com ドメインを入力してください。Shopify で接続するか、カスタムアプリの Admin API アクセストークンを貼り付けます。",
-        domainPlaceholder: "mystore.myshopify.com",
+        formHelp: "ストアのウェブサイトまたは myshopify.com ドメインを入力してください。Shopify で接続するか、カスタムアプリの Admin API アクセストークンを貼り付けます。",
+        domainPlaceholder: "yourstore.com",
+        detecting: "ストアのドメインを確認中...",
+        resolvedPrefix: "検出したストア: ",
+        resolveHint: "自動で検出できませんでした。myshopify.com ドメインを入力してください（Shopify 管理画面の「設定」>「ドメイン」で確認できます）。",
         oauthBtn: "Shopify で続行",
         orPasteToken: "または Admin API アクセストークンを貼り付け:",
         tokenPlaceholder: "shpat_...",
-        errDomain: "mystore.myshopify.com のような有効なストアドメインを入力してください。",
+        errDomain: "ストアのウェブサイト、または yourstore.myshopify.com のようなドメインを入力してください。",
         errSave: "ストアに接続できませんでした。ドメインとトークンを確認して、もう一度お試しください。",
       },
       imap: {
@@ -2064,7 +2059,20 @@ export const ja: Dictionary = {
       staged_write: "エージェントの変更リクエスト",
       staged_skill_creation: "新しいスキル",
       staged_skill_update: "スキルの更新",
+      workflow_refinement: "ワークフロー改善",
       browser_skill_send: "ブラウザ送信",
+    },
+    refinement: {
+      step: "ステップ {step}",
+      workflowMissing:
+        "対象のワークフローはこのワークスペースに存在しません。この提案は却下のみ可能です。",
+      stepMissing:
+        "対象のステップはワークフローに存在しません。この提案は却下のみ可能です。",
+    },
+    attachOffer: {
+      label: "このスキルを学習元の「{workflow}」のステップでも使えるようにする",
+      pickStep: "ステップを選択",
+      stepRequired: "ステップを選択するか、チェックを外して添付なしで承認してください。",
     },
     browserSkillSend: {
       deny: "拒否",
@@ -2352,6 +2360,9 @@ export const ja: Dictionary = {
     detail: {
       backToList: "すべてのワークフロー",
       notFound: "ワークフローが見つかりません",
+      learnedSkillsTitle: "このワークフローから学習したスキル",
+      learnedSkillsHint:
+        "このワークフローの実行から抽出されました。ここで使うには、ステップのスキル欄に追加してください。",
     },
     board: {
       triggerLabel: "トリガー",
@@ -2816,6 +2827,7 @@ export const ja: Dictionary = {
     taskStatus: {
       todo: "未着手",
       in_progress: "進行中",
+      in_review: "レビュー中",
       blocked: "ブロック中",
       done: "完了",
       archived: "アーカイブ済み",
@@ -3074,6 +3086,8 @@ export const ja: Dictionary = {
       rederivations: "再導出",
       blueprintLabel: "ブループリント",
       blueprintView: "表示",
+      learnedFromWorkflowLabel: "学習元のワークフロー",
+      learnedFromWorkflowView: "ワークフローを表示",
       verifiedAt: "承認日時",
       notVerified: "未承認",
       lastUsedLabel: "最終使用",
@@ -3189,6 +3203,7 @@ export const ja: Dictionary = {
         detailsUnavailable: "追加の詳細はありません。",
         openSkill: "スキルを開く",
         skillWhenToUse: "使用する場面",
+        skillContent: "スキルの内容",
         skillActive: "有効",
         skillSuggested: "提案中",
         kinds: {
@@ -3200,6 +3215,7 @@ export const ja: Dictionary = {
           knowledge: "ナレッジ",
           skill: "スキル",
           assistant: "アシスタント",
+          workflow: "ワークフロー",
         },
       },
     },
@@ -3240,7 +3256,7 @@ export const ja: Dictionary = {
         },
         talkToAssistants: {
           title: "アシスタントに話しかける",
-          body: "ブレインを活用する4つの方法。",
+          body: "ブレインを活用する3つの方法。",
           channel: {
             title: "チャネル",
             body: "Telegram、Slack、Discord でそのまま会話できます。",
@@ -3248,10 +3264,6 @@ export const ja: Dictionary = {
           api: {
             title: "Assistant API",
             body: "学習済みのAIを自分のアプリへ手軽に組み込み。",
-          },
-          miniApp: {
-            title: "ミニアプリ",
-            body: "ブレインを土台にした、目的特化のアプリケーション。",
           },
           workflow: {
             title: "ワークフロー",
@@ -3684,6 +3696,7 @@ export const ja: Dictionary = {
     tasks: "タスク",
     feed: "フィード",
     crm: "CRM",
+    browsers: "ブラウザ",
   },
   crmPage: {
     title: "CRM",
@@ -4534,7 +4547,6 @@ export const ja: Dictionary = {
     sectionsAriaLabel: "スタジオのセクション",
     sections: {
       assistants: "アシスタント",
-      miniApps: "ミニアプリ",
       connectors: "コネクタ",
       programmaticAccess: "プログラム連携",
       skills: "スキル",
@@ -5684,6 +5696,18 @@ export const ja: Dictionary = {
       active: "ライブブラウザが動作中",
       watch: "見る",
       unnamedTask: "ブラウザタスク",
+    },
+    // Browsers operator surface: the left session rail + its index prompt.
+    sessions: {
+      railTitle: "ライブセッション",
+      railEmpty: "ライブセッションはまだありません",
+      liveCount: "{count}件が動作中",
+      selectTitle: "ライブブラウザを見る",
+      selectHint:
+        "左のセッションを選んで見るか操作を引き継ぐか、アシスタントがブラウザを開くのを待ちます。",
+      statusRunning: "実行中",
+      statusPaused: "一時停止",
+      unnamed: "ブラウザセッション",
     },
     connectBrowser: {
       title: "マイブラウザ",
