@@ -22,7 +22,12 @@ export type ExtensionPairResult =
 
 export type ExtensionMessenger = (extensionId: string, message: unknown) => Promise<unknown>;
 
-export const EXTENSION_ID = process.env.NEXT_PUBLIC_BROWSER_EXTENSION_ID ?? "";
+/**
+ * Module-local on purpose. Every caller reaches it through the `extensionId`
+ * option's default, and anything wanting a different build passes one. An
+ * export would only invite a second opinion on which extension we talk to.
+ */
+const EXTENSION_ID = process.env.NEXT_PUBLIC_BROWSER_EXTENSION_ID ?? "";
 
 type ChromeRuntime = {
   sendMessage?: (id: string, message: unknown, cb: (response: unknown) => void) => void;
