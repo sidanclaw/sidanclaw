@@ -5704,6 +5704,12 @@ export const ja: Dictionary = {
       step2Title: "2. アカウントとペアリング",
       step2Body:
         "ペアリングコードを生成し、リレーアドレスと一緒に拡張機能のポップアップに貼り付けます。",
+      oneClickBody:
+        "このブラウザにUse Brian拡張機能がインストールされています。コピー不要で、ワンステップでアカウントに接続できます。",
+      oneClickCta: "このブラウザを接続",
+      oneClickConnecting: "接続中...",
+      oneClickFailed:
+        "拡張機能がペアリングを受け付けませんでした。下のコードをお使いいただくか、ページを再読み込みしてもう一度お試しください。",
       generate: "ペアリングコードを生成",
       generating: "生成中...",
       generateFailed: "ペアリングコードを生成できませんでした。もう一度お試しください。",
@@ -5713,6 +5719,14 @@ export const ja: Dictionary = {
       copy: "コピー",
       copied: "コピーしました",
       refresh: "状態を更新",
+      sidebarRow: {
+        connect: "自分のブラウザを接続",
+        connecting: "接続中...",
+        connected: "マイブラウザ",
+        connectedBadge: "接続済み",
+        connectAria: "自分の Chrome を Use Brian に接続します",
+        manageAria: "マイブラウザの接続を管理します",
+      },
     },
     profiles: {
       title: "ブラウザプロフィール",
