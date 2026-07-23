@@ -1,22 +1,28 @@
 /**
- * Local-filesystem stand-in for {@link GcsFilesClient}, used in dev / test when
- * `GCS_FILES_BUCKET` is unset (no bucket to provision). Stores each blob at
+ * Local-filesystem implementation of {@link GcsFilesClient}. It is used as the
+ * self-hosted application default when `LOCAL_FILES_DIR` is configured, and as
+ * the dev/test fallback when `GCS_FILES_BUCKET` is unset. Stores each blob at
  * `<baseDir>/<key>` with a sidecar `<...>.meta.json` carrying the mime + custom
  * metadata, so the workspace-file tools (`fileWrite`, `saveFileToBrain`, …)
  * work end-to-end without GCS — otherwise the whole file primitive is silently
  * disabled locally and the model can't actually save an uploaded file.
  *
- * **Not for production.** Cloud Run always sets `GCS_FILES_BUCKET`; the boot
- * wiring only reaches for this off Cloud Run (no `K_SERVICE`), so a
- * misconfigured prod fails safe instead of writing to ephemeral disk.
+ * Production use requires `LOCAL_FILES_DIR` to point at a durable mounted
+ * volume. Without an explicit path, boot only uses the ephemeral `/tmp`
+ * fallback off Cloud Run; Cloud Run remains fail-closed.
  */
 
-import { promises as fs, createWriteStream } from 'node:fs'
-import { PassThrough, type Writable } from 'node:stream'
+import { createWriteStream, mkdirSync, promises as fs, writeFileSync } from 'node:fs'
+import type { Writable } from 'node:stream'
+import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import type { GcsBlob, GcsFilesClient, GcsObjectMetadata } from './gcs-client.js'
 
 const DEFAULT_META: GcsObjectMetadata = { workspaceId: '', mime: 'application/octet-stream' }
+
+export function resolveLocalFilesBaseDir(configured?: string): string {
+  return path.resolve(configured?.trim() || path.join(tmpdir(), 'sidanclaw-files'))
+}
 
 export function createLocalFilesClient(opts: { baseDir: string }): GcsFilesClient {
   const { baseDir } = opts
@@ -90,18 +96,12 @@ export function createLocalFilesClient(opts: { baseDir: string }): GcsFilesClien
     },
 
     writeStream(key, opts): Writable {
-      // A PassThrough the caller pipes into; we set up the real file sink (and
-      // meta sidecar) asynchronously and forward into it. Dev/test only.
       const p = blobPath(key)
-      const pass = new PassThrough()
-      void (async () => {
-        await fs.mkdir(path.dirname(p), { recursive: true })
-        await fs.writeFile(metaPath(key), JSON.stringify(opts.metadata ?? { workspaceId: '', mime: opts.mime }))
-        const out = createWriteStream(p)
-        out.on('error', (e) => pass.destroy(e))
-        pass.pipe(out)
-      })().catch((e) => pass.destroy(e))
-      return pass
+      // Setup is synchronous so the returned stream is the actual file sink;
+      // its `finish` event therefore means bytes have reached the filesystem.
+      mkdirSync(path.dirname(p), { recursive: true })
+      writeFileSync(metaPath(key), JSON.stringify(opts.metadata ?? { workspaceId: '', mime: opts.mime }))
+      return createWriteStream(p)
     },
   }
 
