@@ -4,11 +4,17 @@
  *
  * Runs on whichever adapter is configured, via the shared `media/backend.ts`
  * seam: Gemini `inlineData` (`generateContent`) over AI Studio or Vertex, or
- * Qwen-VL (`image_url`) over DashScope. PDFs ride Gemini's native inlineData
- * reader; DashScope is image-only and refuses PDFs (Qwen-VL cannot ingest them
- * inline — see `media/backend.ts`). There is deliberately no local text
- * extraction (docs/architecture/engine/file-handling.md → "PDFs are passed
- * natively").
+ * Qwen-VL (`image_url`) / `qwen-long` (file-upload) over DashScope. PDFs ride
+ * Gemini's native inlineData reader or DashScope's `qwen-long` upload flow;
+ * images use Qwen-VL inline on either adapter.
+ *
+ * PDFs additionally have a local text-layer fallback (`extractPdfText`, via
+ * unpdf): when the configured adapter cannot distill the document — e.g. a
+ * DashScope endpoint without a `qwen-long` model returns "model not found" —
+ * the text layer is extracted locally instead of failing. It is a fallback,
+ * not the primary path: native distillation is preferred (it reads scanned
+ * pages and layout), and local extraction only runs when the adapter errors or
+ * returns empty text for a PDF.
  *
  * The module never reads env (per packages/core/CLAUDE.md) — the caller passes
  * either an AI Studio `apiKey` (back-compat) or an explicit adapter `backend`.
@@ -22,6 +28,7 @@ import type { TokenUsage } from '../providers/types.js'
 import type { MediaBackend } from '../media/backend.js'
 import { runMediaUnderstanding } from '../media/backend.js'
 import { aiStudioTransport } from '../providers/google-transport.js'
+import { extractPdfText } from './pdf-text.js'
 
 export type DistillOptions = {
   /** AI Studio key. Equivalent to a `google` backend over `aiStudioTransport`. */
@@ -67,16 +74,31 @@ export async function distillFileToText(
 ): Promise<DistillResult> {
   const backend: MediaBackend =
     options.backend ?? { kind: 'google', transport: aiStudioTransport(options.apiKey) }
+  const isPdf = input.mime === 'application/pdf'
 
-  return runMediaUnderstanding(backend, {
-    buffer: input.buffer,
-    mime: input.mime,
-    prompt: options.prompt ?? DEFAULT_PROMPT,
-    modality: 'document',
-    model: options.model ?? DEFAULT_MODEL,
-    maxOutputTokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-    timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    errorLabel: 'file distillation',
-    ...(options.fetchFn ? { fetchFn: options.fetchFn } : {}),
-  })
+  try {
+    const result = await runMediaUnderstanding(backend, {
+      buffer: input.buffer,
+      mime: input.mime,
+      prompt: options.prompt ?? DEFAULT_PROMPT,
+      modality: 'document',
+      model: options.model ?? DEFAULT_MODEL,
+      maxOutputTokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      errorLabel: 'file distillation',
+      ...(options.fetchFn ? { fetchFn: options.fetchFn } : {}),
+    })
+    // Native distillation produced text, or this is a non-PDF (images have no
+    // local fallback) — done. An empty PDF result falls through to the text
+    // layer below in case the adapter silently declined it.
+    if (result.text.trim() || !isPdf) return result
+  } catch (err) {
+    // The adapter couldn't distill this document. Only PDFs have a local
+    // fallback; anything else is a real failure the caller must see.
+    if (!isPdf) throw err
+  }
+
+  // Local text-layer fallback for PDFs (unpdf) — no adapter, no model call.
+  const text = await extractPdfText(input.buffer)
+  return { text, usage: null, model: 'local-pdf-text' }
 }

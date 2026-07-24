@@ -15,8 +15,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0",
     "@mozilla/readability": "^0.5.0",
-    "@use-brian/shared": "workspace:*",
     "@use-brian/brian-kb": "workspace:*",
+    "@use-brian/shared": "workspace:*",
     "docx": "^9.7.1",
     "e2b": "^2.32.0",
     "exceljs": "^4.4.0",
@@ -29,6 +29,7 @@
     "sharp": "^0.34.3",
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2",
+    "unpdf": "^1.6.2",
     "yjs": "13.6.31",
     "zod": "^3.24"
   },
