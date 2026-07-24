@@ -1100,8 +1100,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   // Media backend for file distillation + short-audio transcription. Google
   // (Gemini inlineData) via Vertex or AI Studio; a pure-Qwen deployment uses
-  // DashScope (Qwen-VL for documents, Qwen-ASR for audio). DashScope is
-  // image-only for documents — PDFs are refused there, see media/backend.ts.
+  // DashScope (Qwen-VL for images, qwen-long file-upload for PDFs/office docs,
+  // Qwen-ASR for audio). See media/backend.ts.
   const mediaBackend: MediaBackend = vertexTx
     ? { kind: 'google', transport: vertexTx }
     : env.GEMINI_API_KEY
