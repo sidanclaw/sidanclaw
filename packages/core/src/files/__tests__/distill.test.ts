@@ -55,11 +55,13 @@ describe('[COMP:files/distill] distillFileToText', () => {
     expect(result.text).toBe('')
   })
 
-  it('throws on a non-ok HTTP response', async () => {
+  it('throws on a non-ok HTTP response (no local fallback for images)', async () => {
+    // A PDF would degrade to the local text layer here; an image has no local
+    // fallback, so a non-ok distillation response must still surface as an error.
     const fetchFn = vi.fn(async () => mockResponse('nope', { status: 500 }))
     await expect(
       distillFileToText(
-        { buffer: Buffer.from('x'), mime: 'application/pdf' },
+        { buffer: Buffer.from('x'), mime: 'image/png' },
         { apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch },
       ),
     ).rejects.toThrow(/distillation failed/i)
