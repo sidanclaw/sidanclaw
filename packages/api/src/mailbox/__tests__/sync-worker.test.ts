@@ -160,15 +160,16 @@ function instanceRow(over: Partial<ConnectorInstance> = {}): ConnectorInstance {
 function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientLike; instance?: ConnectorInstance }) {
   const instance = over.instance ?? instanceRow()
   const { store, configs } = makeInstanceStore(instance)
-  const insertMessage =
-    (over.insertMessage as never) ??
-    vi.fn(async (_input: EmailArchiveMessageInput) => ({ inserted: true, messageId: 'am-1', segmentCount: 1 }))
+  const insertMessage = vi.fn(async (_input: EmailArchiveMessageInput) => ({ inserted: true, messageId: 'am-1', segmentCount: 1 }))
   const deleteFolder = vi.fn(async (_instanceId: string, _folder: string) => 0)
   const worker = createMailboxSyncWorker({
     connectorInstanceStore: store,
     resolvePersonalWorkspaceId: async () => 'ws-1',
     sessions: createMailboxSessionCache({ createClient: () => over.client }),
-    insertMessage: insertMessage as never,
+    // A test may override the insert (e.g. to reject one message); the returned
+    // `insertMessage` stays the typed mock for `.mock` assertions in the
+    // non-override cases (override tests assert on their own vi.fn).
+    insertMessage: (over.insertMessage ?? insertMessage) as never,
     deleteFolder: deleteFolder as never,
     ...('brain' in over ? { brain: over.brain } : {}),
     backfillChunk: over.backfillChunk,
