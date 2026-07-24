@@ -1923,13 +1923,19 @@ export function chatRoutes(options: WebChatOptions): Router {
         const validFiles = fetched.filter((f): f is NonNullable<typeof f> => f !== null)
 
         if (validFiles.length > 0) {
-          // Does the model this turn resolves to read `application/pdf` inline?
-          // Gemini (inlineData) and Anthropic do; the OpenAI-compatible
+          // Does the model this turn actually runs on read `application/pdf`
+          // inline? Gemini (inlineData) and Anthropic do; the OpenAI-compatible
           // providers (Qwen/DashScope) don't — they reject a PDF sent as an
-          // image_url with HTTP 400. Routing is per-model, so this is resolved
-          // from the requested model's registry row, not the deployment.
-          const turnProviderKey = registryRow(resolveModel(requestedModel, userPlan, 'ok'))?.provider ?? ''
-          const providerReadsPdfInline = !turnProviderKey.startsWith('openai-compat')
+          // image_url with HTTP 400. `resolveModel` returns the tier default
+          // (a Gemini id), but a Qwen-only deployment SERVES a substitute via
+          // `ensureServableModel` — so the served model, not the tier default,
+          // names the real provider. Missing that substitution left the gate
+          // seeing `gemini` and skipping distillation on Qwen deployments.
+          const resolvedTierModel = resolveModel(requestedModel, userPlan, 'ok')
+          const servedModel = options.configuredProviders
+            ? ensureServableModel(resolvedTierModel, options.configuredProviders)
+            : resolvedTierModel
+          const providerReadsPdfInline = !(registryRow(servedModel)?.provider ?? '').startsWith('openai-compat')
           const textParts: string[] = []
           for (const file of validFiles) {
             const isImage = file.mimeType.startsWith('image/')
