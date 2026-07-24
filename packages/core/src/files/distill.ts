@@ -4,10 +4,10 @@
  *
  * Runs on whichever adapter is configured, via the shared `media/backend.ts`
  * seam: Gemini `inlineData` (`generateContent`) over AI Studio or Vertex, or
- * Qwen-VL (`image_url`) over DashScope. PDFs ride Gemini's native inlineData
- * reader; DashScope is image-only and refuses PDFs (Qwen-VL cannot ingest them
- * inline — see `media/backend.ts`). There is deliberately no local text
- * extraction (docs/architecture/engine/file-handling.md → "PDFs are passed
+ * Qwen-VL (`image_url`) / `qwen-long` (file-upload) over DashScope. PDFs ride
+ * Gemini's native inlineData reader or DashScope's `qwen-long` upload flow;
+ * images use Qwen-VL inline on either adapter. There is deliberately no local
+ * text extraction (docs/architecture/engine/file-handling.md → "PDFs are passed
  * natively").
  *
  * The module never reads env (per packages/core/CLAUDE.md) — the caller passes

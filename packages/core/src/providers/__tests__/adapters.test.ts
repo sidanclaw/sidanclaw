@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { aiStudioTransport, vertexTransport, AI_STUDIO_BASE_URL } from '../google-transport.js'
 import { cachedTokenSource, metadataTokenSource, serviceAccountTokenSource } from '../google-auth.js'
 import { createGeminiProvider } from '../gemini.js'
-import { runMediaUnderstanding, DASHSCOPE_VISION_MODEL, DASHSCOPE_ASR_MODEL } from '../../media/backend.js'
+import { runMediaUnderstanding, DASHSCOPE_VISION_MODEL, DASHSCOPE_ASR_MODEL, DASHSCOPE_LONG_MODEL } from '../../media/backend.js'
 import { createVertexEmbedder, createDashScopeEmbedder, VERTEX_EMBEDDING_MODEL_ID } from '../../embeddings/adapters.js'
 import { GEMINI_EMBEDDING_MODEL_ID } from '../../embeddings/embedder.js'
 import { stripUnsignedToolUses, modelRequiresToolSignatures } from '../../engine/tool-pairing.js'
@@ -123,11 +123,49 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
     expect(audioContent.some((p) => p.type === 'text')).toBe(false)
   })
 
-  it('refuses a PDF on DashScope rather than sending something Qwen-VL misreads', async () => {
+  it('uploads a PDF via the Files API and distills it with qwen-long', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    let callIndex = 0
+    const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url)
+      calls.push({ url: u, init })
+      if (u.endsWith('/files')) {
+        return new Response(JSON.stringify({ id: 'file-fe-abc123' }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: '# Extracted\n\nbody text' } }],
+        usage: { prompt_tokens: 30, completion_tokens: 12 },
+      }), { status: 200 })
+    })
+
+    const backend = { kind: 'dashscope' as const, apiKey: 'k', baseUrl: 'https://ds.test/v1' }
+    const res = await runMediaUnderstanding(backend, req({
+      buffer: Buffer.from('%PDF-1.4 fake'), mime: 'application/pdf', modality: 'document', fetchFn,
+    }) as never)
+
+    expect(calls[0].url).toBe('https://ds.test/v1/files')
+    const uploadHeaders = calls[0].init?.headers as Record<string, string>
+    expect(uploadHeaders.Authorization).toBe('Bearer k')
+
+    expect(calls[1].url).toBe('https://ds.test/v1/chat/completions')
+    const chatBody = JSON.parse(calls[1].init!.body as string)
+    expect(chatBody.model).toBe(DASHSCOPE_LONG_MODEL)
+    expect(chatBody.messages[0]).toEqual({ role: 'system', content: 'fileid://file-fe-abc123' })
+    expect(chatBody.messages[1].role).toBe('user')
+
+    expect(res.text).toBe('# Extracted\n\nbody text')
+    expect(res.model).toBe(DASHSCOPE_LONG_MODEL)
+    expect(res.usage).toEqual({ inputTokens: 30, outputTokens: 12 })
+  })
+
+  it('throws an actionable error when the DashScope file upload fails', async () => {
+    const fetchFn = vi.fn(async () => new Response('quota exceeded', { status: 429 }))
+    const backend = { kind: 'dashscope' as const, apiKey: 'k', baseUrl: 'https://ds.test/v1' }
     await expect(
-      runMediaUnderstanding({ kind: 'dashscope', apiKey: 'k', baseUrl: 'https://ds.test/v1' },
-        req({ buffer: Buffer.from('%PDF'), mime: 'application/pdf', modality: 'document' }) as never),
-    ).rejects.toThrow(/qwen-long|image\/\* only/i)
+      runMediaUnderstanding(backend, req({
+        buffer: Buffer.from('%PDF'), mime: 'application/pdf', modality: 'document', fetchFn,
+      }) as never),
+    ).rejects.toThrow(/file upload failed.*429/s)
   })
 })
 

@@ -90,4 +90,34 @@ describe('[COMP:files/distill] distillFileToText', () => {
     expect(result.text).toBe('visible text')
     expect(fetchFn).toHaveBeenCalledOnce()
   })
+
+  it('distills a PDF on DashScope via the qwen-long file-upload flow', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url)
+      calls.push({ url: u, init })
+      if (u.endsWith('/files')) {
+        return mockResponse({ id: 'file-fe-xyz' })
+      }
+      return mockResponse({
+        choices: [{ message: { content: '# PDF content' } }],
+        usage: { prompt_tokens: 40, completion_tokens: 15 },
+      })
+    })
+
+    const result = await distillFileToText(
+      { buffer: Buffer.from('%PDF-1.4 fake'), mime: 'application/pdf' },
+      {
+        backend: { kind: 'dashscope', apiKey: 'test-key', baseUrl: 'https://dashscope.example/v1' },
+        fetchFn: fetchFn as unknown as typeof fetch,
+      },
+    )
+
+    expect(result.text).toBe('# PDF content')
+    expect(result.model).toBe('qwen-long')
+    expect(result.usage).toEqual({ inputTokens: 40, outputTokens: 15 })
+    expect(calls[0].url).toBe('https://dashscope.example/v1/files')
+    const chatBody = JSON.parse(calls[1].init!.body as string)
+    expect(chatBody.messages[0].content).toBe('fileid://file-fe-xyz')
+  })
 })
