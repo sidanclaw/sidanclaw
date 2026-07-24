@@ -4,7 +4,7 @@ import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels } from '../db/sessions.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, type MediaBackend } from '@use-brian/core'
+import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, distillFileToText, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, type MediaBackend } from '@use-brian/core'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -357,6 +357,15 @@ type WebChatOptions = {
     apiKey: string
     backend?: MediaBackend
     model?: string
+  }
+  /** Distill inline PDF attachments to text before the model call, for chat
+   *  providers that cannot ingest `application/pdf` natively (DashScope/Qwen
+   *  rejects a PDF sent as an image with "image format is illegal"). Only
+   *  Gemini reads PDFs inline, so boot leaves this undefined on Google
+   *  deployments and sets it (to the DashScope media backend) on Qwen-only
+   *  ones. See docs/architecture/engine/provider-abstraction.md → "Adapters". */
+  inlineDocumentDistill?: {
+    backend: MediaBackend
   }
   capabilityStore: CapabilityStore
   /** Workspace files store (Q3 §10). When set + the assistant has the `files`
@@ -1914,6 +1923,19 @@ export function chatRoutes(options: WebChatOptions): Router {
         const validFiles = fetched.filter((f): f is NonNullable<typeof f> => f !== null)
 
         if (validFiles.length > 0) {
+          // Does the model this turn actually runs on read `application/pdf`
+          // inline? Gemini (inlineData) and Anthropic do; the OpenAI-compatible
+          // providers (Qwen/DashScope) don't — they reject a PDF sent as an
+          // image_url with HTTP 400. `resolveModel` returns the tier default
+          // (a Gemini id), but a Qwen-only deployment SERVES a substitute via
+          // `ensureServableModel` — so the served model, not the tier default,
+          // names the real provider. Missing that substitution left the gate
+          // seeing `gemini` and skipping distillation on Qwen deployments.
+          const resolvedTierModel = resolveModel(requestedModel, userPlan, 'ok')
+          const servedModel = options.configuredProviders
+            ? ensureServableModel(resolvedTierModel, options.configuredProviders)
+            : resolvedTierModel
+          const providerReadsPdfInline = !(registryRow(servedModel)?.provider ?? '').startsWith('openai-compat')
           const textParts: string[] = []
           for (const file of validFiles) {
             const isImage = file.mimeType.startsWith('image/')
@@ -1935,7 +1957,40 @@ export function chatRoutes(options: WebChatOptions): Router {
               // garbage to Gemini as bogus base64 — that produces a silent
               // empty-turn ("I couldn't generate a response").
               const match = file.content.match(/^data:[^;]+;base64,(.+)$/)
-              if (match) {
+              if (!match) {
+                textParts.push(
+                  `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[This ${isPdf ? 'PDF' : 'image'} was uploaded before the current file pipeline and can't be read. Ask the user to re-upload it.]</attached_file>`,
+                )
+              } else if (isPdf && options.inlineDocumentDistill && !providerReadsPdfInline) {
+                // This provider can't ingest a PDF inline — only Gemini reads
+                // `application/pdf` as inlineData; the OpenAI-compatible
+                // adapter maps every image block to an `image_url` data URL,
+                // and Qwen-VL rejects a PDF there ("The image format is
+                // illegal and cannot be opened"). Distill to Markdown text
+                // just-in-time via the configured media backend (DashScope's
+                // qwen-long upload flow) and attach the text, mirroring the
+                // audio transcribe-and-inline path below.
+                const buffer = Buffer.from(match[1], 'base64')
+                let distilled: string | undefined
+                let distillFailure: string | undefined
+                try {
+                  const result = await distillFileToText(
+                    { buffer, mime: file.mimeType },
+                    { backend: options.inlineDocumentDistill.backend },
+                  )
+                  distilled = result.text.trim() || undefined
+                } catch (err) {
+                  distillFailure = err instanceof Error ? err.message : String(err)
+                }
+                textParts.push(
+                  distilled
+                    ? `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">\n${distilled}\n</attached_file>`
+                    : `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[PDF text extraction ${distillFailure ? `failed: ${distillFailure}` : 'returned no text'}. Tell the user this plainly; do NOT claim it is still processing or that you will retry.]</attached_file>`,
+                )
+                if (!distilled && distillFailure) {
+                  sendEvent('notice', { kind: 'distillation_unavailable', message: distillFailure })
+                }
+              } else {
                 userContentBlocks.push({
                   type: 'image',
                   mimeType: file.mimeType,
@@ -1943,10 +1998,6 @@ export function chatRoutes(options: WebChatOptions): Router {
                 })
                 textParts.push(
                   `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[${isPdf ? 'pdf' : 'image'}]</attached_file>`,
-                )
-              } else {
-                textParts.push(
-                  `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[This ${isPdf ? 'PDF' : 'image'} was uploaded before the current file pipeline and can't be read. Ask the user to re-upload it.]</attached_file>`,
                 )
               }
             } else if (isAudio) {

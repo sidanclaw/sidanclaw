@@ -21,10 +21,11 @@
  * ## The one real asymmetry: PDFs on DashScope
  *
  * Gemini ingests `application/pdf` natively as `inlineData`. Qwen-VL is
- * image-oriented and does not; Alibaba's documented path for documents is the
- * separate `qwen-long` file-upload flow, not an inline data URI. Rather than
- * silently send a PDF that comes back as garbage, `dashscope` rejects non-image
- * document mimes with an actionable error. Images distill normally.
+ * image-oriented and does not; non-image documents ride the `qwen-long`
+ * file-upload flow instead: the buffer is uploaded via the OpenAI-compatible
+ * Files API (`POST /files`, `purpose: "file-extract"`), and the returned
+ * `file-id` is referenced as `fileid://<id>` in the system message of a
+ * `qwen-long` chat completion. Images still distill via Qwen-VL inline.
  *
  * See docs/architecture/engine/provider-abstraction.md → "Adapters".
  */
@@ -35,7 +36,18 @@ import sharp from 'sharp'
 
 export type MediaBackend =
   | { kind: 'google'; transport: GoogleTransport }
-  | { kind: 'dashscope'; apiKey: string; baseUrl: string }
+  | {
+      kind: 'dashscope'
+      apiKey: string
+      baseUrl: string
+      /** Model id overrides — a deployment's Model Studio catalog varies by
+       *  region and over time, so the built-in defaults (`qwen-vl-max` /
+       *  `qwen3-asr-flash` / `qwen-long`) are not guaranteed to exist on every
+       *  endpoint. Unset ⇒ the default constant. */
+      visionModel?: string
+      asrModel?: string
+      longModel?: string
+    }
 
 /** Which sense the model is being asked to use — selects the DashScope model + content part. */
 export type MediaModality = 'document' | 'audio'
@@ -67,6 +79,7 @@ export type MediaResult = {
 /** DashScope substitutes these — a Gemini model id is meaningless there. */
 export const DASHSCOPE_VISION_MODEL = 'qwen-vl-max'
 export const DASHSCOPE_ASR_MODEL = 'qwen3-asr-flash'
+export const DASHSCOPE_LONG_MODEL = 'qwen-long'
 
 // DashScope's OpenAI-compatible endpoint rejects request bodies around 10 MB.
 // Leave room for base64 expansion and JSON/prompt overhead rather than relying
@@ -185,79 +198,110 @@ type OpenAIResponse = {
 const SUPPORTED_AUDIO = /^audio\//
 
 /**
- * Qwen-VL takes images only. `application/pdf` and office mimes need the
- * `qwen-long` upload flow instead — see the module header.
+ * Qwen-VL takes images only. Non-image documents (PDF, office) ride the
+ * `qwen-long` file-upload flow instead — see the module header.
  */
 const SUPPORTED_IMAGE = /^image\//
+
+type DashScopeFileUploadResponse = { id?: string }
+
+async function uploadDashScopeFile(
+  backend: Extract<MediaBackend, { kind: 'dashscope' }>,
+  buffer: Buffer,
+  mime: string,
+  fetchFn: typeof fetch,
+  signal: AbortSignal,
+): Promise<string> {
+  const form = new FormData()
+  form.append('file', new Blob([buffer], { type: mime }), `document.${mime.split('/')[1] ?? 'bin'}`)
+  form.append('purpose', 'file-extract')
+
+  const res = await fetchFn(`${backend.baseUrl}/files`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${backend.apiKey}` },
+    body: form,
+    signal,
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(
+      `DashScope file upload failed (HTTP ${res.status}): ${detail.slice(0, 300)}`,
+    )
+  }
+  const payload = (await res.json()) as DashScopeFileUploadResponse
+  if (!payload.id) throw new Error('DashScope file upload: response missing file id')
+  return payload.id
+}
 
 async function runDashScope(
   backend: Extract<MediaBackend, { kind: 'dashscope' }>,
   req: MediaRequest,
 ): Promise<MediaResult> {
   const fetchFn = req.fetchFn ?? fetch
-  let model: string
-  let content: unknown[]
-
-  if (req.modality === 'audio') {
-    if (!SUPPORTED_AUDIO.test(req.mime)) {
-      throw new Error(`DashScope transcription expects an audio/* mime, got "${req.mime}".`)
-    }
-    model = DASHSCOPE_ASR_MODEL
-    const base64 = req.buffer.toString('base64')
-    // `qwen3-asr-flash` is a DEDICATED ASR task model, not a chat model with
-    // ears: any text part in the same message is rejected outright with
-    // `InternalError.Algo.InvalidParameter: The dedicated task 'asr' ... does
-    // not support this input`, whatever the audio is. So `req.prompt` is
-    // deliberately dropped here — there is no prompt channel to honour, and
-    // sending one fails 100% of transcriptions (verified 2026-07-21: audio-only
-    // 200, text+audio 400, at both 8s and 5min, `format` irrelevant).
-    content = [
-      // OpenAI-compatible audio part. `format` is the bare subtype
-      // (`audio/ogg` → `ogg`), which is what the API expects.
-      {
-        type: 'input_audio',
-        input_audio: { data: `data:${req.mime};base64,${base64}`, format: req.mime.split('/')[1] ?? 'wav' },
-      },
-    ]
-  } else {
-    if (!SUPPORTED_IMAGE.test(req.mime)) {
-      throw new Error(
-        `DashScope document distillation supports image/* only (got "${req.mime}"). ` +
-        `Qwen-VL cannot ingest PDFs or office documents as inline data — those need the ` +
-        `qwen-long upload flow, which is not implemented. Use LLM_ADAPTER=google-ai-studio ` +
-        `or vertex for this file type, or convert it to images first.`,
-      )
-    }
-    model = DASHSCOPE_VISION_MODEL
-    const image = await prepareDashScopeImage(req.buffer, req.mime)
-    const base64 = image.buffer.toString('base64')
-    content = [
-      { type: 'text', text: req.prompt },
-      { type: 'image_url', image_url: { url: `data:${image.mime};base64,${base64}` } },
-    ]
-  }
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), req.timeoutMs)
-  let response: Response
   try {
-    response = await fetchFn(`${backend.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${backend.apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content }],
-        max_tokens: req.maxOutputTokens,
-        temperature: 0,
-      }),
-      signal: controller.signal,
-    })
+    if (req.modality === 'audio') {
+      if (!SUPPORTED_AUDIO.test(req.mime)) {
+        throw new Error(`DashScope transcription expects an audio/* mime, got "${req.mime}".`)
+      }
+      const base64 = req.buffer.toString('base64')
+      const content = [
+        {
+          type: 'input_audio',
+          input_audio: { data: `data:${req.mime};base64,${base64}`, format: req.mime.split('/')[1] ?? 'wav' },
+        },
+      ]
+      return await dashScopeChat(fetchFn, backend, backend.asrModel ?? DASHSCOPE_ASR_MODEL, [{ role: 'user', content }], req)
+    }
+
+    if (SUPPORTED_IMAGE.test(req.mime)) {
+      const image = await prepareDashScopeImage(req.buffer, req.mime)
+      const base64 = image.buffer.toString('base64')
+      const content = [
+        { type: 'text', text: req.prompt },
+        { type: 'image_url', image_url: { url: `data:${image.mime};base64,${base64}` } },
+      ]
+      return await dashScopeChat(fetchFn, backend, backend.visionModel ?? DASHSCOPE_VISION_MODEL, [{ role: 'user', content }], req)
+    }
+
+    const fileId = await uploadDashScopeFile(backend, req.buffer, req.mime, fetchFn, controller.signal)
+    return await dashScopeChat(
+      fetchFn, backend, backend.longModel ?? DASHSCOPE_LONG_MODEL,
+      [
+        { role: 'system', content: `fileid://${fileId}` },
+        { role: 'user', content: req.prompt },
+      ],
+      req,
+    )
   } finally {
     clearTimeout(timer)
   }
+}
+
+type DashScopeMessage = { role: string; content: unknown }
+
+async function dashScopeChat(
+  fetchFn: typeof fetch,
+  backend: Extract<MediaBackend, { kind: 'dashscope' }>,
+  model: string,
+  messages: DashScopeMessage[],
+  req: MediaRequest,
+): Promise<MediaResult> {
+  const response = await fetchFn(`${backend.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${backend.apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      max_tokens: req.maxOutputTokens,
+      temperature: 0,
+    }),
+  })
 
   if (!response.ok) {
     const detail = await response.text().catch(() => '')

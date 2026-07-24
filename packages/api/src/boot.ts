@@ -508,6 +508,14 @@ export interface OpenApiEnv {
   // endpoint. Set to the Beijing host (https://dashscope.aliyuncs.com/compatible-mode/v1)
   // for a mainland-China deployment. Applies to Qwen chat, embeddings, and media.
   DASHSCOPE_BASE_URL?: string
+  // Optional DashScope media-model id overrides. The Model Studio catalog
+  // varies by region/endpoint and over time, so the built-in defaults
+  // (qwen-vl-max / qwen3-asr-flash / qwen-long) may not exist on a given
+  // endpoint — a mismatch surfaces as a "model not found" error on image /
+  // audio / PDF understanding. Unset ⇒ the default.
+  DASHSCOPE_VISION_MODEL?: string
+  DASHSCOPE_ASR_MODEL?: string
+  DASHSCOPE_LONG_MODEL?: string
   // Optional connector / channel config (closed-secret gated; open passes none).
   GOOGLE_CLIENT_ID?: string
   CHANNEL_CREDENTIAL_KEY?: string
@@ -1100,13 +1108,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   // Media backend for file distillation + short-audio transcription. Google
   // (Gemini inlineData) via Vertex or AI Studio; a pure-Qwen deployment uses
-  // DashScope (Qwen-VL for documents, Qwen-ASR for audio). DashScope is
-  // image-only for documents — PDFs are refused there, see media/backend.ts.
+  // DashScope (Qwen-VL for images, qwen-long file-upload for PDFs/office docs,
+  // Qwen-ASR for audio). See media/backend.ts.
   const mediaBackend: MediaBackend = vertexTx
     ? { kind: 'google', transport: vertexTx }
     : env.GEMINI_API_KEY
       ? { kind: 'google', transport: aiStudioTransport(env.GEMINI_API_KEY) }
-      : { kind: 'dashscope', apiKey: env.DASHSCOPE_API_KEY ?? '', baseUrl: dashscopeBaseUrl }
+      : {
+          kind: 'dashscope',
+          apiKey: env.DASHSCOPE_API_KEY ?? '',
+          baseUrl: dashscopeBaseUrl,
+          ...(env.DASHSCOPE_VISION_MODEL ? { visionModel: env.DASHSCOPE_VISION_MODEL } : {}),
+          ...(env.DASHSCOPE_ASR_MODEL ? { asrModel: env.DASHSCOPE_ASR_MODEL } : {}),
+          ...(env.DASHSCOPE_LONG_MODEL ? { longModel: env.DASHSCOPE_LONG_MODEL } : {}),
+        }
 
   const voiceTranscription = {
     enabled: env.VOICE_TRANSCRIPTION_ENABLED ?? false,
@@ -1114,6 +1129,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     backend: mediaBackend,
     model: env.VOICE_TRANSCRIPTION_MODEL,
   }
+  // Only Gemini/Anthropic ingest `application/pdf` inline; the OpenAI-compatible
+  // adapter (Qwen) sends every image block as an `image_url` and rejects a PDF.
+  // The media backend is always available for distillation; chat.ts decides
+  // per-turn whether the resolved model needs it (routing is per-model, so this
+  // can't be gated on the deployment).
+  const inlineDocumentDistill = { backend: mediaBackend }
   const memoryStore = createDbMemoryStore()
   const brainCandidateStore = ports.brainCandidateStore
   const memoryRecallEventsStore = createMemoryRecallEventsStore()
@@ -3565,6 +3586,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     planStore,
     jobStore,
     voiceTranscription,
+    inlineDocumentDistill,
     connectorActionStore,
     episodesStore,
     buildConnectorActionAudit: ports.buildConnectorActionAudit,
