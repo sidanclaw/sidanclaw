@@ -158,6 +158,29 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
     expect(res.usage).toEqual({ inputTokens: 30, outputTokens: 12 })
   })
 
+  it('uses the longModel override for the qwen-long file-extract call', async () => {
+    // A deployment whose Model Studio catalog lacks the default `qwen-long`
+    // sets DASHSCOPE_LONG_MODEL; without honouring it the call 400s with
+    // "model not found".
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url)
+      calls.push({ url: u, init })
+      if (u.endsWith('/files')) return new Response(JSON.stringify({ id: 'file-x' }), { status: 200 })
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 })
+    })
+
+    const backend = { kind: 'dashscope' as const, apiKey: 'k', baseUrl: 'https://ds.test/v1', longModel: 'qwen-long-custom' }
+    const res = await runMediaUnderstanding(backend, req({
+      buffer: Buffer.from('%PDF-1.4 fake'), mime: 'application/pdf', modality: 'document', fetchFn,
+    }) as never)
+
+    const chatBody = JSON.parse(calls[1].init!.body as string)
+    expect(chatBody.model).toBe('qwen-long-custom')
+    expect(chatBody.model).not.toBe(DASHSCOPE_LONG_MODEL)
+    expect(res.model).toBe('qwen-long-custom')
+  })
+
   it('throws an actionable error when the DashScope file upload fails', async () => {
     const fetchFn = vi.fn(async () => new Response('quota exceeded', { status: 429 }))
     const backend = { kind: 'dashscope' as const, apiKey: 'k', baseUrl: 'https://ds.test/v1' }

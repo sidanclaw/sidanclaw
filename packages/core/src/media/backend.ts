@@ -36,7 +36,18 @@ import sharp from 'sharp'
 
 export type MediaBackend =
   | { kind: 'google'; transport: GoogleTransport }
-  | { kind: 'dashscope'; apiKey: string; baseUrl: string }
+  | {
+      kind: 'dashscope'
+      apiKey: string
+      baseUrl: string
+      /** Model id overrides — a deployment's Model Studio catalog varies by
+       *  region and over time, so the built-in defaults (`qwen-vl-max` /
+       *  `qwen3-asr-flash` / `qwen-long`) are not guaranteed to exist on every
+       *  endpoint. Unset ⇒ the default constant. */
+      visionModel?: string
+      asrModel?: string
+      longModel?: string
+    }
 
 /** Which sense the model is being asked to use — selects the DashScope model + content part. */
 export type MediaModality = 'document' | 'audio'
@@ -242,7 +253,7 @@ async function runDashScope(
           input_audio: { data: `data:${req.mime};base64,${base64}`, format: req.mime.split('/')[1] ?? 'wav' },
         },
       ]
-      return await dashScopeChat(fetchFn, backend, DASHSCOPE_ASR_MODEL, [{ role: 'user', content }], req)
+      return await dashScopeChat(fetchFn, backend, backend.asrModel ?? DASHSCOPE_ASR_MODEL, [{ role: 'user', content }], req)
     }
 
     if (SUPPORTED_IMAGE.test(req.mime)) {
@@ -252,12 +263,12 @@ async function runDashScope(
         { type: 'text', text: req.prompt },
         { type: 'image_url', image_url: { url: `data:${image.mime};base64,${base64}` } },
       ]
-      return await dashScopeChat(fetchFn, backend, DASHSCOPE_VISION_MODEL, [{ role: 'user', content }], req)
+      return await dashScopeChat(fetchFn, backend, backend.visionModel ?? DASHSCOPE_VISION_MODEL, [{ role: 'user', content }], req)
     }
 
     const fileId = await uploadDashScopeFile(backend, req.buffer, req.mime, fetchFn, controller.signal)
     return await dashScopeChat(
-      fetchFn, backend, DASHSCOPE_LONG_MODEL,
+      fetchFn, backend, backend.longModel ?? DASHSCOPE_LONG_MODEL,
       [
         { role: 'system', content: `fileid://${fileId}` },
         { role: 'user', content: req.prompt },
